@@ -1,0 +1,52 @@
+# --- Pioneer / AlphaTheta firmware artifacts (never commit) ---------------
+*.UPD
+*.upd
+*.iso
+*.bin
+*.mot
+*.cramfs
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.xz
+
+# Firmware keys (never commit, even if you drop one here)
+keys/*.key
+keys/*.bin
+*.key
+
+# Extracted firmware tree (you generate this locally)
+/extracted/*
+!/extracted/README.md
+
+# Pioneer / Denon binaries
+rbp
+rbp-*
+!tools/patch-rbp/**
+
+# --- Built shims / objects -------------------------------------------------
+*.o
+*.so
+*.so.*
+*.a
+*.elf
+
+# --- Rust ------------------------------------------------------------------
+target/
+
+# --- Local scratch ---------------------------------------------------------
+/work/*
+!/work/README.md
+
+# --- OS / editor junk ------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# built diagnostic binaries
+/tools/touchdump
+/scripts/shims/seqinject2
+/scripts/shims/udplog
+/scripts/device/timeout
+__pycache__/

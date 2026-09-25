@@ -1,0 +1,890 @@
+diff --git a/lib/direct/modules.c b/lib/direct/modules.c
+index 57e6382..75efda3 100644
+--- a/lib/direct/modules.c
++++ b/lib/direct/modules.c
+@@ -137,6 +137,7 @@ direct_modules_register( DirectModuleDir *directory,
+      entry->disabled  = suppress_module( name );
+ 
+      if (abi_version != directory->abi_version) {
++          { FILE*f=fopen("/tmp/dfbdig4.log","a"); if(f){fprintf(f,"  ABI mismatch: got %d want %d\n", abi_version, directory->abi_version); fclose(f);} }
+           D_ERROR( "Direct/Modules: ABI version of '%s' (%d) does not match %d!\n",
+                    entry->file ? entry->file : entry->name,
+                    abi_version, directory->abi_version );
+@@ -210,8 +211,10 @@ direct_modules_explore_directory( DirectModuleDir *directory )
+      buf = alloca( strlen(pathfront) + 1 + strlen(path) + 1 ); /* pre, slash, post, 0 */
+      sprintf( buf, "%s/%s", pathfront, path );
+ 
++     { FILE*f=fopen("/tmp/dfbdig4.log","a"); if(f){fprintf(f,"explore dir: %s\n", buf); fclose(f);} }
+      dir = opendir( buf );
+      if (!dir) {
++          { FILE*f=fopen("/tmp/dfbdig4.log","a"); if(f){fprintf(f,"  !! opendir failed: %s\n", strerror(errno)); fclose(f);} }
+           D_DEBUG_AT( Direct_Modules, "  -> ERROR opening directory: %s!\n", strerror(errno) );
+           return 0;
+      }
+@@ -248,6 +251,7 @@ direct_modules_explore_directory( DirectModuleDir *directory )
+           directory->loading = module;
+ 
+           if ((handle = open_module( module )) != NULL) {
++               { FILE*f=fopen("/tmp/dfbdig5.log","a"); if(f){fprintf(f,"  module '%s' loaded=%d\n", module->file?module->file:"?", module->loaded); fclose(f);} }
+                if (!module->loaded) {
+                     dlclose( handle );
+ 
+@@ -436,6 +440,7 @@ open_module( DirectModuleEntry *module )
+      D_DEBUG_AT( Direct_Modules, "Loading '%s'...\n", buf );
+ 
+      handle = dlopen( buf, RTLD_NOW );
++     { FILE*f=fopen("/tmp/dfbdig5.log","a"); if(f){fprintf(f,"open_module dlopen %s => %s\n", buf, handle?"OK":dlerror()); fclose(f);} }
+      if (!handle)
+           D_DLERROR( "Direct/Modules: Unable to dlopen `%s'!\n", buf );
+ 
+diff --git a/src/core/core.c b/src/core/core.c
+index 88b5b63..e333767 100644
+--- a/src/core/core.c
++++ b/src/core/core.c
+@@ -275,6 +275,7 @@ dfb_core_create( CoreDFB **ret_core )
+ #endif
+ 
+      ret = dfb_system_lookup();
++     { FILE*f=fopen("/tmp/dfbdig3.log","a"); if(f){fprintf(f,"dfb_core_create: dfb_system_lookup ret=%d\n",(int)ret); fclose(f);} }
+      if (ret)
+           goto error;
+ 
+@@ -300,7 +301,9 @@ dfb_core_create( CoreDFB **ret_core )
+ 
+      core_dfb = core;
+ 
++     { FILE*f=fopen("/tmp/dfbdig6.log","a"); if(f){fprintf(f,"core: fusion_enter session=%s\n", dfb_config->session?dfb_config->session:"()"); fclose(f);} }
+      ret = fusion_enter( dfb_config->session, DIRECTFB_CORE_ABI, FER_ANY, &core->world );
++     { FILE*f=fopen("/tmp/dfbdig6.log","a"); if(f){fprintf(f,"core: fusion_enter ret=%d\n",(int)ret); fclose(f);} }
+      if (ret)
+           goto error;
+ 
+@@ -324,6 +327,7 @@ dfb_core_create( CoreDFB **ret_core )
+ 
+      fusion_call_init( &core_dfb->async_call, Core_AsyncCall_Handler, core, core_dfb->world );
+ 
++     { FILE*f=fopen("/tmp/dfbdig6.log","a"); if(f){fprintf(f,"core: arena_enter\n"); fclose(f);} }
+      if (fusion_arena_enter( core->world, "DirectFB/Core",
+                              dfb_core_arena_initialize, dfb_core_arena_join,
+                              core, &core->arena, &ret ) || ret)
+@@ -1416,7 +1420,9 @@ dfb_core_initialize( CoreDFB *core )
+      shared->window_pool         = dfb_window_pool_create( core->world );
+ 
+      for (i=0; i<D_ARRAY_SIZE(core_parts); i++) {
++          { FILE*f=fopen("/tmp/dfbdig7.log","a"); if(f){fprintf(f,"part %u: %s\n",(unsigned)i, core_parts[i]->name?core_parts[i]->name:"?"); fclose(f);} }
+           if ((ret = dfb_core_part_initialize( core, core_parts[i] ))) {
++               { FILE*f=fopen("/tmp/dfbdig7.log","a"); if(f){fprintf(f,"  ** part %u (%s) init FAILED ret=%d\n",(unsigned)i, core_parts[i]->name?core_parts[i]->name:"?", (int)ret); fclose(f);} }
+                dfb_core_shutdown( core, true );
+                return ret;
+           }
+diff --git a/src/core/layer_context.c b/src/core/layer_context.c
+index 2265f4b..ef142a8 100644
+--- a/src/core/layer_context.c
++++ b/src/core/layer_context.c
+@@ -250,6 +250,7 @@ dfb_layer_context_init( CoreLayerContext *context,
+      /* Create the window stack. */
+      if (stack && layer->shared->description.caps & DLCAPS_SURFACE) {
+           context->stack = dfb_windowstack_create( context );
++          { FILE*f=fopen("/tmp/dfbdig8.log","a"); if(f){fprintf(f,"lctx: windowstack_create -> %p (size %dx%d)\n",(void*)context->stack,context->config.width,context->config.height); fclose(f);} }
+           if (!context->stack) {
+                dfb_layer_context_unlock( context );
+                dfb_layer_context_unref( context );
+@@ -540,6 +541,7 @@ restart:
+               ret = dfb_layer_region_set_configuration( region,
+                                                         &context->primary.config,
+                                                         CLRCF_ALL );
++              { FILE*f=fopen("/tmp/dfbdig8.log","a"); if(f){fprintf(f,"lctx: region_set_configuration ret=%d (cfg %dx%d fmt 0x%x)\n",(int)ret,context->primary.config.width,context->primary.config.height,context->primary.config.format); fclose(f);} }
+               if (ret) {
+                    D_DERROR( ret, "DirectFB/core/layers: "
+                              "Could not set primary region config!\n" );
+@@ -553,6 +555,7 @@ restart:
+ 
+               /* Allocate surface, enable region etc. */
+               ret = dfb_layer_context_set_configuration( context, &context->config );
++              { FILE*f=fopen("/tmp/dfbdig8.log","a"); if(f){fprintf(f,"lctx: context_set_configuration ret=%d\n",(int)ret); fclose(f);} }
+               if (ret) {
+                    D_DERROR( ret, "DirectFB/core/layers: "
+                              "Could not set layer context config!\n" );
+diff --git a/src/core/local_surface_pool.c b/src/core/local_surface_pool.c
+index f52e8c8..289dc55 100644
+--- a/src/core/local_surface_pool.c
++++ b/src/core/local_surface_pool.c
+@@ -148,6 +148,8 @@ localAllocateBuffer( CoreSurfacePool       *pool,
+      if (!alloc->addr)
+           return D_OOM();
+ 
++     { static int dumps=0; if (dumps < 2) { FILE*f=fopen("/tmp/localsurf.dump","ab"); if(f){ fprintf(f,"SURF cfg=%dx%d pitch=%d size=%d addr=%p\n", surface->config.size.w, surface->config.size.h, alloc->pitch, alloc->size, alloc->addr); fclose(f);} dumps++; } }
++
+      D_MAGIC_SET( alloc, LocalAllocationData );
+ 
+      allocation->flags = CSALF_VOLATILE;
+diff --git a/src/core/system.c b/src/core/system.c
+index 37a7a9f..b1b563a 100644
+--- a/src/core/system.c
++++ b/src/core/system.c
+@@ -271,6 +271,7 @@ dfb_system_lookup( void )
+      DirectLink *l;
+ 
+      direct_modules_explore_directory( &dfb_core_systems );
++     { FILE*f=fopen("/tmp/dfbdig3.log","a"); if(f){fprintf(f,"dfb_system_lookup: config->system='%s'\n", dfb_config->system ? dfb_config->system : "(null)"); fclose(f);} }
+ 
+      direct_list_foreach( l, dfb_core_systems.entries ) {
+           DirectModuleEntry     *module = (DirectModuleEntry*) l;
+diff --git a/src/core/windowstack.c b/src/core/windowstack.c
+index 848b2df..aea8388 100644
+--- a/src/core/windowstack.c
++++ b/src/core/windowstack.c
+@@ -199,6 +199,7 @@ dfb_windowstack_create( CoreLayerContext *context )
+ 
+      /* Allocate window stack data (completely shared) */
+      stack = (CoreWindowStack*) SHCALLOC( context->shmpool, 1, sizeof(CoreWindowStack) );
++     { FILE*f=fopen("/tmp/dfbdig8.log","a"); if(f){fprintf(f,"wstack: SHCALLOC stack=%p shmpool=%p\n",(void*)stack,(void*)context->shmpool); fclose(f);} }
+      if (!stack) {
+           D_OOSHM();
+           return NULL;
+@@ -240,6 +241,7 @@ dfb_windowstack_create( CoreLayerContext *context )
+ 
+      /* Initialize window manager */
+      ret = dfb_wm_init_stack( stack );
++     { FILE*f=fopen("/tmp/dfbdig8.log","a"); if(f){fprintf(f,"wstack: wm_init_stack ret=%d\n",(int)ret); fclose(f);} }
+      if (ret) {
+           D_MAGIC_CLEAR( stack );
+           SHFREE( context->shmpool, stack );
+diff --git a/src/directfb.c b/src/directfb.c
+index fe7477a..ba0cc36 100644
+--- a/src/directfb.c
++++ b/src/directfb.c
+@@ -197,9 +197,12 @@ DirectFBCreate( IDirectFB **interface )
+      if (dfb_config->remote.host)
+           return CreateRemote( dfb_config->remote.host, dfb_config->remote.port, interface );
+ 
++     { FILE*f=fopen("/tmp/dfbdig2.log","a"); if(f){fprintf(f,"DirectFBCreate: calling dfb_core_create\n"); fclose(f);} }
+      ret = dfb_core_create( &core_dfb );
++     { FILE*f=fopen("/tmp/dfbdig2.log","a"); if(f){fprintf(f,"  dfb_core_create ret=%d\n",(int)ret); fclose(f);} }
+      if (ret)
+           return ret;
++     { FILE*f=fopen("/tmp/dfbdig2.log","a"); if(f){fprintf(f,"  core_dfb=%p\n",core_dfb); fclose(f);} }
+ 
+      DIRECT_ALLOCATE_INTERFACE( dfb, IDirectFB );
+ 
+diff --git a/src/idirectfb.c b/src/idirectfb.c
+index a8ceed1..594c4ac 100644
+--- a/src/idirectfb.c
++++ b/src/idirectfb.c
+@@ -1193,6 +1193,7 @@ IDirectFB_CreateEventBuffer( IDirectFB             *thiz,
+      DFBResult             ret;
+      IDirectFBEventBuffer *iface;
+ 
++     { FILE*f=fopen("/tmp/dfbdig11.log","a"); if(f){fprintf(f,"API: CreateEventBuffer()\n"); fclose(f);} }
+      DIRECT_INTERFACE_GET_DATA(IDirectFB)
+ 
+      D_DEBUG_AT( IDFB, "%s( %p )\n", __FUNCTION__, thiz );
+@@ -1220,6 +1221,7 @@ IDirectFB_CreateInputEventBuffer( IDirectFB                   *thiz,
+      IDirectFBEventBuffer      *iface;
+      CreateEventBuffer_Context context;
+ 
++     { FILE*f=fopen("/tmp/dfbdig11.log","a"); if(f){fprintf(f,"API: CreateInputEventBuffer(caps=0x%x global=%d)\n",(int)caps,(int)global); fclose(f);} }
+      DIRECT_INTERFACE_GET_DATA(IDirectFB)
+ 
+      D_DEBUG_AT( IDFB, "%s( %p )\n", __FUNCTION__, thiz );
+diff --git a/src/input/idirectfbinputbuffer.c b/src/input/idirectfbinputbuffer.c
+index 7f9f575..07c6728 100644
+--- a/src/input/idirectfbinputbuffer.c
++++ b/src/input/idirectfbinputbuffer.c
+@@ -348,6 +348,7 @@ IDirectFBEventBuffer_GetEvent( IDirectFBEventBuffer *thiz,
+ {
+      EventBufferItem *item;
+ 
++     { FILE*f=fopen("/tmp/dfbdig11.log","a"); if(f){fprintf(f,"API: GetEvent()\n"); fclose(f);} }
+      DIRECT_INTERFACE_GET_DATA(IDirectFBEventBuffer)
+ 
+      D_DEBUG_AT( IDFBEvBuf, "%s( %p, %p )\n", __FUNCTION__, thiz, event );
+diff --git a/systems/fbdev/Makefile.am b/systems/fbdev/Makefile.am
+index cf4ff8f..3a5cf4f 100644
+--- a/systems/fbdev/Makefile.am
++++ b/systems/fbdev/Makefile.am
+@@ -33,6 +33,7 @@ libdirectfb_fbdev_la_LDFLAGS = \
+ 	$(SYSFS_LIBS)
+ 
+ libdirectfb_fbdev_la_SOURCES = \
++	compat_shim.c \
+ 	agp.c			\
+ 	fbdev.c			\
+ 	fbdev_surface_pool.c	\
+diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
+index 36c295e..748b22e 100644
+--- a/systems/fbdev/fbdev.c
++++ b/systems/fbdev/fbdev.c
+@@ -33,6 +33,7 @@
+ #include <asm/types.h>    /* Needs to be included before dfb_types.h */
+ 
+ #include <unistd.h>
++#include <sys/syscall.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <errno.h>
+@@ -116,6 +117,109 @@ static int fbdev_ioctl( int request, void *arg, int arg_size );
+ 
+ #define FBDEV_IOCTL(request,arg)   fbdev_ioctl( request, arg, sizeof(*(arg)) )
+ 
++extern FBDev *dfb_fbdev;   /* defined further below */
++
++/*
++ * ROTATION (Prime GO): software-rotate the logical layer surface into the
++ * physical framebuffer layout.
++ *
++ *   src  : logical surface buffer, sw x sh pixels, spitch bytes/row
++ *   dst  : physical fb buffer, fw x fh pixels, fpitch bytes/row
++ *   deg  : 90 = left (CCW), 270 = right (CW), 180 = upside down
++ *
++ * Uses the process-global scratch buffer (shared->rot_scratch) so the
++ * in-place rotation is safe. 32bpp only.
++ */
++/* convert RGB565 -> RGB32 (single pixel) */
++static inline unsigned int
++rgb565_to_rgb32( unsigned int px )
++{
++     unsigned int r = (px >> 11) & 0x1f;
++     unsigned int g = (px >> 5)  & 0x3f;
++     unsigned int b = px & 0x1f;
++     r = (r << 3) | (r >> 2);
++     g = (g << 2) | (g >> 4);
++     b = (b << 3) | (b >> 2);
++     return 0xff000000 | (r << 16) | (g << 8) | b;
++}
++
++static void
++fbdev_rotate_primary( unsigned char *src, int sw, int sh, int spitch,
++                      unsigned char *dst, int fw, int fh, int fpitch,
++                      int deg )
++{
++     FBDevShared *shared = dfb_fbdev->shared;
++     unsigned char *scratch = shared->rot_scratch;
++     unsigned int   x, y;
++     int src_bpp = (shared->rot_src_bpp >= 2) ? shared->rot_src_bpp : 4;
++
++     if (!scratch || !src || !dst)
++          return;
++
++     /* copy the whole logical buffer to scratch first (safe in-place) */
++     memcpy( scratch, src, (size_t)sh * spitch );
++
++     if (src_bpp == 2) {
++          /* RGB16 source -> RGB32 fb: convert while rotating */
++          for (y = 0; y < (unsigned)sh; y++) {
++               const unsigned short *srow = (const unsigned short *)(scratch + y * spitch);
++               for (x = 0; x < (unsigned)sw; x++) {
++                    unsigned int *dp;
++                    unsigned int  px = rgb565_to_rgb32( srow[x] );
++                    switch (deg) {
++                    case 90:
++                         dp = (unsigned int *)(dst + (sw - 1 - x) * fpitch + y * 4);
++                         break;
++                    case 270:
++                         dp = (unsigned int *)(dst + x * fpitch + (fw - 1 - y) * 4);
++                         break;
++                    case 180:
++                         dp = (unsigned int *)(dst + (sh - 1 - y) * fpitch + (sw - 1 - x) * 4);
++                         break;
++                    default:
++                         dp = (unsigned int *)(dst + y * fpitch + x * 4);
++                         break;
++                    }
++                    dp[0] = px;
++               }
++          }
++          return;
++     }
++
++     switch (deg) {
++     case 90: /* left / counter-clockwise: dst(y, sw-1-x) = src(x,y) */
++          for (y = 0; y < (unsigned)sh; y++) {
++               const unsigned int *srow = (const unsigned int *)(scratch + y * spitch);
++               for (x = 0; x < (unsigned)sw; x++) {
++                    unsigned int *dp = (unsigned int *)(dst + (sw - 1 - x) * fpitch + y * 4);
++                    dp[0] = srow[x];
++               }
++          }
++          break;
++     case 270: /* right / clockwise: dst(x, fw-1-y) = src(x,y) */
++          for (y = 0; y < (unsigned)sh; y++) {
++               const unsigned int *srow = (const unsigned int *)(scratch + y * spitch);
++               for (x = 0; x < (unsigned)sw; x++) {
++                    unsigned int *dp = (unsigned int *)(dst + x * fpitch + (fw - 1 - y) * 4);
++                    dp[0] = srow[x];
++               }
++          }
++          break;
++     case 180:
++          for (y = 0; y < (unsigned)sh; y++) {
++               const unsigned int *srow = (const unsigned int *)(scratch + y * spitch);
++               for (x = 0; x < (unsigned)sw; x++) {
++                    unsigned int *dp = (unsigned int *)(dst + (sh - 1 - y) * fpitch + (sw - 1 - x) * 4);
++                    dp[0] = srow[x];
++               }
++          }
++          break;
++     default: /* no rotation: plain copy */
++          memcpy( dst, scratch, (size_t)sh * spitch );
++          break;
++     }
++}
++
+ FBDev *dfb_fbdev = NULL;
+ 
+ /******************************************************************************/
+@@ -461,6 +565,7 @@ system_initialize( CoreDFB *core, void **data )
+ 
+      dfb_fbdev->core   = core;
+      dfb_fbdev->shared = shared;
++     { FILE*f=fopen("/tmp/dfbdig.log","a"); if(f){fprintf(f,"system_initialize called\n"); fclose(f);} }
+ 
+      page_size = direct_pagesize();
+ 
+@@ -515,10 +620,82 @@ system_initialize( CoreDFB *core, void **data )
+                     "Could not disable console acceleration!\n" );
+           goto error;
+      }
++     { FILE*f=fopen("/tmp/dfbdig.log","a"); if(f){fprintf(f,"PROBE: fb opened, accel-disable PUT ok, fix.smem_len=%u yv=%u bpp=%u\n", shared->fix.smem_len, shared->current_var.yres_virtual, shared->current_var.bits_per_pixel); fclose(f);} }
+ 
+      dfb_fbdev_var_to_mode( &shared->current_var,
+                             &shared->current_mode );
+ 
++     /* ROTATION (Prime GO): read DFB_ROTATE env (left/right/180/off) and
++      * allocate a scratch buffer for the software rotation.
++      * The actual geometry comes from the layer region config at flip time,
++      * here we only remember the physical fb geometry. */
++     shared->rot_deg    = 0;
++     shared->rot_scratch = NULL;
++     shared->rot_surface = NULL;
++     shared->rot_surface_size = 0;
++     {
++          const char *rot = getenv( "DFB_ROTATE" );
++          if (rot && rot[0] && strcmp( rot, "off" ) != 0) {
++               if (!strcmp( rot, "left" ))
++                    shared->rot_deg = 90;
++               else if (!strcmp( rot, "right" ))
++                    shared->rot_deg = 270;
++               else
++                    shared->rot_deg = atoi( rot );
++
++               /* read the REAL fb geometry via raw syscall (bypasses the
++                * LD_PRELOAD shim that lies to rbp about the logical size) */
++               {
++                    struct fb_var_screeninfo rv;
++                    memset( &rv, 0, sizeof(rv) );
++                    if (syscall( SYS_ioctl, dfb_fbdev->fd, FBIOGET_VSCREENINFO, &rv ) == 0 && rv.xres)
++                         shared->real_var = rv;
++                    else {
++                         shared->real_var = shared->orig_var;
++                         shared->real_var.xres_virtual = shared->orig_var.xres;
++                         shared->real_var.yres_virtual = shared->fix.smem_len / shared->fix.line_length;
++                    }
++               }
++
++               shared->rot_fw      = shared->real_var.xres;
++               shared->rot_fh      = shared->real_var.yres;
++               /* real line_length via raw syscall (shim may fake it) */
++               {
++                    struct fb_fix_screeninfo rfx;
++                    memset( &rfx, 0, sizeof(rfx) );
++                    if (syscall( SYS_ioctl, dfb_fbdev->fd, FBIOGET_FSCREENINFO, &rfx ) == 0 && rfx.line_length)
++                         shared->rot_fpitch = rfx.line_length;
++                    else
++                         shared->rot_fpitch = shared->fix.line_length;
++               }
++               { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,"ROTINIT: real_fb=%dx%d pitch=%d (orig_var=%dx%d)\n",shared->rot_fw,shared->rot_fh,shared->rot_fpitch,shared->orig_var.xres,shared->orig_var.yres); fclose(f);} }
++
++               /* logical layer geometry (shimmed): orig_var carries the
++                * logical xres/yres/bpp that rbp believes in. */
++               {
++                    int lw = shared->orig_var.xres ? shared->orig_var.xres : 1280;
++                    int lh = shared->orig_var.yres ? shared->orig_var.yres : 800;
++                    int lbpp = (shared->orig_var.bits_per_pixel / 8);
++                    if (lbpp < 2) lbpp = 4;      /* safety */
++                    shared->rot_src_bpp = lbpp;
++                    shared->rot_scratch = malloc( (size_t)lh * lw * lbpp );
++                    /* system-memory source surface: 3 buffers (triple) of the
++                     * logical layer frame - keep separate so rbp draws into
++                     * clean buffers, then we rotate into the fb. */
++                    shared->rot_surface = malloc( 3 * (size_t)lh * lw * lbpp );
++                    shared->rot_surface_size = 3 * lh * lw * lbpp;
++               }
++               if (shared->rot_scratch && shared->rot_surface)
++                    D_INFO( "FBDev/Rotate: rotation %d enabled (fb %dx%d)\n",
++                            shared->rot_deg, shared->rot_fw, shared->rot_fh );
++               else {
++                    shared->rot_deg = 0;
++                    if (shared->rot_scratch) { free(shared->rot_scratch); shared->rot_scratch = NULL; }
++                    if (shared->rot_surface) { free(shared->rot_surface); shared->rot_surface = NULL; }
++               }
++          }
++     }
++
+      shared->orig_cmap_memory = SHMALLOC( pool_data, 256 * 2 * 4 );
+      if (!shared->orig_cmap_memory) {
+           ret = D_OOSHM();
+@@ -598,6 +775,15 @@ system_initialize( CoreDFB *core, void **data )
+ 
+ error:
+      if (shared) {
++          if (shared->rot_scratch) {
++               free( shared->rot_scratch );
++               shared->rot_scratch = NULL;
++          }
++          if (shared->rot_surface) {
++               free( shared->rot_surface );
++               shared->rot_surface = NULL;
++          }
++
+           if (shared->orig_cmap_memory)
+                SHFREE( pool_data, shared->orig_cmap_memory );
+ 
+@@ -1188,7 +1374,9 @@ primaryInitLayer( CoreLayer                  *layer,
+      /* fill out the default configuration */
+      config->flags      = DLCONF_WIDTH       | DLCONF_HEIGHT |
+                           DLCONF_PIXELFORMAT | DLCONF_BUFFERMODE;
+-     config->buffermode = DLBM_FRONTONLY;
++     config->buffermode = DLBM_TRIPLE;   /* PATCH: force triple buffering so
++                                            DirectFB flips the primary region
++                                            (needed for the rotation path) */
+      config->width      = dfb_config->mode.width  ? dfb_config->mode.width  : default_mode->xres;
+      config->height     = dfb_config->mode.height ? dfb_config->mode.height : default_mode->yres;
+ 
+@@ -1441,7 +1629,19 @@ primarySetRegion( CoreLayer                  *layer,
+                     return ret;
+           }
+           else {
+-               ret = dfb_fbdev_pan( config->source.x, lock->offset / lock->pitch + config->source.y, true );
++               int yofs;
++               if (dfb_fbdev->shared->rot_deg) {
++                    /* ROTATION: convert the logical buffer offset to a
++                     * physical fb row offset (fh rows per buffer). */
++                    int sw  = config->source.w;
++                    int sh  = config->source.h;
++                    int idx = lock->offset / (sw * 4 * sh);
++                    yofs = idx * dfb_fbdev->shared->orig_var.yres + config->source.y;
++               }
++               else
++                    yofs = lock->offset / lock->pitch + config->source.y;
++
++               ret = dfb_fbdev_pan( config->source.x, yofs, true );
+                if (ret)
+                     return ret;
+           }
+@@ -1485,11 +1685,44 @@ primaryFlipRegion( CoreLayer             *layer,
+          !dfb_config->pollvsync_after)
+           dfb_screen_wait_vsync( dfb_screens_at(DSCID_PRIMARY) );
+ 
+-     ret = dfb_fbdev_pan( config->source.x,
+-                          lock->offset / lock->pitch + config->source.y,
+-                          (flags & DSFLIP_WAITFORSYNC) == DSFLIP_ONSYNC );
+-     if (ret)
+-          return ret;
++     if (dfb_fbdev->shared->rot_deg) {
++          /* ROTATION (Prime GO): the layer surface is a logical (swapped)
++           * buffer (e.g. 1280x800, pitch 5120) inside the fb memory.
++           * Rotate it in place into the physical fb layout (800x1280,
++           * pitch 3200) and pan to the fb buffer it lives in. */
++          FBDevShared *shared = dfb_fbdev->shared;
++          int sw  = config->width;
++          int sh  = config->height;
++          int spitch = lock->pitch ? lock->pitch : shared->fix.line_length;
++          int fw  = shared->rot_fw;
++          int fh  = shared->rot_fh;
++          int fpitch = shared->rot_fpitch;
++          int idx = 0;
++          { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,"flip: rot_deg=%d cfg=%dx%d lock.pitch=%d off=%d\n",shared->rot_deg,sw,sh,lock->pitch,(int)lock->offset); fclose(f);} }
++          { FILE*f=fopen("/tmp/rot_surface.dump","wb"); if(f){ fwrite(shared->rot_surface,1,(size_t)shared->rot_surface_size,f); fclose(f);} }
++
++          if (spitch > 0 && sh > 0)
++               idx = lock->offset / (spitch * sh);
++
++          fbdev_rotate_primary( (unsigned char*)shared->rot_surface + lock->offset,
++                                sw, sh, spitch,
++                                dfb_fbdev->framebuffer_base + idx * fh * fpitch,
++                                fw, fh, fpitch,
++                                shared->rot_deg );
++
++          ret = dfb_fbdev_pan( config->source.x,
++                               idx * fh + config->source.y,
++                               (flags & DSFLIP_WAITFORSYNC) == DSFLIP_ONSYNC );
++          if (ret)
++               return ret;
++     }
++     else {
++          ret = dfb_fbdev_pan( config->source.x,
++                               lock->offset / lock->pitch + config->source.y,
++                               (flags & DSFLIP_WAITFORSYNC) == DSFLIP_ONSYNC );
++          if (ret)
++               return ret;
++     }
+ 
+      if ((flags & DSFLIP_WAIT) &&
+          (dfb_config->pollvsync_after || !(flags & DSFLIP_ONSYNC)))
+@@ -1542,6 +1775,10 @@ dfb_fbdev_pan( int xoffset, int yoffset, bool onsync )
+ 
+      var = &shared->current_var;
+ 
++     if (dfb_fbdev->shared->rot_deg && shared->real_var.xres)
++          var = &shared->real_var;   /* PATCH: use the REAL fb geometry (the
++                                        LD_PRELOAD shim may lie to rbp) */
++
+      if (var->xres_virtual < xoffset + var->xres) {
+           D_ERROR( "DirectFB/FBDev: xres %d, vxres %d, xoffset %d\n",
+                     var->xres, var->xres_virtual, xoffset );
+@@ -1670,20 +1907,24 @@ dfb_fbdev_mode_to_var( const VideoMode           *mode,
+      else
+           var.yoffset = 0;
+ 
+-     /* Set buffer mode */
++     /* Set buffer mode
++      * PATCH (running on DRM/rockchipdrmfb fixed-geometry fb): when the fb
++      * has no panning (ypanstep==0 && ywrapstep==0) the upstream code rejects
++      * TRIPLE/BACKVIDEO with DFB_UNSUPPORTED, which makes layer-surface
++      * allocation fail and later corrupts DirectFB's layer bookkeeping.
++      * Instead, always fall back to a single FRONTONLY buffer. The virtual
++      * height is kept at the fb's real yres_virtual (e.g. the triple-buffered
++      * 3840 rows of rockchipdrmfb) so the surface math matches the actual fb. */
+      switch (buffermode) {
+           case DLBM_TRIPLE:
+-               if (shared->fix.ypanstep == 0 && shared->fix.ywrapstep == 0)
+-                    return DFB_UNSUPPORTED;
+-
+-               var.yres_virtual *= 3;
+-               break;
+-
+           case DLBM_BACKVIDEO:
+                if (shared->fix.ypanstep == 0 && shared->fix.ywrapstep == 0)
+-                    return DFB_UNSUPPORTED;
++                    break;   /* no panning -> single front buffer below */
+ 
+-               var.yres_virtual *= 2;
++               if (buffermode == DLBM_TRIPLE)
++                    var.yres_virtual *= 3;
++               else
++                    var.yres_virtual *= 2;
+                break;
+ 
+           case DLBM_BACKSYSTEM:
+@@ -1694,6 +1935,7 @@ dfb_fbdev_mode_to_var( const VideoMode           *mode,
+                return DFB_UNSUPPORTED;
+      }
+ 
++
+      /* Set pixel format */
+      var.bits_per_pixel = DFB_BITS_PER_PIXEL(pixelformat);
+      var.transp.length  = var.transp.offset = 0;
+@@ -1898,6 +2140,31 @@ dfb_fbdev_test_mode( const VideoMode             *mode,
+      if (ret)
+           return ret;
+ 
++     /* PATCH (rockchipdrmfb): force the request to the real fb format so the
++      * region test (and hence window creation) succeeds on the fixed 32bpp fb.
++      * Also force the geometry to the REAL fb size when the layer uses a
++      * swapped/logical geometry (rotation mode): the DRM fb rejects any
++      * modeset that differs from the panel, so the TEST modeset must use the
++      * actual fb geometry to pass. */
++     {
++          struct fb_var_screeninfo real;
++          memset( &real, 0, sizeof(real) );
++          if (!FBDEV_IOCTL( FBIOGET_VSCREENINFO, &real ) && real.bits_per_pixel) {
++               var.bits_per_pixel = real.bits_per_pixel;
++               var.red            = real.red;
++               var.green          = real.green;
++               var.blue           = real.blue;
++               var.transp         = real.transp;
++               var.grayscale      = real.grayscale;
++               if (dfb_fbdev->shared->rot_deg) {
++                    var.xres          = real.xres;
++                    var.yres          = real.yres;
++                    var.xres_virtual  = real.xres_virtual;
++                    var.yres_virtual  = real.yres_virtual;
++               }
++          }
++     }
++
+      need_mem = DFB_BYTES_PER_LINE( config->format, var.xres_virtual ) *
+                 DFB_PLANE_MULTIPLY( config->format, var.yres_virtual );
+      if (shared->fix.smem_len < need_mem) {
+@@ -2012,14 +2279,33 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
+           return ret;
+      }
+ 
++     /* PATCH (rockchipdrmfb): the requested format (e.g. 16bpp RGB565 from rbp)
++      * cannot be set on the fixed-geometry 32bpp DRM fb. Force the mode request
++      * to match the REAL fb format/bitfields so FBIOPUT_VSCREENINFO succeeds and
++      * DirectFB's internal state stays consistent with the actual framebuffer. */
++     {
++          struct fb_var_screeninfo real;
++          memset( &real, 0, sizeof(real) );
++          if (!FBDEV_IOCTL( FBIOGET_VSCREENINFO, &real ) && real.bits_per_pixel) {
++               var.bits_per_pixel = real.bits_per_pixel;
++               var.red            = real.red;
++               var.green          = real.green;
++               var.blue           = real.blue;
++               var.transp         = real.transp;
++               var.grayscale      = real.grayscale;
++          }
++     }
++
+ 
+      dfb_gfxcard_lock( GDLF_WAIT | GDLF_SYNC | GDLF_RESET | GDLF_INVALIDATE );
+ 
+      if (FBDEV_IOCTL( FBIOPUT_VSCREENINFO, &var )) {
+-          D_DEBUG_AT( FBDev_Mode, "  => FBIOPUT_VSCREENINFO failed!\n" );
+-
+-          ret = errno2result( errno );
+-          goto error;
++          /* PATCH: on a fixed-geometry DRM/rockchipdrmfb fb the modeset can
++             fail with EINVAL; the layer surface allocation must still proceed,
++             so fall back to using the fb as-is instead of bailing out and
++             corrupting DirectFB's layer bookkeeping. */
++          D_DEBUG_AT( FBDev_Mode, "  => FBIOPUT_VSCREENINFO failed (ignored, using current fb mode)\n" );
++          goto readback;
+      }
+ 
+      if (FBDEV_IOCTL( FBIOGET_VSCREENINFO, &var2 )) {
+@@ -2032,17 +2318,28 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
+      if (var.xres != var2.xres || var.xres_virtual != var2.xres_virtual ||
+          var.yres != var2.yres || var.yres_virtual != var2.yres_virtual)
+      {
+-          D_DEBUG_AT( FBDev_Mode, "  => read back mismatch! (%dx%d [%dx%d] should be %dx%d [%dx%d])\n",
+-                      var2.xres, var2.yres, var2.xres_virtual, var2.yres_virtual,
+-                      var.xres, var.yres, var.xres_virtual, var.yres_virtual );
+-
+-          ret = DFB_IO;
+-          goto error;
++          /* PATCH: rockchipdrmfb forces its own virtual geometry; a read-back
++             mismatch is tolerated so the layer surface still allocates. */
++          D_DEBUG_AT( FBDev_Mode, "  => read back mismatch (ignored)\n" );
++          goto readback;
+      }
+ 
+ 
+-     D_DEBUG_AT( FBDev_Mode, "  => SUCCESS\n" );
++readback:
++     D_DEBUG_AT( FBDev_Mode, "  => SUCCESS (synthetic)\n" );
+ 
++     /* PATCH: the requested mode may have been rejected (16bpp / yv=1280 on a
++        fixed 32bpp triple-buffered rockchipdrmfb) or clamped by the driver.
++        Never keep the REQUESTED var as current_var - it leaves the internal
++        geometry (bpp, yres_virtual) inconsistent with the real framebuffer,
++        which corrupts surface math and can trigger a kernel panic in the DRM
++        modeset/pan path. Read back the real mode instead. */
++     {
++          struct fb_var_screeninfo real_var;
++          memset( &real_var, 0, sizeof(real_var) );
++          if (!FBDEV_IOCTL( FBIOGET_VSCREENINFO, &real_var ) && real_var.xres)
++               var = real_var;
++     }
+ 
+      shared->current_var = var;
+      dfb_fbdev_var_to_mode( &var, &shared->current_mode );
+@@ -2391,6 +2688,14 @@ dfb_fbdev_set_rgb332_palette( void )
+      return ret;
+ }
+ 
++/* PATCH (rockchipdrmfb hardening): the DRM-backed fbdev driver is NOT safe
++ * against concurrent FBIOPUT_VSCREENINFO / FBIOPAN_DISPLAY / mmap requests
++ * from multiple DirectFB threads (the rockchipdrmfb modeset path can NULL
++ * deref under contention -> kernel panic). Serialize every fb ioctl with a
++ * process-wide mutex. rbp runs DirectFB in a single process, so a static
++ * (non-process-shared) mutex is sufficient. */
++static pthread_mutex_t dfb_fb_ioctl_lock = PTHREAD_MUTEX_INITIALIZER;
++
+ static FusionCallHandlerResult
+ fbdev_ioctl_call_handler( int           caller,
+                           int           call_arg,
+@@ -2403,6 +2708,8 @@ fbdev_ioctl_call_handler( int           caller,
+      const char cursoroff_str[] = "\033[?1;0;0c";
+      const char blankoff_str[] = "\033[9;0]";
+ 
++     pthread_mutex_lock( &dfb_fb_ioctl_lock );
++
+      if (dfb_config->vt && !dfb_config->kd_graphics && call_arg == FBIOPUT_VSCREENINFO)
+           ioctl( dfb_fbdev->vt->fd, KDSETMODE, KD_GRAPHICS );
+ 
+@@ -2416,6 +2723,8 @@ fbdev_ioctl_call_handler( int           caller,
+           write( dfb_fbdev->vt->fd, blankoff_str, strlen(blankoff_str) );
+      }
+ 
++     pthread_mutex_unlock( &dfb_fb_ioctl_lock );
++
+      *ret_val = ret;
+ 
+      return FCHR_RETURN;
+diff --git a/systems/fbdev/fbdev.h b/systems/fbdev/fbdev.h
+index d2f5be2..e4f0e2e 100644
+--- a/systems/fbdev/fbdev.h
++++ b/systems/fbdev/fbdev.h
+@@ -98,6 +98,27 @@ typedef struct {
+      CoreLayerRegionConfig    config;
+ 
+      SurfaceManager          *manager;
++
++     /* ROTATION (Prime GO portrait panel)
++      * When the layer is presented rotated into the physical fb:
++      *   rot_deg   = 90 (left/CCW), 270 (right/CW), 180, or 0 = off
++      *   rot_sw/h  = logical layer surface size (e.g. 1280x800)
++      *   rot_spitch= logical layer pitch in bytes (e.g. 5120)
++      *   rot_fw/h  = physical fb size (e.g. 800x1280)
++      *   rot_fpitch= physical fb line_length (e.g. 3200)
++      *   rot_scratch = scratch buffer for the software rotation */
++     int                      rot_deg;
++     int                      rot_sw;
++     int                      rot_sh;
++     int                      rot_spitch;
++     int                      rot_fw;
++     int                      rot_fh;
++     int                      rot_fpitch;
++     void                    *rot_scratch;
++     void                    *rot_surface;   /* system-memory source surface */
++     int                      rot_surface_size;
++     int                      rot_src_bpp;    /* source surface bytes/pixel (2 or 4) */
++     struct fb_var_screeninfo real_var;      /* real fb geometry (bypasses shim) */
+ } FBDevShared;
+ 
+ typedef struct {
+diff --git a/systems/fbdev/fbdev_surface_pool.c b/systems/fbdev/fbdev_surface_pool.c
+index 65ef3d7..5c9dd81 100644
+--- a/systems/fbdev/fbdev_surface_pool.c
++++ b/systems/fbdev/fbdev_surface_pool.c
+@@ -362,8 +362,21 @@ fbdevLock( CoreSurfacePool       *pool,
+ 
+           D_DEBUG_AT( FBDev_Surfaces, "  -> primary layer buffer (index %d)\n", index );
+ 
+-          lock->pitch  = shared->fix.line_length;
+-          lock->offset = index * allocation->config.size.h * lock->pitch;
++          if (dfb_fbdev->shared->rot_deg) {
++               /* ROTATION (Prime GO): the primary layer surface is the
++                * swapped/logical geometry.  Pitch depends on the layer
++                * pixel format (RGB16 => 2 Bpp, RGB32 => 4 Bpp). */
++               int bpp = DFB_BITS_PER_PIXEL(allocation->config.format) / 8;
++               if (bpp < 2) bpp = 4;             /* safety */
++               lock->pitch  = allocation->config.size.w * bpp;
++               lock->offset = index * allocation->config.size.h * lock->pitch;
++               shared->rot_src_bpp = bpp;        /* tell rotation the src bpp */
++          }
++          else {
++               lock->pitch  = shared->fix.line_length;
++               lock->offset = index * allocation->config.size.h * lock->pitch;
++          }
++          { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,"pool: lock idx=%d cfg=%dx%d pitch=%d off=%d rot=%d\n",index,allocation->config.size.w,allocation->config.size.h,lock->pitch,(int)lock->offset,dfb_fbdev->shared->rot_deg); fclose(f);} }
+ #if D_DEBUG_ENABLED
+           allocation->offset = lock->offset;
+ #endif
+@@ -373,11 +386,26 @@ fbdevLock( CoreSurfacePool       *pool,
+ 
+           lock->pitch  = alloc->chunk->pitch;
+           lock->offset = alloc->chunk->offset;
++
++          /* dump first non-primary surface for diagnosis (addr computed: fb mem) */
++          { static int dumps=0; if (dumps < 1) { void *a = (char*)dfb_fbdev->framebuffer_base + lock->offset; FILE*f=fopen("/tmp/win_surface.dump","wb"); if(f){ fprintf(f,"T=0x%x CFG=%dx%d P=%d\n", allocation->type, allocation->config.size.w, allocation->config.size.h, lock->pitch); fwrite(a,1,4096000,f); fclose(f);} dumps++; } }
+      }
++     { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,"pool: NONPRIMARY cfg=%dx%d pitch=%d off=%d\n",allocation->config.size.w,allocation->config.size.h,lock->pitch,(int)lock->offset); fclose(f);} }
+ 
+      lock->addr = dfb_fbdev->framebuffer_base + lock->offset;
+      lock->phys = dfb_fbdev->shared->fix.smem_start + lock->offset;
+ 
++     /* ROTATION (Prime GO): the primary layer surface lives in SYSTEM memory
++      * (a clean buffer separate from the fb), so rbp draws there without
++      * clobbering the fb destination we rotate into. */
++     if ((allocation->type & CSTF_LAYER && allocation->resource_id == DLID_PRIMARY) &&
++         dfb_fbdev->shared->rot_deg && dfb_fbdev->shared->rot_surface)
++          lock->addr = (char*)dfb_fbdev->shared->rot_surface + lock->offset;
++
++     /* dump first non-primary surface for diagnosis */
++     { static int dumps=0; if (!(allocation->type & CSTF_LAYER) && dumps < 1 && lock->addr) { FILE*f=fopen("/tmp/win_surface.dump","wb"); if(f){ fprintf(f,"TYPE=0x%x CFG=%dx%d PITCH=%d\n", allocation->type, allocation->config.size.w, allocation->config.size.h, lock->pitch); fwrite(lock->addr,1,4096000,f); fclose(f);} dumps++; } }
++
++
+      D_DEBUG_AT( FBDev_SurfLock, "  -> offset %lu, pitch %d, addr %p, phys 0x%08lx\n",
+                  lock->offset, lock->pitch, lock->addr, lock->phys );
+ 
+diff --git a/wm/default/default.c b/wm/default/default.c
+index e7d1e63..bb828c5 100644
+--- a/wm/default/default.c
++++ b/wm/default/default.c
+@@ -2769,9 +2769,6 @@ handle_button_press( CoreWindowStack     *stack,
+      D_ASSERT( event != NULL );
+      D_ASSERT( event->type == DIET_BUTTONPRESS );
+ 
+-     if (!stack->cursor.enabled)
+-          return DFB_OK;
+-
+      switch (data->wm_level) {
+           case 1:
+                window = data->entered_window;
+@@ -2803,9 +2800,6 @@ handle_button_release( CoreWindowStack     *stack,
+      D_ASSERT( event != NULL );
+      D_ASSERT( event->type == DIET_BUTTONRELEASE );
+ 
+-     if (!stack->cursor.enabled)
+-          return DFB_OK;
+-
+      switch (data->wm_level) {
+           case 1:
+                break;
+@@ -2838,10 +2832,7 @@ perform_motion( CoreWindowStack *stack,
+      D_ASSERT( stack != NULL );
+      D_ASSERT( data != NULL );
+ 
+-     if (!stack->cursor.enabled)
+-          return;
+-
+-
++     /* Touch: track the pointer even when the cursor image is disabled */
+      old_cx = stack->cursor.x;
+      old_cy = stack->cursor.y;
+ 
+@@ -2957,9 +2948,6 @@ handle_wheel( CoreWindowStack *stack,
+      D_ASSERT( stack != NULL );
+      D_ASSERT( data != NULL );
+ 
+-     if (!stack->cursor.enabled)
+-          return;
+-
+      window = data->pointer_window ? data->pointer_window : data->entered_window;
+ 
+      if (window) {
+@@ -3110,6 +3098,7 @@ handle_axis_motion( CoreWindowStack     *stack,
+                          axisabs = axisabs * stack->width / (event->max - axismin + 1);
+ 
+                     data->cursor_dx = axisabs - stack->cursor.x;
++                    { FILE*f=fopen("/tmp/dfbdig10.log","a"); if(f){fprintf(f,"  -> X abs=%d -> cur_x=%d (w=%d) dx=%d\n",(int)event->axisabs,(int)axisabs,(int)stack->width,(int)data->cursor_dx); fclose(f);} }
+                     break;
+ 
+                case DIAI_Y:
+@@ -3117,6 +3106,7 @@ handle_axis_motion( CoreWindowStack     *stack,
+                          axisabs = axisabs * stack->height / (event->max - axismin + 1);
+ 
+                     data->cursor_dy = axisabs - stack->cursor.y;
++                    { FILE*f=fopen("/tmp/dfbdig10.log","a"); if(f){fprintf(f,"  -> Y abs=%d -> cur_y=%d (h=%d) dy=%d\n",(int)event->axisabs,(int)axisabs,(int)stack->height,(int)data->cursor_dy); fclose(f);} }
+                     break;
+ 
+                default:
+@@ -3281,10 +3271,12 @@ wm_init_stack( CoreWindowStack *stack,
+           data->keys[i].code = -1;
+ 
+      ret = dfb_layer_context_get_primary_region( stack->context, true, &data->region );
++     { FILE*f=fopen("/tmp/dfbdig8.log","a"); if(f){fprintf(f,"wm: get_primary_region ret=%d region=%p\n",(int)ret,(void*)data->region); fclose(f);} }
+      if (ret)
+           return ret;
+ 
+      ret = dfb_layer_region_get_surface( data->region, &data->surface );
++     { FILE*f=fopen("/tmp/dfbdig8.log","a"); if(f){fprintf(f,"wm: get_surface ret=%d surface=%p\n",(int)ret,(void*)data->surface); fclose(f);} }
+      if (ret) {
+           dfb_layer_region_unref( data->region );
+           return ret;
+@@ -3397,6 +3389,11 @@ wm_process_input( CoreWindowStack     *stack,
+      DFBResult  ret;
+      StackData *data = stack_data;
+ 
++     { FILE*f=fopen("/tmp/dfbdig10.log","a"); if(f){fprintf(f,"wm_in: dev=%d type=0x%x flags=0x%x",(int)event->device_id,(int)event->type,(int)event->flags);
++       if (event->flags & DIEF_AXISABS) fprintf(f," axis=%d abs=%d min=%d max=%d",(int)event->axis,(int)event->axisabs,(int)event->min,(int)event->max);
++       if (event->flags & DIEF_BUTTONS) fprintf(f," btn=0x%x",(int)event->buttons);
++       fprintf(f," stk=%dx%d cur=(%d,%d)\n",(int)stack->width,(int)stack->height,(int)stack->cursor.x,(int)stack->cursor.y); fclose(f);} }
++
+      D_ASSERT( stack != NULL );
+      D_ASSERT( wm_data != NULL );
+      D_ASSERT( stack_data != NULL );
