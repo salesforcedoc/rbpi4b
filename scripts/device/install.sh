@@ -1,0 +1,157 @@
+#!/bin/sh
+# install.sh — deploy rblive4 onto a Raspberry Pi 4.
+#
+# Run as root on the Pi:
+#
+#   scp work/rblive4-pi4.tgz pi@<host>:/tmp/
+#   scp -r scripts/device pi@<host>:/tmp/
+#   ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rblive4-pi4.tgz'
+#
+# Untars the deploy root to RB_DEPLOY_ROOT (default /opt/rblive4), copies the
+# device scripts in beside it, and runs fix-dev.sh. Idempotent: re-running
+# upgrades in place.
+#
+# RB_DEPLOY_ROOT overrides the destination:
+#   sudo RB_DEPLOY_ROOT=/srv/rblive4 sh install.sh /tmp/rblive4-pi4.tgz
+
+set -eu
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+TARBALL="${1:-/tmp/rblive4-pi4.tgz}"
+DEPLOY="${RB_DEPLOY_ROOT:-/opt/rblive4}"
+
+say()  { echo "install: $*"; }
+warn() { echo "install: WARNING: $*" >&2; }
+die()  { echo "install: ERROR: $*" >&2; exit 1; }
+
+# --- preconditions ----------------------------------------------------------
+
+[ "$(id -u)" = "0" ] || die "must run as root (the chroot needs /dev/mknod and bind mounts)"
+
+[ -f "$TARBALL" ] || die "tarball not found: $TARBALL
+  build it on the workstation with scripts/build-chroot.sh, then scp it here."
+
+# A 64-bit kernel is not automatically fatal -- the chroot brings its own 32-bit
+# ld.so and the kernel only needs 32-bit emulation support -- but Pi OS Lite
+# 32-bit is the tested configuration, so say so rather than let it be a mystery.
+case "$(uname -m)" in
+  armv7l|armv6l) : ;;
+  aarch64) warn "kernel is aarch64 (64-bit). The 32-bit chroot can still run if
+  the kernel has 32-bit emulation enabled; the next step tests that for real.
+  Pi OS Lite 32-bit is the tested configuration (docs/13-raspberrypi4.md)." ;;
+  *) warn "unexpected architecture '$(uname -m)'; continuing, but this is untested" ;;
+esac
+
+# --- unpack -----------------------------------------------------------------
+
+say "deploying to $DEPLOY"
+mkdir -p "$DEPLOY"
+tar -C "$DEPLOY" -xzf "$TARBALL"
+
+[ -d "$DEPLOY/rbx3-run" ] || die "tarball did not contain rbx3-run/ -- is it a rblive4-pi4.tgz?"
+[ -f "$DEPLOY/rb.conf" ]  || die "tarball did not contain rb.conf -- rebuild with scripts/build-chroot.sh"
+
+# rb.conf's location on the device is the authority from here on: it is what the
+# launcher reads, so install.sh follows it rather than assuming $DEPLOY.
+RB_CONF_FILE="$DEPLOY/rb.conf"
+. "$RB_CONF_FILE"
+
+[ "${RB_CONF_VERSION:-0}" = "1" ] || warn "rb.conf reports schema v${RB_CONF_VERSION:-?}; this installer expects v1"
+
+CHROOT="${RB_CHROOT:-$DEPLOY/rbx3-run}"
+LOG_DIR="${RB_LOG_DIR:-$DEPLOY/log}"
+
+mkdir -p "$LOG_DIR" "${RB_MEDIA_MOUNT:-$DEPLOY/media/usb1}"
+
+# --- device scripts ---------------------------------------------------------
+
+# The launcher scripts live at the deploy root on the device, next to rb.conf,
+# matching how they were laid out on the previous target.
+for s in fix-dev.sh start-rb.sh usb-watch.sh rb.conf; do
+  if [ -f "$HERE/$s" ]; then
+    cp "$HERE/$s" "$DEPLOY/$s"
+    [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
+  else
+    warn "$s not found in $HERE -- not installed"
+  fi
+done
+
+# --- verify the chroot can execute (the real ABI test) ----------------------
+
+# This is the check that matters: uname tells you about the kernel, but what
+# actually has to work is a soft-float EABI5 ARM32 binary running against the
+# chroot's glibc 2.13. Running one answers it definitively. A failure here means
+# the kernel lacks 32-bit emulation -- use Pi OS Lite 32-bit.
+say "testing the chroot..."
+if ! chroot "$CHROOT" /bin/busybox echo "  chroot executes: ok" 2>/tmp/rblive4-chroot-test.err; then
+  cat /tmp/rblive4-chroot-test.err >&2 2>/dev/null || true
+  rm -f /tmp/rblive4-chroot-test.err
+  die "the chroot could not execute a 32-bit binary.
+  The most likely cause is a 64-bit kernel with 32-bit emulation disabled.
+  Install Pi OS Lite 32-bit (armhf) -- see docs/13-raspberrypi4.md.
+  Do NOT retry with a 64-bit userland: every shim and the player itself are
+  ARM32 soft-float, and there is no 64-bit build of rbp."
+fi
+rm -f /tmp/rblive4-chroot-test.err
+
+# --- kernel interfaces rbp needs --------------------------------------------
+
+if [ ! -e /dev/fb0 ]; then
+  warn "/dev/fb0 is missing. Under vc4-kms-v3d it comes from DRM fbdev
+  emulation. Check that dtoverlay=vc4-kms-v3d is enabled and that dmesg says
+  'fb0: vc4drmfb frame buffer device'. Without it there is no display, and
+  rbp will exit early. See docs/13-raspberrypi4.md."
+fi
+
+# Missing /dev/snd/seq is the classic silent "controls do nothing" failure: the
+# sequencer module is not autoloaded on every boot.
+if [ ! -e /dev/snd/seq ]; then
+  say "/dev/snd/seq is missing; loading snd-seq"
+  modprobe snd-seq 2>/dev/null || true
+  if [ ! -e /dev/snd/seq ]; then
+    warn "/dev/snd/seq is STILL missing after modprobe snd-seq. rbp will start
+  but no controller input will reach it. Check that the kernel has
+  CONFIG_SND_SEQUENCER=y (or loadable) and that /dev/snd exists."
+  fi
+fi
+
+if [ ! -d /dev/input ] || [ -z "$(ls /dev/input 2>/dev/null)" ]; then
+  warn '/dev/input is empty: no keyboard, mouse or touchscreen. The keyboard map
+  still drives playback without one, but pointing needs a device. Run
+  tools/evdevdump --list once something is attached to find its node.'
+fi
+
+# --- finish -----------------------------------------------------------------
+
+say "running fix-dev.sh"
+if [ -x "$DEPLOY/fix-dev.sh" ] || [ -f "$DEPLOY/fix-dev.sh" ]; then
+  RB_DEPLOY_ROOT="$DEPLOY" RB_CONF_FILE="$RB_CONF_FILE" sh "$DEPLOY/fix-dev.sh" || \
+    warn "fix-dev.sh reported a problem (see above)"
+else
+  warn "fix-dev.sh not found; the device binds and stubs are NOT in place and
+  rbp will not start. Re-run this installer with scripts/device/ present."
+fi
+
+echo
+say "installed."
+echo
+echo "  chroot:   $CHROOT"
+echo "  config:   $RB_CONF_FILE"
+echo "  logs:     $LOG_DIR"
+echo
+# Single-quoted so nothing here is interpreted: the point is to print a command
+# the operator can paste, not to run it.
+cat <<'EOF'
+Before the first launch, set the HDMI mode (edit, then one reboot):
+
+  sudo nano /boot/firmware/cmdline.txt
+
+append to the single existing line:
+  video=HDMI-A-1:1280x800@60 fbcon=map:1 console=tty3 consoleblank=0 vt.global_cursor_default=0
+
+  sudo reboot
+
+Then:  sh /opt/rblive4/start-rb.sh
+EOF
+echo
+echo "  (paths above assume RB_DEPLOY_ROOT=$DEPLOY)"

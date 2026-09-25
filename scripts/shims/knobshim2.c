@@ -91,6 +91,10 @@
 #include <sys/mman.h>
 #include <sound/asequencer.h>
 
+/* State shared with the audio shim. This shim is first in LD_PRELOAD, so it is
+ * the one that defines them (via shmstate.o) and owns them. */
+#include "shmstate.h"
+
 /* ---- real syscalls (bypass libc interposition) ---- */
 static int real_open(const char *p, int flags)
 {
@@ -472,32 +476,11 @@ static unsigned long long sync_press_ms[2];
 static volatile int sync_held[2];        /* button is currently down */
 static volatile int sync_hold_fired[2];  /* MASTER already sent for this hold */
 
-/* built-in speaker volume (0..1), set by the booth/speaker knob (CC15, ch15).
- * Exported (non-static) so audioshim.so can read it and scale the ch6/7
- * (built-in speaker) output. */
-volatile float g_speaker_gain = 1.0f;
-
-/* master-out level (Main Vol, CC20 ch15).  Applied to ch0/1 (XLR/main) only,
- * NOT to rbp's master stream, so it does not affect the built-in monitors or
- * the headphones. */
-volatile float g_master_gain = 1.0f;
-
-/* built-in monitor on/off switch (ch15 note 41).  1 = enabled. */
-volatile int g_speaker_on = 1;
-
-/* split-cue switch (ch15 note 11).  1 = left/right = cue/main. */
-volatile int g_split_cue = 0;
-
-/* headphone cue mix (CC18) / level (CC19) on ch15, exported so audioshim.so
- * can blend rbp's cue bus with the master and scale the ch4/5 headphone out.
- * g_cue_mix: 0 = cue only, 1 = main only.  g_cue_gain: 0..1. */
-volatile float g_cue_gain = 1.0f;
-volatile float g_cue_mix  = 1.0f;
-
-/* Master VU peaks published by audioshim.so (S24_LE full scale).  knobshim
- * converts them to the SC Live 4 meter CCs: CC32 (L) / CC33 (R) on ch15,
- * value = bitmask of lit segments (SC Live 4: [0,1,3,7,15,31,63]). */
-volatile int g_vu_peak[2] = { 0, 0 };
+/* The globals shared with the audio shim (g_speaker_gain, g_master_gain,
+ * g_speaker_on, g_split_cue, g_cue_gain, g_cue_mix, g_vu_peak) are DEFINED in
+ * shmstate.c and declared in shmstate.h — this shim owns them because it is
+ * first in LD_PRELOAD, but the definition site is separate so the audio shim
+ * cannot drift out of sync via a hand-written `extern` line. */
 
 /* ---------- event handlers ---------- */
 

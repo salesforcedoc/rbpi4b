@@ -13,7 +13,7 @@ tree and tars it to `work/rbx3-run.tgz`:
 2. **GUI assets** → `root/gui/{fontdata,imagedata,pset,system}` (rbp reads
    `/root/gui/pset/...` and `/root/gui/system/...`).
 3. **Patched player** → `root/pdj/rbp` (shared rbp patches + the SC Live 4
-   `getPcController` fix — see [`scripts/patch-rbp-sclive4.py`](../scripts/patch-rbp-sclive4.py)).
+   `getPcController` fix — see [`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py)).
 4. **Shims** → `usr/lib/{fbshim,knobshim,audioshim,crashcatch}.so`.
 5. **DirectFB 1.4.16 stack** — core libs + the patched rot16 fbdev module +
    inputdrivers/wm, in `usr/lib/directfb-1.4-6/`.

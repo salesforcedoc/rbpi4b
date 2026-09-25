@@ -32,22 +32,39 @@ $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a:
 	@ar rcs $(COMPAT)/libpthread_nonshared.a
 
 # Shared LD_PRELOAD libraries (soft-float, libc-only NEEDED)
-SHARED  := knobshim2.so audioshim.so fbshim-tsc.so gpioshim.so tscshim.so crashcatch.so
+SHARED  := knobshim2.so audioshim.so fbshim-tsc.so crashcatch.so
 
 # Static ARM helpers (have no soft-float runtime dependency)
 STATIC  := seqinject2 udplog
 
-.PHONY: all clean check
+# Retained as reference only, NOT built by `all`: superseded by the shims above
+# and, on the Pi, by the pointer path in fbshim.so.
+REFERENCE := gpioshim.so tscshim.so
+
+.PHONY: all reference clean check
 all: $(SHARED) $(STATIC)
 
-# knobshim2 needs the ALSA sequencer headers; host headers are fine as the
-# structs are ABI-stable.
-knobshim2.so: knobshim2.c $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
-	$(CC) $(CFLAGS) -shared -o $@ $< -lpthread -lm -lc $(LDFLAGS)
+# Build the reference-only shims explicitly if you need them.
+reference: $(REFERENCE)
+
+# Without this the default goal is the first rule in the file -- the
+# compat/libc_nonshared.a rule below -- so a bare `make` silently builds nothing.
+.DEFAULT_GOAL := all
+
+# shmstate.o holds the globals shared with the audio shim. It is linked into the
+# CONTROLS shim only: that shim is first in LD_PRELOAD, so its definitions win
+# in the global scope. Linking it into a consumer as well would give that
+# consumer a private copy it would silently bind to -- see shmstate.h.
+shmstate.o: shmstate.c shmstate.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+knobshim2.so: knobshim2.c shmstate.o shmstate.h $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
+	$(CC) $(CFLAGS) -shared -o $@ knobshim2.c shmstate.o -lpthread -lm -lc $(LDFLAGS)
 
 # audioshim must bind dlopen/dlsym to libdl GLIBC_2.4 (the .symver directives
-# are in the source); link the RX3 libdl explicitly.
-audioshim.so: audioshim.c
+# are in the source); link the RX3 libdl explicitly. It deliberately does NOT
+# link shmstate.o -- it reads those globals out of the global scope.
+audioshim.so: audioshim.c shmstate.h
 	$(CC) $(CFLAGS) -shared -o $@ $< $(RX3LIB)/libdl.so.2 -lc $(LDFLAGS)
 
 fbshim-tsc.so: fbshim-tsc.c $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
@@ -78,4 +95,4 @@ check: $(SHARED)
 	done
 
 clean:
-	rm -f $(SHARED) $(STATIC) *.o
+	rm -f $(SHARED) $(STATIC) $(REFERENCE) *.o

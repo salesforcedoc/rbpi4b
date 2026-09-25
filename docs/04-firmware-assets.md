@@ -24,7 +24,7 @@ extracted/
 
 `build-chroot.sh` reads that tree through `RX3=` (default `extracted/`) and then
 applies the SC Live 4-specific `getPcController()` patch
-([`scripts/patch-rbp-sclive4.py`](../scripts/patch-rbp-sclive4.py)) while
+([`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py)) while
 staging the chroot.
 
 If you already have the **stock** `rbp`, the shared patch set in

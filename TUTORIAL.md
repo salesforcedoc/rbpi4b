@@ -39,7 +39,7 @@ RX3=/path/to/extracted DFB="$PWD/work/dfb" scripts/build-chroot.sh
 
 It builds the shims from [`scripts/shims/`](scripts/shims/) if needed, applies
 the SC Live 4 `getPcController` patch via
-[`scripts/patch-rbp-sclive4.py`](scripts/patch-rbp-sclive4.py), and installs the
+[`scripts/patch-rbp-nopc.py`](scripts/patch-rbp-nopc.py), and installs the
 DirectFB stack.
 
 ## 3. Deploy (device)

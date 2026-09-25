@@ -6,6 +6,11 @@ before writing and is idempotent. `VA = file_offset + 0x8000`.
 
 * stock: md5 `4f2efcfc0c9e3f539289f863acfddcc6`
 * patched (`rbp-audio`): md5 `3706c68f7242779d46afa09f35a39acf`
+* fully patched (`rbp-nopc`, second stage applied): md5 `18a64bc4d0ffd1cbd35f3a6ea447fca8`
+
+The third md5 is the binary that actually ships. It is produced by
+[`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py), a second stage run
+by `scripts/build-chroot.sh` over the `rbp-audio` output; see section 11 below.
 
 Words are shown as little-endian u32 hex. `E320F000` is `nop`,
 `E1A00000` is `mov r0,r0` (also a nop), `E12FFF1E` is `bx lr`.
@@ -71,10 +76,10 @@ tolerate a missing/full target array.
 
 ## 5. Power-manager NULL-`this` guards
 
-On the SC Live 4 there is no Pioneer power-manager MCU, so the manager pointer is
-`NULL`. These routines are called from the USB mount path; left unpatched they
-dereference `NULL` and kill the `UsbMountManager` thread before the library
-imports.
+There is no Pioneer power-manager MCU on the SC Live 4 or the Pi 4, so the
+manager pointer is `NULL`. These routines are called from the USB mount path;
+left unpatched they dereference `NULL` and kill the `UsbMountManager` thread
+before the library imports.
 
 | VA | stock | patched | purpose |
 |---|---|---|---|
@@ -109,7 +114,7 @@ imports.
 
 | VA | stock | patched | purpose |
 |---|---|---|---|
-| `0x3c665c` | `1A000054` | `EA000054` | `ALSAAudioIODeviceType::scanForDevices`: always configure the RX3 device list (Rockchip CPU fails `board_is_rev`) |
+| `0x3c665c` | `1A000054` | `EA000054` | `ALSAAudioIODeviceType::scanForDevices`: always configure the RX3 device list (the Rockchip CPU and the Pi 4 both fail `board_is_rev`) |
 
 > The stock binary already enables `DjEngineIF::initializeAudioDevice`
 > (`0x104d0` is `bne`), so no patch is needed there — earlier work that
@@ -117,8 +122,8 @@ imports.
 
 ## 9. udev FIFO paths
 
-The RX3 uses `/proc/udev_*`; on the SC Live 4 `/proc` is not writable, so the
-paths move to `/tmp` (shared with the chroot).
+The RX3 uses `/proc/udev_*`; neither the SC Live 4 nor a normal Pi OS install
+has a writable `/proc`, so the paths move to `/tmp` (shared with the chroot).
 
 | VA | stock | patched | purpose |
 |---|---|---|---|
@@ -147,3 +152,28 @@ paths move to `/tmp` (shared with the chroot).
 |---|---|
 | `0x104d0` | stock audio-init branch is already correct; do not bypass it |
 | `0x1a4204/08` | the old RGB32 window patch is obsolete — the working display uses RGB16 surfaces + the patched fbdev driver |
+
+---
+
+## 11. Second stage: no PC controller
+
+Applied by [`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py) to the
+`rbp-audio` output, not part of `rbp_patch.py`. It is a separate stage because it
+is not a Rockchip/board fix but a "no PC controller is attached" fix: `rbp`'s
+network monitor calls `IUiObjManager::getPcController()` about a second after
+start and dereferences the resulting `NULL` at `[NULL+0x9c]`, which happens
+*before* `fb0` opens — so the symptom is a process that dies instantly with no
+display and no log.
+
+| VA | stock | patched | purpose |
+|---|---|---|---|
+| `0x31df64` | `E30636B0` | `E3A00000` | `getPcController(): mov r0,#0` (return NULL) |
+| `0x31df68` | `E3403268` | `E12FFF1E` | `getPcController(): bx lr` |
+
+The caller's own NULL check then skips the absent object. Idempotent, and it
+refuses a file too short to contain the patch offsets rather than throwing. The
+resulting md5 is pinned at the top of this file.
+
+> This patch is **not** device-specific. It applies unchanged to any host with no
+> Pioneer PC-controller link, which is why the file is named `nopc` and not
+> `sclive4`.

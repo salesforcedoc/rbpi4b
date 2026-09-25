@@ -11,6 +11,10 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 
+/* Declarations of the state owned by the controls shim (which is preloaded
+ * before us), plus the constructor-time check that it is actually there. */
+#include "shmstate.h"
+
 /* Enforce GLIBC_2.4 versioning for libdl on glibc 2.13 */
 __asm__(".symver dlsym, dlsym@GLIBC_2.4");
 __asm__(".symver dlopen, dlopen@GLIBC_2.4");
@@ -51,6 +55,16 @@ static void alog(const char *fmt, ...)
         write(fd, buf, strlen(buf));
         close(fd);
     }
+}
+
+/* Verify the shared-state contract before anything reads g_master_gain and
+ * friends. Without the controls shim preloaded ahead of us those symbols are
+ * simply absent, and the failure mode is otherwise silent: the cue knob and the
+ * master level would just do nothing. */
+__attribute__((constructor))
+static void audioshim_init(void)
+{
+    shmstate_require("audioshim");
 }
 
 /* Opaque ALSA types */
@@ -144,28 +158,10 @@ static void init_real_alsa(void)
 static int32_t g_mix8ch[MAX_FRAMES * 8];
 static unsigned long g_write_count = 0;
 
-/* shared with knobshim2.so (booth/speaker knob, CC15 ch15) */
-extern volatile float g_speaker_gain;
-
-/* shared with knobshim2.so: headphone cue mix/level (CC18/CC19 ch15).
- * g_cue_mix: 0 = cue only, 1 = main only.  g_cue_gain: 0..1. */
-extern volatile float g_cue_gain;
-extern volatile float g_cue_mix;
-/* shared with knobshim2.so: XLR/main-out level (Main Vol, CC20 ch15) */
-extern volatile float g_master_gain;
-/* shared with knobshim2.so: built-in monitor on/off switch (ch15 note 41) */
-extern volatile int g_speaker_on;
-/* shared with knobshim2.so: split-cue switch (ch15 note 11) */
-extern volatile int g_split_cue;
-
 /* rbp's phone stream is the CUE (PFL) bus; keep it in its own buffer so the
  * master write can blend it without ordering hazards. */
 static int32_t g_cue[MAX_FRAMES * 2];
 static int g_has_cue = 0;
-
-/* shared with knobshim2.so: master VU peaks (S24_LE full scale 0xFFFFFF).
- * knobshim turns these into the SC Live 4 meter CCs (CC32/33 on ch15). */
-extern volatile int g_vu_peak[2];
 
 /* per-sample smoothed speaker gain (avoids zipper noise when the knob moves) */
 static float g_sg_cur = 1.0f;

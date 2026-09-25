@@ -47,7 +47,7 @@ Details: [08 — Controls](08-controls.md).
 
 Details: [11 — Runtime launcher](11-runtime-launcher.md).
 
-### 2.4 `rbp` — SC Live 4 crash fix (`patch-rbp-sclive4.py`)
+### 2.4 `rbp` — SC Live 4 crash fix (`patch-rbp-nopc.py`)
 
 `rbp-audio` hits a timing-dependent crash on the SC Live 4 in
 `IUiObjManager::getPcController()`: a `NetworkMonitor` timer derefs a NULL
@@ -59,7 +59,7 @@ One extra patch makes the getter return NULL:
 0x31DF68  e3403268 -> e12fff1e   bx  lr
 ```
 
-Applied by [`scripts/patch-rbp-sclive4.py`](../scripts/patch-rbp-sclive4.py).
+Applied by [`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py).
 
 ## 3. Build order
 

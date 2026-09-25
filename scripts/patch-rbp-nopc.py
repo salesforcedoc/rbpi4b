@@ -2,8 +2,9 @@
 """Additional interoperability patch for the XDJ-RX3 `rbp` binary.
 
 The base patch set turns the stock XDJ-RX3 v1.20 `rbp` into `rbp-audio`
-(md5 3706c68f7242779d46afa09f35a39acf). On the SC Live 4 one additional,
-timing-dependent crash fires:
+(md5 3706c68f7242779d46afa09f35a39acf). On any host with no Pioneer PC-controller
+link -- the SC Live 4, and now the Pi 4 -- one additional, timing-dependent crash
+fires:
 
   JuceTimer -> NetworkMonitor::timerCallback() -> IUiObjManager::getPcController()
   dereferences a NULL PC-controller pointer at [NULL+0x9c]  (~1s after start,
@@ -18,9 +19,13 @@ then skips the missing object.
 Code/data at VA maps to file_offset = VA - 0x8000 (non-PIE ARM32 ELF), so the
 file offsets are 0x315F64 / 0x315F68.
 
+There is nothing Denon- or Pi-specific about this: it is the "no PC controller
+exists" fix, which is why the file is named for what it does rather than for a
+device.
+
 Usage:
-    python3 patch-rbp-sclive4.py rbp-audio -o rbp-audio-sclive4
-    python3 patch-rbp-sclive4.py rbp-audio --check
+    python3 patch-rbp-nopc.py rbp-audio -o rbp-nopc
+    python3 patch-rbp-nopc.py rbp-audio --check
 """
 
 import argparse
@@ -32,6 +37,18 @@ PATCHES = [
     (0x315F64, 0xE30636B0, 0xE3A00000, "getPcController(): mov r0,#0 (return NULL)"),
     (0x315F68, 0xE3403268, 0xE12FFF1E, "getPcController(): bx lr"),
 ]
+
+
+def check_size(data):
+    """A truncated or foreign file would otherwise die in struct.unpack_from
+    with a bare traceback, which reads as a bug in the patcher rather than
+    'wrong input file'."""
+    need = max(off for off, _, _, _ in PATCHES) + 4
+    if len(data) < need:
+        raise SystemExit(
+            f"  {len(data)} bytes is too short: the patch table needs at least "
+            f"{need}. This is not the XDJ-RX3 rbp binary."
+        )
 
 
 def apply(data):
@@ -59,6 +76,8 @@ def main():
     with open(args.input, "rb") as f:
         data = bytearray(f.read())
 
+    check_size(data)
+
     if args.check:
         for off, stock, patched, note in PATCHES:
             cur = struct.unpack_from("<I", data, off)[0]
@@ -68,7 +87,7 @@ def main():
 
     print(f"patching {args.input} ({len(data)} bytes)")
     apply(data)
-    out = args.output or "rbp-audio-sclive4"
+    out = args.output or "rbp-nopc"
     with open(out, "wb") as f:
         f.write(data)
     print(f"wrote {out}")

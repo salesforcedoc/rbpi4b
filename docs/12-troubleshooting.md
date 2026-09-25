@@ -14,7 +14,7 @@ Symptom → cause → fix.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| rbp exits ~1 s after start, `crash.log` shows `[NULL+0x9c]` | `getPcController()` NULL deref | apply `scripts/patch-rbp-sclive4.py` ([03](03-port-plan.md)) |
+| rbp exits ~1 s after start, `crash.log` shows `[NULL+0x9c]` | `getPcController()` NULL deref | apply `scripts/patch-rbp-nopc.py` ([03](03-port-plan.md)) |
 | `sh: ls: not found` in `rbp-p.log` | chroot launched without `/bin` in `PATH` | set `PATH=/bin:/sbin:/usr/bin:/usr/sbin` |
 | PLAY does nothing, CUE fires an effect | wrong MIDI channel map | decks are on MIDI ch 4/5 ([08](08-controls.md)) |
 | Faders/EQs dead, PLAY works | absolute controls sent as `OP_ROTATE` | send `OP_VALUE` for fader/trim/EQ/xfader ([08](08-controls.md)) |

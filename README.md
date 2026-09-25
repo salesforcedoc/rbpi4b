@@ -108,7 +108,7 @@ rblive4/
 │        controls, audio, usb, launcher, troubleshooting)
 ├── scripts/
 │   ├── build-chroot.sh       host: assemble the soft-float chroot tarball
-│   ├── patch-rbp-sclive4.py  SC Live 4-only rbp patch (getPcController)
+│   ├── patch-rbp-nopc.py  SC Live 4-only rbp patch (getPcController)
 │   ├── device/               scripts that run on the SC Live 4 (+ timeout.c)
 │   └── shims/                LD_PRELOAD shims (soft-float, JP21) + Makefile
 ├── tools/
