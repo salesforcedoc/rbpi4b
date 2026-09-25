@@ -56,7 +56,21 @@ tar -C "$DEPLOY" -xzf "$TARBALL"
 RB_CONF_FILE="$DEPLOY/rb.conf"
 . "$RB_CONF_FILE"
 
-[ "${RB_CONF_VERSION:-0}" = "1" ] || warn "rb.conf reports schema v${RB_CONF_VERSION:-?}; this installer expects v1"
+# The expected schema lives in lib.sh (RB_CONF_SCHEMA) rather than here, so
+# there is one number and not two. This warning previously hardcoded "1" while
+# rb.conf declared 2 — which is precisely the drift the version exists to catch,
+# and it would have warned on every correct install.
+#
+# It stays a warning rather than a failure, unlike the other three scripts,
+# which refuse to run on a mismatch (rb_load_conf): by this point the tarball is
+# already unpacked, so completing the install is more useful than aborting it.
+if [ -f "$HERE/lib.sh" ]; then
+  . "$HERE/lib.sh"
+  [ "${RB_CONF_VERSION:-0}" = "$RB_CONF_SCHEMA" ] || \
+    warn "rb.conf reports schema v${RB_CONF_VERSION:-?}; these scripts expect v$RB_CONF_SCHEMA"
+else
+  warn "lib.sh is not beside install.sh, so rb.conf's schema could not be checked"
+fi
 
 CHROOT="${RB_CHROOT:-$DEPLOY/rbx3-run}"
 LOG_DIR="${RB_LOG_DIR:-$DEPLOY/log}"
@@ -66,8 +80,9 @@ mkdir -p "$LOG_DIR" "${RB_MEDIA_MOUNT:-$DEPLOY/media/usb1}"
 # --- device scripts ---------------------------------------------------------
 
 # The launcher scripts live at the deploy root on the device, next to rb.conf,
-# matching how they were laid out on the previous target.
-for s in fix-dev.sh start-rb.sh usb-watch.sh rb.conf; do
+# matching how they were laid out on the previous target. lib.sh is required —
+# all three scripts source it for rb.conf loading and the /proc process lookup.
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"

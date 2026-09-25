@@ -18,6 +18,11 @@
  *
  * Read-only: opens O_RDONLY and never writes to the device.
  */
+
+/* usleep(). Declared here so the tool still builds if someone adds a -std= or
+ * -D_POSIX_C_SOURCE= that would otherwise hide it. */
+#define _DEFAULT_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +32,43 @@
 #include <errno.h>
 #include <linux/input.h>
 #include <sys/ioctl.h>
+
+/*
+ * struct input_event's timestamp is not a stable member name. The header picks
+ * between two layouts on __USE_TIME_BITS64 (which a 32-bit target gets by
+ * defining _TIME_BITS=64, as the current Pi OS does):
+ *
+ *   not defined                       defined
+ *   ----------------------------      ----------------------------
+ *   struct timeval time;              __kernel_ulong_t __sec;
+ *   #define input_event_sec time.tv_sec   __kernel_ulong_t __usec;
+ *
+ * so on the second branch `ev.time` does not exist and naming it is a hard
+ * compile error: "error: 'struct input_event' has no member named 'time'".
+ *
+ * Hence: go through the accessors, never through the member. They are macros
+ * over it, so they only work in member position -- ev.input_event_sec. Both
+ * branches are 4 bytes wide on arm32 (__kernel_ulong_t is `unsigned long`
+ * there, not 8), and 8 bytes on aarch64.
+ *
+ * Fallback for header sets older than Linux 5.4, which had the __sec/__usec
+ * branch but not yet the accessors that name it.
+ */
+#ifndef input_event_sec
+#define input_event_sec  __sec
+#define input_event_usec __usec
+#endif
+
+/*
+ * A wrong sizeof() here is a silent failure rather than a loud one: read()
+ * would return short on every event and the live loop below would print
+ * nothing forever. Pin the size to the two layouts that exist -- 16 on arm32
+ * (both branches above), 24 on aarch64 (16-byte timeval + 8 bytes of type,
+ * code and value).
+ */
+_Static_assert(sizeof(struct input_event) == 16 ||
+               sizeof(struct input_event) == 24,
+               "unexpected struct input_event layout: check <linux/input.h>");
 
 #define BITS_PER_LONG (8 * (int)sizeof(unsigned long))
 #define NLONGS(x)     (((x) + BITS_PER_LONG - 1) / BITS_PER_LONG)
@@ -347,18 +389,21 @@ int main(int argc, char **argv)
                 continue;
             last_code = ev.code;
 
-            /* tv_sec/tv_usec are long on 32-bit ARM, so cast rather than
-             * assuming unsigned int (this is the bug touchdump.c shipped). */
+            /* input_event_sec/usec, not ev.time.* (see the top of the file).
+             * The field is 4 bytes on arm32 and 8 on aarch64, so neither %u nor
+             * %lu is right on both -- cast up and use %llu. The timestamp is
+             * here only to show event rate and to line a press up against what
+             * the UI did, so it is worth this much and no more. */
             if (n)
-                printf("t=%lu.%06lu type=%u(%s) code=%u(%s) value=%d\n",
-                       (unsigned long)ev.time.tv_sec,
-                       (unsigned long)ev.time.tv_usec,
+                printf("t=%llu.%06llu type=%u(%s) code=%u(%s) value=%d\n",
+                       (unsigned long long)ev.input_event_sec,
+                       (unsigned long long)ev.input_event_usec,
                        ev.type, ev_name(ev.type) ? ev_name(ev.type) : "?",
                        ev.code, n, ev.value);
             else
-                printf("t=%lu.%06lu type=%u code=%u value=%d\n",
-                       (unsigned long)ev.time.tv_sec,
-                       (unsigned long)ev.time.tv_usec,
+                printf("t=%llu.%06llu type=%u code=%u value=%d\n",
+                       (unsigned long long)ev.input_event_sec,
+                       (unsigned long long)ev.input_event_usec,
                        ev.type, ev.code, ev.value);
             fflush(stdout);
         } else if (r < 0 && errno != EAGAIN && errno != EINTR) {

@@ -1,60 +1,69 @@
 # 00 — Overview
 
 rblive4 runs the **Pioneer DJ XDJ-RX3 standalone rekordbox player** (`rbp`,
-called `rb` internally) on a **Denon DJ SC Live 4**. Both machines are ARMv7
-Linux devices, and the XDJ-RX3 firmware builds its player as **soft-float
-ARM32** — which the SC Live 4's hard-float RK3288 kernel executes natively.
+called `rb` internally) on a **Raspberry Pi 4B**. The XDJ-RX3 firmware builds
+its player as **soft-float ARM32**; Pi OS 32-bit is armv7l with a hard-float
+kernel, which executes soft-float EABI ELF natively — the same arrangement the
+Prime GO and SC Live 4 ports relied on, and the reason a 64-bit image is not an
+option.
 
 There is no emulation. The real `rbp` binary from the XDJ-RX3 firmware runs
-directly, with a set of thin shims translating the SC Live 4's hardware into
-what `rbp` expects. The SC Live 4 is the Prime GO's sibling: same SoC, same
-touch controller, same panel geometry, same control-surface transport, same
-Buildroot 2023.02.11 base.
+directly, with a set of thin shims translating the Pi's hardware — HDMI
+framebuffer, USB MIDI controller, USB audio — into what `rbp` expects.
+
+The target document is [13 — Raspberry Pi 4](13-raspberrypi4.md); it carries the
+image, the `cmdline.txt` recipe and the bring-up order. This chapter is the map
+of the whole thing.
 
 ## The pieces
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         Denon SC Live 4                             │
-│  Rockchip RK3288 · 800×1280 portrait panel · ILI2117 touch          │
-│  JP21 8-ch audio codec · USB-A host · MIDI control surface          │
+│                        Raspberry Pi 4B                              │
+│  BCM2711 · HDMI (vc4drmfb) · USB-A host · no touchscreen            │
+│  DDJ-FLX4 on USB: MIDI control surface + 4-channel USB audio        │
 │                                                                     │
-│  ┌──────────────────────── /data/rbx3-run (chroot) ────────────────┐│
+│  ┌────────────── /opt/rblive4/rbx3-run (chroot) ────────────────────┐│
 │  │  soft-float glibc 2.13 + RX3 libs + DirectFB 1.4              ││
 │  │                                                               ││
 │  │   rbp-audio  ──  the XDJ-RX3 rekordbox player                 ││
 │  │      ▲  ▲  ▲                                                  ││
-│  │      │  │  └── knobshim2.so   SC Live 4 MIDI → RX3 keycodes   ││
-│  │      │  └───── audioshim.so   JUCE/ALSA → hw:1,0 (8ch)        ││
-│  │      └──────── fbshim-tsc.so  fb ioctl + touch translation    ││
+│  │      │  │  └── knobshim.so    DDJ-FLX4 MIDI → RX3 keycodes    ││
+│  │      │  └───── audioshim.so   JUCE/ALSA → FLX4 USB audio      ││
+│  │      └──────── fbshim.so      fb ioctl + evdev → tsc2007      ││
 │  │                                                               ││
-│  │   libdirectfb_fbdev.so (rebuilt) ── rotation + RGB565→RGB32   ││
+│  │   libdirectfb_fbdev.so (rebuilt) ── the present path          ││
 │  └────────────────────────────────────────────────────────────────┘│
 │        ▲              ▲                ▲               ▲           │
-│     /dev/fb0     /dev/input/event0   MIDI 16:0     /tmp/udev_usb1  │
-│   (800x1280x32)   (ILI2117 evdev)   control surface   (hotplug)    │
+│     /dev/fb0    /dev/input/eventN   MIDI "DDJ-FLX4"  /tmp/udev_usb1│
+│   (HDMI, 16bpp)   (pointer evdev)     seq port        (hotplug)    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Why each piece is needed
 
-| Mismatch | XDJ-RX3 has | SC Live 4 has | Solution |
+| Mismatch | XDJ-RX3 has | Pi 4 has | Solution |
 |---|---|---|---|
-| CPU float ABI | soft-float ARM32 | hard-float ARMv7 kernel | soft-float chroot; kernel runs soft-float ELF fine |
-| Display | 1280×800 landscape, RGB565 | 800×1280 portrait, RGB32, triple-buffered DRM fb | rebuilt DirectFB fbdev driver rotates + converts |
-| Touchscreen | tsc2007 resistive via `/dev/tsc2007_2-0048` | ILI2117 capacitive evdev | `fbshim-tsc.so` synthesises the tsc2007 protocol |
-| Controls | Pioneer front-panel MCUs (EUP/SUB) | ALSA MIDI "Control Surface" | `knobshim2.so` maps MIDI → `sendKey()` |
-| Audio | 3× discrete CS4344 DACs | single JP21 **8-channel** codec | `audioshim.so` maps rbp's channels onto `hw:1,0` |
-| USB | 2 host ports + sub-MCU | USB-A host port(s) | `usb-watch.sh` + native DeviceSQL import |
+| CPU float ABI | soft-float ARM32 | hard-float armv7l kernel | soft-float chroot; the kernel runs soft-float ELF natively |
+| Display | 1280×800 landscape, RGB565 | `vc4drmfb` over HDMI, 16 bpp RGB565 expected | rebuilt DirectFB fbdev driver; the present path bridges any geometry/format difference |
+| Pointing | tsc2007 resistive via `/dev/tsc2007_2-0048` | **no touchscreen** — an evdev pointer | `fbshim.so` synthesises the tsc2007 protocol from a discovered evdev device |
+| Controls | Pioneer front-panel MCUs (EUP/SUB) | DDJ-FLX4 over USB MIDI | `knobshim.so` maps MIDI → `sendKey()` |
+| Audio | 3× discrete CS4344 DACs | the FLX4's 4-channel USB audio | `audioshim.so` maps rbp's streams onto the FLX4's output pairs |
+| USB | 2 host ports + sub-MCU | USB-A host ports | `usb-watch.sh` + native DeviceSQL import |
 | Music DB | internal EDB daemon | — | RX3 `edb_streamd` runs in the chroot |
+
+Every row above is a *device* difference. Nothing in the list touches the
+binary, which is why the `rbp` patch table and the shims' hardcoded `rbp`
+addresses survive the move unchanged — see
+[03 — Port plan](03-port-plan.md).
 
 ## Data flow for a typical action
 
 **Browsing a USB stick**
 
 ```
-stick → kernel usb-storage → usb-watch.sh mounts /media/usb1/sda1
-      → bind-mount into chroot
+stick → kernel usb-storage → usb-watch.sh mounts /opt/rblive4/media/usb1/sda1
+      → bind-mount into chroot at /media/usb1/sda1
       → write "mount /media/usb1/sda1" to /tmp/udev_usb1
       → rbp UsbMountManager → DbProxy → DbIF::mount('C')
       → DeviceSQL scans export.pdb → detect flag = 2
@@ -64,35 +73,55 @@ stick → kernel usb-storage → usb-watch.sh mounts /media/usb1/sda1
 **Loading + playing a track**
 
 ```
-LOAD button → SC Live 4 MIDI note → knobshim2 → sendKey(0x4311)
+LOAD  → FLX4 MIDI → knobshim → sendKey(0x4311)
       → rbp loads track + ANLZ analysis → waveform
-PLAY button → knobshim2 → sendKey(0x4101)
+PLAY  → knobshim → sendKey(0x4101)
       → DjEngineIF::play → PlayEngine clocked by the ALSA callback
-      → audioshim feeds S24_LE periods to hw:1,0 @ 44.1 kHz
-      → master (ch 0/1) + headphones (ch 4/5) + monitors (ch 6/7) on the JP21 codec
+      → audioshim feeds S24_LE periods to plughw:CARD=DDJFLX4,DEV=0
+      → master (pair 1) + headphones (pair 2) on the FLX4
 ```
+
+The note numbers above are what the FLX4 map sends, and the FLX4 side of the
+first hop is the one part of this diagram nobody has measured yet: the map is
+written and fixture-tested, but its tables come from Pioneer's published MIDI
+list rather than from the unit — see [15 — DDJ-FLX4 MIDI](15-flx4-midi.md).
 
 ## Repository map
 
-See the top-level [README](../README.md). The device facts are in
-[01 — Device survey](01-device-survey.md), the comparison in
-[02 — Hardware](02-hardware.md), and the reuse/change plan in
+See the top-level [README](../README.md). The device facts for the previous
+target are in [01 — Device survey](01-device-survey.md), the comparison of all
+four machines in [02 — Hardware](02-hardware.md), and the reuse/change plan in
 [03 — Port plan](03-port-plan.md).
 
 ## Prerequisites
 
-* A Denon SC Live 4 with **root SSH** enabled (`freelive4` method), see
-  [01 — Device survey](01-device-survey.md).
-* A Linux workstation with `arm-linux-gnueabi-gcc` (soft-float) and Docker.
+* A Raspberry Pi 4B running **Pi OS Lite 32-bit**, with root and network.
+* A DDJ-FLX4 (or, for bring-up, nothing at all — display, pointing and audio can
+  all be tested before a controller is plugged in).
+* A workstation with `arm-linux-gnueabi-gcc` (soft-float) and, for the DirectFB
+  build, Docker or an equivalent ARM toolchain.
 * Extracted XDJ-RX3 v1.20 assets (rootfs, gui, `rbp-audio`) — see
   [04 — Firmware assets](04-firmware-assets.md).
-* ~100 MB free on the SC Live 4's `/data` partition (5.6 GB available).
+* An SD card with room for the chroot — a few hundred MB extracted, which is
+  nothing on an 8 GB card but is not nothing on a 4 GB one.
 
 ## Caveats
 
-* The SC Live 4 boots with `panic_on_oops=1`. Use the tuned, stable DirectFB
-  stack described in [06 — Display](06-display.md); a wrong display path can
-  panic and reboot the unit. See [12 — Troubleshooting](12-troubleshooting.md).
-* The SC Live 4 is a live DJ unit. **Back up `/data`** (the library + any
-  Engine OS state) before experimenting, and don't leave the rbp chroot
-  autostarting if you need the stock Engine OS for a gig.
+* **The tree is mid-port.** Where a number is an expectation rather than a
+  measurement, the document says so; [docs/README](README.md) explains the
+  convention, and [13](13-raspberrypi4.md)'s bring-up table is the honest
+  current state.
+* **Use the 32-bit image.** 64-bit Pi OS breaks every constraint the shims
+  depend on (32-bit `smem_start`/`time_t`, `SYS_mmap2`, `uc_mcontext.arm_*`,
+  ARM32 machine-code patching). The chroot may still run under a 64-bit kernel
+  with 32-bit emulation, but that is untested and not supported.
+* **The HDMI mode comes from the kernel command line**, not `config.txt`, and
+  the kernel console must be moved off the framebuffer
+  ([13](13-raspberrypi4.md#the-hdmi-mode)). Getting this wrong looks like a
+  display bug and is not one.
+* **`vc4` does not block on vblank.** Its `drm_fbdev` returns from
+  `FBIOPAN_DISPLAY` immediately, so the pacer in the fb shim is load-bearing,
+  not a nicety — without it `rbp`'s RT-priority render thread spins a core.
+* This is a DJ player on a general-purpose computer. It has no vendor OS to fall
+  back to, and no panel MCU: the shims own the device nodes they fake, and
+  `fix-dev.sh` has to recreate them after every reboot.

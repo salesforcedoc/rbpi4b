@@ -184,13 +184,36 @@ int main(int argc, char **argv)
     /* The shim reports a logical 1280x800 RGB565 fb. Whether that matches what
      * is really there decides if a convert is needed at all. */
     printf("\n--- against rbp's expectation (logical 1280x800 RGB565) ---\n");
-    int geom_ok = (var.xres == 1280 && var.yres == 800);
-    printf("  geometry   %s\n",
-           geom_ok ? "MATCHES -- present path is a 1:1 copy"
-                   : "differs -- expect DFB_PRESENT=letterbox (1:1, centred)");
-    if (!geom_ok)
-        printf("             fb is %ux%u; bars will be filled around the 1280x800 image\n",
+    if (var.xres == 1280 && var.yres == 800) {
+        printf("  geometry   MATCHES -- present path is a 1:1 copy, no bars\n");
+    } else if (var.xres >= 1280 && var.yres >= 800) {
+        printf("  geometry   fb is %ux%u: the 1280x800 image FITS 1:1\n",
                var.xres, var.yres);
+        printf("             -> DFB_PRESENT=letterbox, bars of %u columns and %u rows\n",
+               (var.xres - 1280) / 2, (var.yres - 800) / 2);
+        printf("             (best case: no scaler, no distortion)\n");
+    } else {
+        /* The case worth getting right, and easy to get wrong: a 1:1 copy needs
+         * the image to FIT. When the fb is the smaller one -- 1280x720 is the
+         * one to expect, because it is what a sink that refused 1280x800 falls
+         * back to -- there is no 1:1 placement at all and DFB_PRESENT=letterbox
+         * cannot be satisfied. A crop or a scale is the only way onto the
+         * screen, and both change what the operator sees. */
+        double sx = var.xres / 1280.0, sy = var.yres / 800.0;
+        double s = sx < sy ? sx : sy;         /* uniform: preserve the aspect */
+        printf("  geometry   fb is %ux%u: SMALLER than the 1280x800 image, so a 1:1\n",
+               var.xres, var.yres);
+        printf("             copy does NOT fit -- letterbox is impossible here.\n");
+        printf("             the ways out, in order of how much they cost:\n");
+        printf("             1. set a mode >= 1280x800 and use the 1:1 path -- check\n"
+               "                the `modes` file of the connector in /sys/class/drm/\n");
+        printf("             2. scale uniformly by %.4f -> %ux%u, bars in the other\n",
+               s, (unsigned)(1280 * s), (unsigned)(800 * s));
+        printf("                axis (no distortion, but a real per-frame scaler)\n");
+        printf("             3. crop %u columns and %u rows, losing UI at the edges\n",
+               var.xres < 1280 ? 1280 - var.xres : 0,
+               var.yres < 800 ? 800 - var.yres : 0);
+    }
 
     close(fd);
     return 0;

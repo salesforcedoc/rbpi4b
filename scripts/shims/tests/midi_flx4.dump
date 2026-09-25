@@ -1,0 +1,198 @@
+# rblive4 midi dump v1 -- t is seconds since the first event
+#
+# A HAND-WRITTEN fixture, not a recording: no DDJ-FLX4 was attached when it was
+# written and no rbp was running. It exists so that `make test` can drive the real
+# map (map_flx4.c) over the real dump format with no hardware. Each line is
+# chosen so that the expectation table in test_flx4.c is produced by exactly one
+# line of this file -- and, where a line is expected to produce NOTHING, so that a
+# spurious keycode shows up as a shift in the whole table below it.
+#
+# THE NUMBERS HERE ARE THE MAP'S OWN TABLES. Both come from Pioneer's published
+# DDJ-FLX4 MIDI message list and neither is evidence about the unit: this file
+# pins that the map dispatches what it says it dispatches, which is a statement
+# about map_flx4.c and not about an FLX4. A passing test means the tables are
+# self-consistent, not that they are right. See the provenance block at the top
+# of map_flx4.c and docs/15-flx4-midi.md.
+#
+# The one class of event deliberately ABSENT is flx4_startup()'s: it writes two
+# absolute rbp addresses (rbp_abi.h's ADDR_MIXER_ROUTE_PLAYER0/1), and under
+# qemu-arm that address is not mapped, so it is a segfault rather than a failed
+# check. test_flx4.c therefore never calls startup(), and this fixture cannot
+# cover what it does -- which is the mixer routing, the Sound Color FX type and
+# the master level. That is the same reason the JP21 fixture avoids its two
+# absolute-address gestures, and it is why the routing has to be confirmed on the
+# device.
+#
+# What a pass does NOT say, and the two things most likely to be wrong:
+#
+#   - The CHANNEL numbers. The vendor list prints them 1-based and everything
+#     here is 0-based (the list's minus one). A deck on the wrong channel makes
+#     every control on it do nothing at all, and no fixture can catch that,
+#     because this file was written from the same reading of the list the map
+#     was.
+#   - JOG_PPR, the pitch polarity and the whole pad base+pad encoding. They are
+#     marked TODO: unverified in the map; what is pinned below is the map's own
+#     choice, not the unit's behaviour.
+0.000000 SKIP type=8
+
+# ---- deck 1 buttons: press/release, a repeat press and a stray release ----
+0.001000 NOTEON ch=0 note=11 vel=127
+0.002000 NOTEOFF ch=0 note=11 vel=0
+0.003000 NOTEON ch=0 note=11 vel=127
+0.004000 NOTEON ch=0 note=11 vel=127
+0.005000 NOTEOFF ch=0 note=11 vel=0
+0.006000 NOTEOFF ch=0 note=11 vel=0
+0.007000 NOTEON ch=0 note=12 vel=127
+0.008000 NOTEOFF ch=0 note=12 vel=0
+0.009000 NOTEON ch=0 note=54 vel=127
+0.010000 NOTEOFF ch=0 note=54 vel=0
+0.011000 NOTEON ch=0 note=16 vel=127
+0.012000 NOTEOFF ch=0 note=16 vel=0
+0.013000 NOTEON ch=0 note=17 vel=127
+0.014000 NOTEOFF ch=0 note=17 vel=0
+0.015000 NOTEON ch=0 note=77 vel=127
+0.016000 NOTEOFF ch=0 note=77 vel=0
+0.017000 NOTEON ch=0 note=27 vel=127
+0.018000 NOTEOFF ch=0 note=27 vel=0
+# pads: base 0 (HOT CUE) pad 1, then base 32 (BEAT JUMP) pad 8 on the same deck.
+0.019000 NOTEON ch=7 note=0 vel=127
+0.020000 NOTEOFF ch=7 note=0 vel=0
+0.021000 NOTEON ch=7 note=39 vel=127
+0.022000 NOTEOFF ch=7 note=39 vel=0
+0.023000 NOTEON ch=0 note=32 vel=127
+0.024000 NOTEOFF ch=0 note=32 vel=0
+# Two pads that must produce NOTHING: the +SHIFT pad layer (a second channel per
+# deck) and a mode rbp has no equivalent for (base 96, BEAT LOOP).
+0.025000 NOTEON ch=8 note=0 vel=127
+0.026000 NOTEON ch=7 note=96 vel=127
+# CH CUE: no rbp keycode at all -- the mixer engine call is the whole effect, and
+# the toggle is decided from the engine's own state (asserted in the test).
+0.027000 NOTEON ch=0 note=84 vel=127
+0.028000 NOTEOFF ch=0 note=84 vel=0
+# BEAT SYNC: the gesture is one edge and the other is swallowed (footnote *3).
+0.029000 NOTEON ch=0 note=88 vel=127
+0.030000 NOTEOFF ch=0 note=88 vel=0
+0.031000 NOTEON ch=0 note=92 vel=127
+# Log-only controls: known to the table, no rbp keycode behind them.
+0.032000 NOTEON ch=0 note=63 vel=127
+0.033000 NOTEON ch=0 note=81 vel=127
+0.034000 NOTEON ch=0 note=83 vel=127
+0.035000 NOTEON ch=0 note=30 vel=127
+0.036000 NOTEON ch=0 note=34 vel=127
+# And one the table does not have at all: PLAY while SHIFT is held (note 14).
+0.037000 NOTEON ch=0 note=14 vel=127
+
+# ---- deck 1 mixer strip and Sound Color FX ----
+0.038000 CONTROLLER ch=0 cc=4 val=127
+0.039000 CONTROLLER ch=0 cc=4 val=127
+0.040000 CONTROLLER ch=0 cc=7 val=64
+0.041000 CONTROLLER ch=0 cc=11 val=0
+0.042000 CONTROLLER ch=0 cc=15 val=32
+0.043000 CONTROLLER ch=0 cc=19 val=127
+0.044000 CONTROLLER ch=0 cc=19 val=0
+# The Sound Color FX knob, which is on the MIXER's channel even though it turns
+# one deck's strip (the list's "3-5 CFX, Deck 1, channel 7, CC 23"): K_COLOR goes
+# to deck 1's send channel (sch 1). Val 32 rather than 127 so that the same
+# knob's later event (0.091000, val 64) is a different value and not a dropped
+# repeat.
+0.045000 CONTROLLER ch=6 cc=23 val=32
+# A 14-bit LSB with no MSB row behind it: unmapped, and must stay that way.
+0.046000 CONTROLLER ch=0 cc=36 val=0
+
+# ---- deck 1 jog: relative and 0x40-centred, both directions, all four CCs ----
+0.047000 CONTROLLER ch=0 cc=34 val=65
+0.048000 CONTROLLER ch=0 cc=34 val=67
+0.049000 CONTROLLER ch=0 cc=41 val=64
+0.050000 CONTROLLER ch=0 cc=41 val=65
+0.051000 CONTROLLER ch=0 cc=33 val=62
+0.052000 CONTROLLER ch=0 cc=35 val=63
+0.053000 CONTROLLER ch=0 cc=34 val=66
+
+# ---- deck 1 pitch: the full 14-bit pair, MSB first the way the list shows it.
+# The "+" end of the fader (0x7F/0x7F), the centre (0x40/0x00), the "-" end.
+0.054000 CONTROLLER ch=0 cc=0 val=127
+0.055000 CONTROLLER ch=0 cc=32 val=127
+0.056000 CONTROLLER ch=0 cc=0 val=64
+0.057000 CONTROLLER ch=0 cc=32 val=0
+0.058000 CONTROLLER ch=0 cc=0 val=0
+0.059000 CONTROLLER ch=0 cc=32 val=0
+
+# ---- deck 2: the same controls, to pin which channel reaches which player,
+# plus an LSB that arrives before any MSB (nothing to combine yet) ----
+0.060000 NOTEON ch=1 note=11 vel=127
+0.061000 NOTEOFF ch=1 note=11 vel=0
+0.062000 NOTEOFF ch=1 note=88 vel=0
+0.063000 NOTEON ch=1 note=84 vel=127
+0.064000 CONTROLLER ch=1 cc=4 val=127
+0.065000 NOTEON ch=1 note=27 vel=127
+0.066000 NOTEOFF ch=1 note=27 vel=0
+0.067000 NOTEON ch=9 note=3 vel=127
+0.068000 NOTEOFF ch=9 note=3 vel=0
+0.069000 NOTEON ch=10 note=3 vel=127
+0.070000 CONTROLLER ch=1 cc=19 val=127
+0.071000 CONTROLLER ch=1 cc=34 val=65
+0.072000 CONTROLLER ch=1 cc=34 val=64
+0.073000 CONTROLLER ch=1 cc=34 val=68
+0.074000 CONTROLLER ch=1 cc=32 val=64
+0.075000 CONTROLLER ch=1 cc=0 val=64
+0.076000 CONTROLLER ch=1 cc=32 val=0
+
+# ---- mixer / browse / LOAD, all on list ch 7 ----
+0.077000 NOTEON ch=6 note=65 vel=127
+0.078000 NOTEOFF ch=6 note=65 vel=0
+0.079000 CONTROLLER ch=6 cc=64 val=1
+0.080000 CONTROLLER ch=6 cc=64 val=127
+# The browse encoder's direction split: 63 is clockwise, 64 is anticlockwise.
+# This is the unit's only 63/64 boundary -- there is no CC-as-button on it (every
+# FLX4 toggle is a note), so there is no threshold row to test.
+0.081000 CONTROLLER ch=6 cc=64 val=63
+0.082000 CONTROLLER ch=6 cc=64 val=64
+0.083000 CONTROLLER ch=6 cc=100 val=1
+0.084000 NOTEON ch=6 note=70 vel=127
+0.085000 NOTEOFF ch=6 note=70 vel=0
+0.086000 NOTEON ch=6 note=71 vel=127
+0.087000 NOTEOFF ch=6 note=71 vel=0
+0.088000 NOTEON ch=6 note=99 vel=127
+0.089000 NOTEOFF ch=6 note=99 vel=0
+0.090000 CONTROLLER ch=6 cc=31 val=127
+0.091000 CONTROLLER ch=6 cc=23 val=64
+0.092000 CONTROLLER ch=6 cc=24 val=0
+0.093000 CONTROLLER ch=6 cc=12 val=64
+0.094000 CONTROLLER ch=6 cc=13 val=0
+# Log-only mixer controls, and the two knobs the map deliberately leaves alone.
+0.095000 NOTEON ch=6 note=0 vel=127
+0.096000 NOTEON ch=6 note=1 vel=127
+0.097000 NOTEON ch=6 note=109 vel=127
+0.098000 CONTROLLER ch=6 cc=8 val=64
+0.099000 CONTROLLER ch=6 cc=5 val=64
+# A deck control on the mixer's channel: the tables are per (channel, control),
+# so this must not reach deck 1's fader.
+0.100000 CONTROLLER ch=6 cc=19 val=64
+
+# ---- Beat FX, on its own channels, and the FX CH SELECT lever ----
+0.101000 NOTEON ch=4 note=71 vel=127
+0.102000 NOTEOFF ch=4 note=71 vel=0
+0.103000 NOTEON ch=5 note=71 vel=127
+0.104000 NOTEOFF ch=5 note=71 vel=0
+0.105000 NOTEON ch=4 note=99 vel=127
+0.106000 NOTEOFF ch=4 note=99 vel=0
+0.107000 NOTEON ch=4 note=99 vel=127
+0.108000 NOTEON ch=4 note=74 vel=127
+0.109000 NOTEON ch=4 note=75 vel=127
+# LEVEL/DEPTH on both candidate channels: the vendor table's Channel column and
+# its status byte disagree (see the map's table comment).
+0.110000 CONTROLLER ch=4 cc=2 val=64
+0.111000 CONTROLLER ch=5 cc=2 val=0
+# The lever: CH1 (leg A), then CH2 (leg B), then CH1&CH2 (no rbp equivalent),
+# then back to leg B alone -- which is where it already is, so nothing is sent.
+0.112000 NOTEON ch=4 note=16 vel=127
+0.113000 NOTEOFF ch=4 note=16 vel=0
+0.114000 NOTEON ch=5 note=17 vel=127
+0.115000 NOTEON ch=4 note=16 vel=127
+0.116000 NOTEOFF ch=4 note=16 vel=0
+0.117000 NOTEOFF ch=5 note=17 vel=0
+0.118000 NOTEOFF ch=5 note=16 vel=0
+
+# The channel CUE button pressed a second time: the engine still has deck 1
+# cued, so this press is the OFF edge.
+0.119000 NOTEON ch=0 note=84 vel=127

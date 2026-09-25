@@ -2,11 +2,16 @@
  * shmstate.h — the contract for state shared *between* preloaded shims.
  *
  * Two of the three shims are not independent. The controls shim decides what
- * the mixer is doing (cue mix, cue level, master level, split cue) and the audio
- * shim has to apply it; the audio shim measures the master level and the
+ * the mixer is doing (master level, cue mix/level, split cue) and the audio shim
+ * applies what it can of it; the audio shim measures the master level and the
  * controls shim has to light the meters. They talk through plain globals in the
  * dynamic symbol table, because a shim cannot call into another shim it did not
  * link against.
+ *
+ * Which of those the audio side actually reads is target-dependent and noted per
+ * symbol below: on the Pi the master gain is applied and the cue pair is routed
+ * straight through rbp's own phone stream, so the cue mix/level knobs have no
+ * reader in this shim and no speaker pair exists to consume g_speaker_* at all.
  *
  * That makes three things load-bearing, none of which the compiler checks:
  *
@@ -53,11 +58,25 @@
 extern volatile float g_master_gain;
 
 /* headphone cue mix and level. g_cue_mix: 0 = cue only, 1 = main only.
- * g_cue_gain: 0..1. */
+ * g_cue_gain: 0..1.
+ *
+ * On the Pi these have no reader in the audio path, deliberately. rbp's own
+ * phone stream already carries cue and master summed and time-aligned, and
+ * audioshim routes that stream to the headphone pair; the SC Live 4's
+ * audioshim instead summed the two and combed. The cue buses the FLX4's knobs
+ * drive still have to reach the mix, and that is a job for rbp's mixer engine,
+ * in the controls shim (M3b). Until then these are written and unread. */
 extern volatile float g_cue_gain;
 extern volatile float g_cue_mix;
 
-/* built-in speaker volume (0..1) and on/off switch. 1 = enabled. */
+/* built-in speaker volume (0..1) and on/off switch. 1 = enabled.
+ *
+ * Only the SC Live 4 had built-in speakers. There is no consumer on a Pi and
+ * no pair in RB_AUDIO_MAP for it, so these two are dead weight here: the FLX4
+ * has no speaker output at all. Left in place with the ABI version unchanged
+ * rather than removed quietly, so the deletion happens deliberately — dropping
+ * them means bumping SHMSTATE_ABI_VERSION and updating the producers in the
+ * controls shim, and both steps want to be a decision, not an accident. */
 extern volatile float g_speaker_gain;
 extern volatile int   g_speaker_on;
 

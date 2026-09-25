@@ -1,13 +1,18 @@
 # tools/build-directfb
 
-Patched **DirectFB 1.4.16** for the Rockchip `rockchipdrmfb` (the Prime GO and
-SC Live 4 share the same display situation).
+Patched **DirectFB 1.4.16** for a DRM-fbdev-emulation framebuffer.
 
 `rbp` renders through DirectFB. The stock RX3 fbdev driver assumes a 16 bpp,
-1280×800, pannable i.MX6 framebuffer. The RK3288 port has a fixed 32 bpp,
-triple-buffered DRM framebuffer with no panning and no rotation. Without
-changes, the modeset is rejected (`EINVAL`), DirectFB corrupts its layer
-bookkeeping, and `rbp` crashes (sometimes rebooting the device).
+1280×800, pannable i.MX6 framebuffer. A `drm_fb_helper` framebuffer (the
+Rockchip `rockchipdrmfb` this port started on, and the Raspberry Pi's
+`vc4drmfb`) has a fixed bpp, no panning and no rotation. Without changes, the
+modeset is rejected (`EINVAL`), DirectFB corrupts its layer bookkeeping, and
+`rbp` crashes (on the Rockchip, sometimes rebooting the device).
+
+The diff is written against `drm_fb_helper`'s behaviour generally, not against
+one SoC: the present path decides what to do from the geometry it *reads back*
+rather than from assumptions about the panel. It has been run on the Rockchip
+(Prime GO / SC Live 4); the Raspberry Pi 4 is the current target.
 
 ## Files
 
@@ -48,8 +53,9 @@ produced together.
 
 ## Build
 
-Requires a DirectFB 1.4.x tree (tested with 1.4.16), `autoconf`/`automake`,
-`libtool`, `pkg-config` and the soft-float EABI5 cross compiler.
+Requires a DirectFB 1.4.x tree (the diff is against 1.4.16),
+`autoconf`/`automake`, `libtool`, `pkg-config` and the soft-float EABI5 cross
+compiler.
 
 ```bash
 # 0. toolchain
@@ -57,9 +63,12 @@ sudo apt-get install gcc-arm-linux-gnueabi libc6-dev-armel-cross \
     autoconf automake libtool pkg-config patchelf
 
 # 1. source
+#    There is no 1.4.16 *tag* in deniskropp/DirectFB — only DIRECTFB_1_7_*
+#    — so pin the 1.4 branch by commit. This commit is
+#    DIRECTFB_MICRO_VERSION=16, i.e. what this diff was written against.
 git clone https://github.com/deniskropp/DirectFB.git directfb
 cd directfb
-git checkout v1.4.16
+git checkout 363739298335a0f76dea2de1c9bc523293242baa   # branch directfb-1.4
 
 # 2. apply the patch
 patch -p1 < /path/to/rblive4/tools/build-directfb/directfb-full.diff
@@ -130,8 +139,51 @@ done
 * The modules must be soft-float and reference only `GLIBC_2.4`/`GLIBC_2.7`.
 * Do not set `layer-size` in `directfbrc` (historically caused a 2×/half-width
   bug); do not rely on `layer-rotate` (unimplemented).
-* The diff/sources include **debug instrumentation** (many
-  `fopen("/tmp/dfbdig*.log", …)` blocks). It is harmless but noisy; delete
-  those blocks for a production build. They are not required for the fix.
 * The rotation direction is read from `DFB_ROTATE` (`left`/`right`/`180`) in
   `system_initialize`; rblive4 runs with `DFB_ROTATE=left`.
+
+## Debug instrumentation policy
+
+Bringing a display up on a new SoC is guesswork without ground truth, so this
+diff carries `fopen("/tmp/dfbdig*.log", …)` diagnostics. They are kept to a
+rule, because the same mechanism that makes them useful during bring-up makes
+them a throughput bug if it stays on a hot path:
+
+* **Kept — one-shot, at start-up or first use.** The geometry record
+  (`ROTINIT: real_fb=…`), the fb/layer/windowstack init traces, the
+  `API: Create*EventBuffer` traces. These run once, cost a few kilobytes in
+  `/tmp`, and are the only evidence available when a modeset or a driver probe
+  fails on a target nobody has tried yet. `src/core/local_surface_pool.c`'s
+  two-shot `localsurf.dump` (guarded by `static int dumps`) is in this class:
+  two writes, then never again.
+* **Removed — anything that runs per frame, per input event, or writes a
+  whole surface.** In particular `primaryFlipRegion()` used to `fwrite` the
+  ~6 MB triple buffer to `/tmp/rot_surface.dump` on *every flip*, and
+  `wm/default/default.c` opened a log file per pointer event. Both are
+  throughput bugs, not noise, and both are gone.
+
+So: when adding instrumentation here, make it fire once. If you need a
+per-frame trace, gate it behind an environment variable and say so in the
+comment, rather than leaving it unconditional.
+
+## Maintaining the diff
+
+`directfb-full.diff` is regenerated from two trees, never hand-edited:
+
+```bash
+diff -up --label a/FILE --label b/FILE pristine/FILE patched/FILE
+```
+
+prefixed with `diff --git a/FILE b/FILE`. Hand-editing hunks invites arithmetic
+errors in the `@@` headers — and GNU `patch` silently *refuses* a hunk whose
+line count is internally consistent but whose match score its heuristic scores
+low, which is easy to produce by hand and hard to notice. The diff carries no
+`index` lines (they are meaningless for a fetched tree), so `patch -p1` is the
+supported applier; `git apply` also takes it.
+
+After any change, verify against a pristine tree:
+
+```bash
+patch -p1 --dry-run < tools/build-directfb/directfb-full.diff
+```
+

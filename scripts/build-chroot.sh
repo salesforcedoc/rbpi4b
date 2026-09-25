@@ -80,15 +80,15 @@ if [ -n "$missing" ]; then
 fi
 
 # --- build the shims from source if needed ---------------------------------
-for so in knobshim2.so audioshim.so fbshim-tsc.so; do
+for so in knobshim.so audioshim.so fbshim.so; do
   if [ ! -f "$SHIMS/$so" ]; then
     echo "== building shims (make -C scripts/shims) =="
     make -C "$SHIMS" RX3="$ROOTFS"
     break
   fi
 done
-if [ ! -f "$SHIMS/knobshim2.so" ] || [ ! -f "$SHIMS/audioshim.so" ] || \
-   [ ! -f "$SHIMS/fbshim-tsc.so" ]; then
+if [ ! -f "$SHIMS/knobshim.so" ] || [ ! -f "$SHIMS/audioshim.so" ] || \
+   [ ! -f "$SHIMS/fbshim.so" ]; then
   echo "build-chroot: shims are missing in $SHIMS (build failed?)" >&2
   exit 1
 fi
@@ -125,12 +125,12 @@ mkdir -p "$CHROOT/root/pdj"
 
 # 4. shims -> usr/lib (LD_PRELOAD names) and root/pdj
 echo "[4/7] installing shims..."
-cp "$SHIMS/fbshim-tsc.so"  "$CHROOT/usr/lib/fbshim.so"
+cp "$SHIMS/fbshim.so"      "$CHROOT/usr/lib/fbshim.so"
 cp "$SHIMS/audioshim.so"   "$CHROOT/usr/lib/audioshim.so"
-cp "$SHIMS/knobshim2.so"   "$CHROOT/usr/lib/knobshim.so"
-cp "$SHIMS/fbshim-tsc.so"  "$CHROOT/root/pdj/fbshim.so"
+cp "$SHIMS/knobshim.so"    "$CHROOT/usr/lib/knobshim.so"
+cp "$SHIMS/fbshim.so"      "$CHROOT/root/pdj/fbshim.so"
 cp "$SHIMS/audioshim.so"   "$CHROOT/root/pdj/audioshim.so"
-cp "$SHIMS/knobshim2.so"   "$CHROOT/root/pdj/knobshim.so"
+cp "$SHIMS/knobshim.so"    "$CHROOT/root/pdj/knobshim.so"
 if [ -f "$SHIMS/crashcatch.so" ]; then
   cp "$SHIMS/crashcatch.so" "$CHROOT/usr/lib/crashcatch.so"
 fi

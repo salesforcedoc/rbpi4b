@@ -1,0 +1,64 @@
+# rblive4 midi dump v1 -- t is seconds since the first event
+#
+# A HAND-WRITTEN fixture, not a recording: no SC Live 4 was attached when it was
+# written and no rbp was running. It exists so that `make test` can drive the real
+# map (map_jp21.c) over the real dump format with no hardware. Each line is
+# chosen so that the expectation table in test_midi.c is produced by exactly one
+# line of this file.
+#
+# Two classes of event are deliberately ABSENT, because they are the only ones
+# that reach an absolute rbp address instead of going through one of
+# rbp_bridge.h's named calls, and under qemu-arm that address is not mapped:
+#
+#   ch15 note 4 / ch15 note 6   handle_note() -> source_menu_with_usb1(),
+#                               which reads 0x326f8b8 (rbp's browse mode)
+#   ch15 cc35                   handle_fx_select(), which jumps to
+#                               ADDR_GET_BFX_TYPE to read rbp's current FX type
+#
+# They are also the two gestures the port exists for, so they must be dumped and
+# replayed ON THE DEVICE. See docs/15-flx4-midi.md.
+#
+# A pass here is not evidence that the port works on a deck. What it pins is that
+# the format round-trips, that MIDI_REPLAY feeds the same dispatch path the live
+# sequencer does, and that a JP21's events become the keycodes the map's tables
+# promise.
+0.000000 SKIP type=8
+0.001000 NOTEON ch=15 note=1 vel=127
+0.002000 NOTEOFF ch=15 note=1 vel=0
+0.003000 NOTEON ch=15 note=41 vel=127
+0.004000 NOTEOFF ch=15 note=41 vel=0
+0.005000 NOTEON ch=15 note=11 vel=127
+0.006000 NOTEOFF ch=15 note=11 vel=0
+0.007000 CONTROLLER ch=15 cc=15 val=64
+0.008000 CONTROLLER ch=15 cc=20 val=64
+0.009000 CONTROLLER ch=15 cc=18 val=64
+0.010000 CONTROLLER ch=15 cc=19 val=0
+0.011000 CONTROLLER ch=15 cc=14 val=127
+0.012000 CONTROLLER ch=0 cc=14 val=127
+0.013000 CONTROLLER ch=0 cc=14 val=127
+0.014000 CONTROLLER ch=0 cc=14 val=0
+0.015000 CONTROLLER ch=1 cc=6 val=127
+0.016000 NOTEON ch=0 note=13 vel=127
+0.017000 NOTEON ch=4 note=10 vel=127
+0.018000 NOTEON ch=4 note=10 vel=127
+0.019000 NOTEOFF ch=4 note=10 vel=0
+0.020000 NOTEOFF ch=4 note=10 vel=0
+0.021000 NOTEON ch=4 note=37 vel=127
+0.022000 NOTEON ch=4 note=38 vel=127
+0.023000 NOTEON ch=4 note=8 vel=127
+0.024000 NOTEOFF ch=4 note=8 vel=0
+0.025000 NOTEON ch=4 note=15 vel=127
+0.026000 NOTEON ch=4 note=5 vel=127
+0.027000 NOTEON ch=4 note=4 vel=127
+0.028000 CONTROLLER ch=4 cc=32 val=1
+0.029000 NOTEON ch=4 note=39 vel=127
+0.030000 NOTEON ch=15 note=25 vel=127
+0.031000 CONTROLLER ch=15 cc=36 val=1
+0.032000 NOTEOFF ch=15 note=25 vel=0
+0.033000 CONTROLLER ch=15 cc=36 val=127
+0.034000 CONTROLLER ch=4 cc=17 val=0
+0.035000 CONTROLLER ch=4 cc=49 val=0
+0.036000 CONTROLLER ch=4 cc=17 val=0
+0.037000 CONTROLLER ch=4 cc=49 val=5
+0.038000 CONTROLLER ch=4 cc=31 val=64
+0.039000 CONTROLLER ch=4 cc=75 val=0

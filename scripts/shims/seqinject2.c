@@ -1,5 +1,5 @@
 /*
- * seqinject2.c — static ARM test tool: inject MIDI events into the knobshim2
+ * seqinject2.c — static ARM test tool: inject MIDI events into the controls shim (knobshim.so)
  * sequencer input port (default 128:0, overridable with --dest) to exercise
  * the full Prime GO -> RX3 mapping without touching hardware.
  *
