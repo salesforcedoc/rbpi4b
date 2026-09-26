@@ -501,13 +501,15 @@ FX type; and rbp's ALOOP/SLIPLOOP pad modes.
 
 ## The keyboard fallback
 
-`RB_MIDI_MAP=kbd` needs nothing plugged in: space/z/x are PLAY/CUE/SYNC on deck
-1, 1/2 LOAD, arrows plus Enter drive the selector, Backspace is `K_BACK`, Esc is
-`K_SOURCE`, and the rest of the digit row is the browse screen — 5/6/7/0 are
-SOURCE/BROWSE/TAG LIST/MENU. Mouse right-button is `K_BACK` and the wheel rotates
-the selector. Deck 2 is n/m/, and the full table — with the status of each
-binding, including the two keys declared but with no keycode behind them — is in
-[08 — Controls](08-controls.md#the-keyboard-map-rb_midi_mapkbd).
+The keyboard map (`EVDEV_MAP=kbd`, the default; `MIDI_MAP=kbd` alone for its old
+meaning of "no controller at all") needs nothing plugged in: space/z/x are
+PLAY/CUE/SYNC on deck 1, 1/2 LOAD, arrows plus Enter drive the selector,
+Backspace is `K_BACK`, Esc is `K_SOURCE`, and the rest of the digit row is the
+browse screen — 5/6/7/0 are SOURCE/BROWSE/TAG LIST/MENU. Mouse right-button is
+`K_BACK` and the wheel rotates the selector. Deck 2 is n/m/, and the full table —
+with the status of each binding, including the two keys declared but with no
+keycode behind them — is in
+[08 — Controls](08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone).
 
 It exists so that display and audio can be brought up and tested with an empty
 USB bus, and so the port is *playable* while the FLX4 tables are still
@@ -517,9 +519,11 @@ the fastest path to "the display works, now play something".
 Unlike every other map it does not go through the sequencer at all: its events
 come from `/dev/input/event*` (`evdev_io.c`), which is also why a missing
 `/dev/snd/seq` does not stop it. It has been written, cross-compiled and
-fixture-tested, and it has **not been run on the Pi**: the reader starts only
-under `RB_MIDI_MAP=kbd`, and this target runs the `flx4` map. (The same reader's
-*pointer* half is always active and has opened a real mouse — see
+fixture-tested, and **it now runs on the Pi**: the reader is selected by
+`EVDEV_MAP`, which defaults to `kbd`, so it is live alongside the FLX4 rather than
+instead of it, and it has been driven on the unit through a virtual keyboard
+([16](16-input-and-hotplug.md)). (The same reader's *pointer* half is a different
+module in `fbshim.so` and has always been active — see
 [07](07-touch.md).)
 
 ## Open questions

@@ -120,7 +120,7 @@ else.
 | `tools/evdevdump --list`, then point at the screen | rb reacts; see the four-corner procedure in [docs/07](docs/07-touch.md) |
 | `speaker-test` on the FLX4, then load + play | master out on the RCA, cue on the headphone jack ([docs/09](docs/09-audio.md)) |
 | `aseqdump -l`, then PLAY / CUE / faders / jog | messages arrive, and the deck responds — the map is written and fixture-tested, but its note/CC tables are unverified until a dump confirms them ([docs/15](docs/15-flx4-midi.md)) |
-| `RB_MIDI_MAP=kbd` in `rb.conf` (or the environment), restart, then load a track with `1` and press `space` | deck 1 plays; `↑`/`↓` scroll the list, `Esc`/`Backspace`/right-click leave a screen. This is the keyboard fallback: no controller, no MIDI, no `/dev/snd/seq` needed ([docs/08](docs/08-controls.md#the-keyboard-map-rb_midi_mapkbd)) |
+| load a track with `1` and press `space` | deck 1 plays; `↑`/`↓` scroll the list, `Esc`/`Backspace`/right-click leave a screen. The keyboard and mouse need no configuration — they run alongside the controller (`EVDEV_MAP=kbd`, the default) and need no MIDI, no controller and no `/dev/snd/seq` ([docs/08](docs/08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)) |
 | Insert a rekordbox USB stick | shows as **USB 1** with the label/track count ([docs/10](docs/10-usb.md)) |
 
 ## 7. Restart / restore
@@ -147,12 +147,14 @@ again by the line above.
   table is silence from a whole section rather than a wrong button — run with
   `RB_KNOB_VERBOSE=1` and read the unmapped lines in `/tmp/knobshim.log`.
 * The way to drive `rbp` without one is the **keyboard fallback**,
-  `RB_MIDI_MAP=kbd` ([docs/08](docs/08-controls.md#the-keyboard-map-rb_midi_mapkbd)):
-  keyboard and mouse, no MIDI and no controller. It is written, cross-compiled
-  and fixture-tested, but its reader has **not been run on the Pi** — it starts
-  only under `RB_MIDI_MAP=kbd`, and this target default is `flx4`. The direction
-  its selector turns for `↑`/`↓` is the one thing about it that only hardware can
-  settle.
+  `EVDEV_MAP=kbd`, which is the default
+  ([docs/08](docs/08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)):
+  keyboard and mouse, live alongside the controller rather than instead of it, no
+  MIDI needed for them. It is written, cross-compiled and fixture-tested, and it
+  has since been driven on the Pi. `RB_MIDI_MAP=kbd` additionally selects it as
+  the *controller* map, which is how to stop the shim looking for one at all. The
+  direction its selector turns for `↑`/`↓` is still the one thing about it that
+  only hardware — a screen with a list in it — can settle.
 * Booth output is dropped: the FLX4 has two output pairs ([docs/09](docs/09-audio.md)).
 * DJ FX parameter/layer encoders, TrackSkip, BeatJump and some SHIFT-actions are
   not mapped ([docs/08](docs/08-controls.md)).

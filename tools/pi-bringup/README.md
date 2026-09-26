@@ -30,10 +30,16 @@ ssh root@<pi> 'setsid nohup python3 /tmp/vkeyd.py >/tmp/vkeyd.log 2>&1 &'
 ssh root@<pi> 'sh /tmp/drive-keys.sh'
 ```
 
-`drive-keys.sh` restarts the player for you. It has to: the reader discovers
-devices once and only rescans when the set changes, so a device created after
-rbp started is never enumerated. Every test therefore begins with a restart and
-a ~16 s wait.
+`drive-keys.sh` restarts the player for you. **It no longer has to.** When these
+scripts were written the reader discovered devices once and only rescanned when
+the set changed, so a device created after rbp started was never enumerated — every
+test had to begin with a restart and a ~16 s wait. That was a defect in the reader
+and it is fixed: a device hot-plugged into a running player is now picked up within
+a second, and `drive-keys.sh`'s restart is a left-over convenience rather than a
+requirement. Start `vkeyd.py` whenever you like.
+
+If a test *does* seem to need the restart, that is a finding, not a procedure —
+it is exactly how the hot-add gap was first noticed.
 
 Then fetch and compare the frames (`docs/06-display.md` has the geometry); a
 *screen that did not change* is a result, not a failure — it is how the up/down

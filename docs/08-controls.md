@@ -53,10 +53,12 @@ keyboard and a mouse are `/dev/input/event*` devices carrying `EV_KEY`/`EV_REL`,
 and no amount of sequencer configuration will make one appear as a client.
 `devices()` answers "how many non-MIDI event sources does this map want?", `0`
 for a MIDI-only surface; `input()` receives one raw evdev `(type, code, value)`
-triple. So `RB_MIDI_MAP=kbd` makes `ctrlshim.c` start the evdev reader
-(`evdev_io.c`) and hand every triple to the map, and every other map — `jp21`
-included — starts nothing and behaves exactly as it did before the pair
-existed. `input()` gets the kernel's numbers, not a keyboard-specific hook,
+triple. So `RB_EVDEV_MAP=kbd` makes `ctrlshim.c` start the evdev reader
+(`evdev_io.c`) and hand every triple to that map, and a map that leaves the pair
+`NULL` — `flx4`, `jp21` — starts nothing on the evdev side. The two selections
+are independent: `MIDI_MAP` picks the map for the sequencer and `EVDEV_MAP` the
+map for `/dev/input/event*`, and they may name the same map (then it is built
+once). `input()` gets the kernel's numbers, not a keyboard-specific hook,
 which is what keeps "which key is PLAY" out of `evdev_io.c` and in a map's
 table.
 
@@ -84,12 +86,19 @@ ask rbp for is exactly the set of named functions in `rbp_bridge.h` —
 address itself. Semantics that are peculiar to one surface (shift, FX select,
 whether a CC is a switch) stay local to that map.
 
-`RB_MIDI_MAP` selects one (`flx4`, `jp21`, `kbd`). It defaults to `flx4`, both
-in `rb.conf` and in the source, and an unknown name falls back to `flx4` loudly
-rather than silently — the fallback is a log line and not a mystery, and the
-previous target's map is one word away.
+`RB_MIDI_MAP` selects one of `flx4`, `jp21`, `kbd`, `none`, and `RB_EVDEV_MAP`
+selects one of `kbd`, `none`; they are two independent choices, one per event
+source, because a controller and a keyboard are different devices. Both have a
+default in `rb.conf` and in the source (`flx4` and `kbd`), so a unit with a
+controller, a keyboard and a mouse has all three live with no configuration. An
+unknown name falls back loudly rather than silently, and the warning names *which*
+variable was wrong — with two selections the bad value alone no longer says.
+`kbd` is in both tables on purpose: `MIDI_MAP=kbd` keeps meaning "no controller,
+keyboard only", which is what operators wrote before the second selection existed,
+and `EVDEV_MAP=none` is how to ask for a controller with no keyboard at all. The
+previous target's map is one word away (`MIDI_MAP=jp21`).
 
-## The keyboard map (`RB_MIDI_MAP=kbd`)
+## The keyboard map (`RB_EVDEV_MAP=kbd`, or `RB_MIDI_MAP=kbd` alone)
 
 The surface that needs nothing plugged in (`map_kbd.c`). It exists so display,
 audio and the USB import can be brought up and played with on a Pi whose USB bus
@@ -140,11 +149,14 @@ browse/source keys are sent on.
 
 It is not a degraded version of the FLX4 map:
 
-* **No MIDI at all.** `devices()` returns 1, so `ctrlshim.c` starts the evdev
-  reader and this map gets no `event()` and no `tick()`. `/dev/snd/seq` may be
+* **No MIDI at all.** `devices()` returns 1 and `event()` is `NULL`, so on the
+  evdev selection `ctrlshim.c` starts the reader and this map consumes no
+  sequencer event, whichever map holds the MIDI side. `/dev/snd/seq` may be
   missing entirely and the keyboard still works — the log says so loudly rather
   than the shim giving up, which is the one behaviour that differs from a
-  MIDI-only map.
+  MIDI-only map. (Selecting this map on *both* sides — `MIDI_MAP=kbd` — is the
+  same thing again: it is built once, and the front end logs that the MIDI map has
+  no event handler rather than leaving the silence unexplained.)
 * **No panel.** There is no keyboard LED and no mouse meter, so there is nothing
   for `rbp_led.c`/`rbp_vu.c` to drive. (`RB_LED_VU=0` is the setting for a
   meterless target; the master-cue assertion `vu_thread` makes is unrelated and
@@ -158,7 +170,11 @@ It is not a degraded version of the FLX4 map:
 empty (the default) discovers every node that can report key events, which is
 the keyboard *and* the mouse — that is where `BTN_RIGHT` and the wheel come
 from. **With `KBD_DEV` set, the mouse is not read**, so both of its bindings go
-away; pin a node only to separate two devices that are being confused.
+away; pin a node only to separate two devices that are being confused, and treat
+the pin as a bench tool rather than a unit setting: an `eventN` number is not
+stable across a re-enumeration, so a pin that is correct when written can name a
+different device after a replug. Left empty — every node with `EV_KEY`, re-scanned
+— the reader follows the devices wherever they land.
 
 The event source is `evdev_io.c`, and it deliberately knows no keycode: it hands
 the map the raw triple and nothing else. Two readers of one evdev node both get
@@ -169,23 +185,30 @@ Start-up, and the per-event trace under `KNOB_VERBOSE=1`, are both one place to
 read:
 
 ```
-knobshim2: map 'kbd': 1 non-MIDI source(s) wanted; evdev reader started
-knobshim2: evdev: /dev/input/event0 'AT Translated Set 2 keyboard'
-knobshim2: evdev: /dev/input/event2 'Logitech USB Optical Mouse'
+knobshim2: maps: MIDI_MAP='flx4' EVDEV_MAP='kbd'; <n> notes, <m> abs knobs; ...
+knobshim2: evdev map 'kbd': 1 non-MIDI source(s) wanted; evdev reader started
+knobshim2: evdev[913] /dev/input/event0 'AT Translated Set 2 keyboard' appeared; adding it
+knobshim2: evdev[914] /dev/input/event2 'Logitech USB Optical Mouse' appeared; adding it
 knobshim2: kbd: evdev type=1 code=57 value=1 -> 0x4101 press
 knobshim2: kbd: evdev type=1 code=57 value=2 -> 0x4101 ignored   <-- autorepeat
 ```
 
-The node list is logged whether or not `KNOB_VERBOSE` is on, because "which
-device did it open" is the question that matters when nothing works.
+The `appeared` lines carry the millisecond they were measured at, and are logged
+whether or not `KNOB_VERBOSE` is on, because "which device did it open, and when"
+is the question that matters both when nothing works and when a plug takes too
+long to be noticed.
 
 **Status: run on hardware** (2026-09-26). The bindings are asserted against
-synthetic evdev triples in `make -C scripts/shims test` (`test_kbd`, ~360
-checks), which pins the deck channels, the wheel's direction, the right-button,
-the press/autorepeat/release edges and the rotation clamp; the keys have since
-been driven on the unit through a virtual keyboard
+synthetic evdev triples in `make -C scripts/shims test` (`test_kbd`, 365 checks),
+which pins the deck channels, the wheel's direction, the right-button, the
+press/autorepeat/release edges and the rotation clamp; the keys have since been
+driven on the unit through a virtual keyboard
 (`tools/pi-bringup/`), which is what measured the release defect below and the
-arrow sign.
+arrow sign. The *reader* — the loop, the rescan, the hot-add latency and the
+release-on-unplug — has its own suite, `test_evdev`, which fakes the kernel at the
+`syscall()` boundary and links the shipping `evdev_io.o` unchanged
+(`test_evdev.c`'s header has the mechanism; it is 53 checks over five scenarios
+under a virtual clock).
 
 **The arrows are inverted relative to the wheel, on purpose.** With `↑` at `+1`
 and `↓` at `-1` the operator reported the pair working backwards, so `↑` is now
@@ -194,13 +217,25 @@ and `↓` at `-1` the operator reported the pair working backwards, so `↑` is 
 not a measurement: it cannot be read off the SOURCE panel, which has nothing to
 move between. Full account in [16](16-input-and-hotplug.md).
 
-**A release used to be lost, and that is fixed.** `evdev_io.c` ran its device
-discovery at the top of every loop iteration, so every poll round closed and
-reopened every node; a key release landing in that window was discarded, the
-map's held-key latch stayed set, and the next press of that key was ignored —
-every press/release key worked once per run. A 120 ms press now delivers its
-release, and a device hot-plugged into a running player is picked up within a
-second ([16](16-input-and-hotplug.md)).
+**The reader used to lose a release, and it has been rewritten.** `evdev_io.c` ran
+its device discovery at the top of every loop iteration, so every poll round
+closed and reopened *every* node; a key release landing in that window was
+discarded, the map's held-key latch stayed set, and the next press of that key was
+ignored — every press/release key worked once per run. Now a rescan closes
+nothing that is still alive, so a queued release on a surviving device is
+delivered; a 120 ms press delivers its release.
+
+**How long a hot-plug takes to be noticed, stated precisely**, because it is easy
+to check this and wrongly "disprove" it: the 1000 ms deadline is an **absolute**
+wall-clock instant and not a timeout re-armed per poll round, so a device plugged
+in is picked up within ≤1 s **regardless of traffic on the other devices**. The
+old code only achieved that when the bus was quiet — with a 1000 Hz mouse on the
+desk its per-round re-arm postponed the rescan without bound, and a plug could go
+unnoticed indefinitely. That was the operator's "it needs a restart to see a new
+device" behind a moving mouse, and it is why "within a second" is now true
+unconditionally rather than true-when-idle. The reader's own `appeared` line
+carries the millisecond it happened at, so this is a number to read rather than a
+claim to trust ([16](16-input-and-hotplug.md)).
 
 ## Finding the controller
 
@@ -252,12 +287,15 @@ exists and the port is visible.
 the module is not loaded there is no sequencer at all. `fix-dev.sh` runs
 `modprobe snd-seq` and fails loudly if the node is still missing.
 
-Not every surface goes through the sequencer, though: `RB_MIDI_MAP=kbd` gets its
-events from `/dev/input/event*` instead (see
-[above](#the-keyboard-map-rb_midi_mapkbd)), and for that map a missing
-`/dev/snd/seq` is not fatal — the failure is logged loudly and the keyboard keeps
-working, with no MIDI input and no LED/meter output until the module is loaded.
-`fix-dev.sh` is still the answer; there is no retry of the sequencer inside rbp.
+Not every surface goes through the sequencer, though: the map on the evdev
+selection gets its events from `/dev/input/event*` instead (see
+[above](#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)), and for that
+map a missing `/dev/snd/seq` is not fatal — the failure is logged loudly and the
+keyboard keeps working, with no MIDI input and no LED/meter output until the
+module is loaded. Note that this is now true **with the FLX4 selected on the MIDI
+side too**, which is the point of the two selections: the keyboard does not need
+the sequencer and does not stop working when the sequencer does. `fix-dev.sh` is
+still the answer; there is no retry of the sequencer inside rbp.
 
 ## The MIDI dump (and why it comes first)
 
@@ -311,7 +349,7 @@ The flags:
 
 | Flag | Effect |
 |---|---|
-| `KNOB_VERBOSE=1` | every MIDI event + resulting keycode in `/tmp/knobshim.log`, and every evdev triple with the keycode it produced (or that it was unmapped) |
+| `KNOB_VERBOSE=1` | every MIDI event + resulting keycode in `/tmp/knobshim.log`, and every evdev triple with the keycode it produced — an *unmapped* evdev event is rate-limited to one line per `(type, code)` per second, because a mouse's motion is unmapped by design and arrives thousands of times a second |
 | `JOG_VERBOSE=1` / `TEMPO_VERBOSE=1` | raw and normalised jog / pitch values side by side |
 | `LED_VERBOSE=1` | log every LED change (`led deckN noteM on/off`) |
 | `LED_DISABLE=1` | do not drive the panel LEDs at all |

@@ -348,11 +348,58 @@ above is the card being absent when the shim starts. The other is `written=-19`
 on the *write*, which means the PCM handle rbp holds is stale because the card
 re-enumerated underneath it — the USB device dropped and came back with a new
 device number, so `/proc/asound/cards` lists it and `lsusb` sees it while the
-open fd is dead. There is **no reopen path**: the shim keeps writing to the old
-handle forever. The measured case is in
-[16](16-input-and-hotplug.md#4-hot-swap), and the tell is the write
-count, not the peak — `peak_m` keeps showing music from rbp's own buffer while
-the card hears nothing.
+open fd is dead. The tell is the write count, not the peak: `peak_m` keeps showing
+music from rbp's own buffer while the card hears nothing. The measured case is in
+[16](16-input-and-hotplug.md#4-hot-swap).
+
+**The reopen, and the retired-handle model it needs** (2026-09-26, **fixed in code
+and not yet on the unit**). `snd_pcm_open` hands rbp the real `snd_pcm_t *` itself
+and the shim's `is_master`/`is_real` are pointer *equality* against its global, so
+there is no shim-owned wrapper to swap underneath rbp — and a stable token would
+have to be unwrapped again at the ~13 sites that deliberately forward the
+*caller's own pointer*. The smaller fix is a **retired-handle set** and three
+predicate edits:
+
+* `is_master()` also accepts a retired handle, so a write to a dead pointer still
+  routes into the one place that writes through the *global*;
+* `is_real()` stays "the live master", because it gates the calls (`sw_params`,
+  `prepare`, `reset_stream_state`, the channel negotiation) that must act on a
+  live handle only;
+* `is_forwardable()` **excludes** a retired handle — the one that matters, since
+  otherwise a dead pointer reaches those forwarding sites and is used as live.
+
+In the write path `-ENODEV` calls `master_lost()`, which clears the global before
+closing (so a re-entrant inner call cannot mistake itself for the master), retires
+the pointer, closes it and logs **one** `MASTER LOST` line for the whole outage
+rather than one per block. Recovery runs from the write path itself under a
+500 ms → 5 s backoff, and the new handle has the negotiation **replayed** through
+the shim's own interposed setters — format, channel count and rate, i.e. exactly
+what the pair indices were resolved against, logged as a `replay:` line followed by
+`the pair map is unchanged: …`. Two consequences worth knowing:
+
+* **The stream map is deliberately not reset.** `g_cfg.*` has already been clamped
+  against the real channel count, and clearing the channel count would silently
+  change what the pair indices mean — the cue pair would come back on top of the
+  master. Losing the card costs the audio, not the map.
+* **A reopen re-arms the startup mute**, because the card thumps on a reopen just
+  as it does on an open — so `startup mute released` after a `MASTER RECOVERED`
+  line is expected and costs 1.8 s of silence, not a new defect. (Before this,
+  that line was a trap: it is printed by the no-device path too, which is why it
+  never proved a card was open. After a recovery it is preceded by the recovery
+  line, which is what makes it unambiguous.)
+
+**The cold case is the same mechanism, with one honest limit.** A unit booted with
+no FLX4 already ran the no-device path (`g_real_playback == NULL`), so being absent
+at startup and being lost mid-session are the same state and only the *return* was
+missing. But in the cold case `resolve_pairs()` had already latched the 2-channel
+fallback and dropped the headphones and booth pairs, so plugging a controller in
+after boot recovers **master-pair audio only**, and the recovery line says so and
+says to restart.
+
+**One hole, deliberately not fixed:** `snd_ctl_open` hands rbp a real `snd_ctl_t`
+for the card, which is just as stale after a re-enumeration, and nothing recovers
+it. Since `snd_ctl_pcm_info` never forwards, rbp may simply never ask again — a
+`grep -c snd_ctl_open` before and after a replug settles whether it is inert.
 
 ## VU meters
 

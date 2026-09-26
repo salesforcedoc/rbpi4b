@@ -6,9 +6,17 @@ was the same defect, found while measuring the others: a key release was being
 thrown away, so every press/release key in the keyboard map worked once and then
 went dead. That was the one worth fixing first, and it is fixed and verified.
 
+Measuring it also turned up the *first* observation's real cause, which is a
+different and much duller defect: **one variable chose one map**, and the map
+that answers for the FLX4 declares no non-MIDI devices, so with the FLX4 selected
+the evdev reader was never started at all and the keyboard could not have worked.
+[`MIDI_MAP` and `EVDEV_MAP`](#two-selections-not-one) are now two selections, and
+a controller, a keyboard and a mouse are all live with no configuration.
+
 What is left is verification rather than work: the operator's ear on the audio
 thump and on the arrow sign, and a real unplug to exercise the MIDI and audio
-hot-swap paths end to end.
+hot-swap paths end to end. The audio reopen ([§4](#4-hot-swap)) is the one
+substantial piece of new code in here that has **not** been on the unit.
 
 Status words are used the way the rest of these documents use them: **measured**
 means it was seen on the hardware and the evidence is quoted below, **reported**
@@ -20,9 +28,10 @@ nobody has run it yet.
 | 1 | up/down are inverted | **fixed** — the two arrows flipped; the sign itself is the operator's observation, not a measurement |
 | 2 | Enter should be a rotary push | **already was**; it was dead after one use because of the release defect, which is fixed |
 | 3 | `w` = PLAY deck 1, `s` = PLAY deck 2 | **bound**, additive to SPACE/N |
-| 4 | controllers should be hot-swappable | evdev: **fixed** (hot-add verified on the unit); MIDI: already worked; audio: **still unverified** |
+| 4 | controllers should be hot-swappable | evdev: **fixed and verified** (per device, not whole-set); MIDI: verified on the unit; USB: was already; audio: **fixed in code, still unverified on the unit** ([§4](#4-hot-swap)) |
 | 5 | the FLX4 pops/buzzes when rbp first opens the audio | **mute enabled by default** (1500/300) — **not yet heard with a card open**: the restarts on 08:39 and 08:41 ran with no FLX4 on the bus at all |
 | — | **a key release was lost, so a second press did nothing** | **fixed and verified**: a 120 ms press now delivers its release |
+| — | **the keyboard does nothing at all** | **fixed**: one variable chose one map, and under `flx4` no evdev reader was started ([below](#two-selections-not-one)) |
 
 ## The defect: the reader loses the release
 
@@ -75,18 +84,23 @@ because they are step bindings (`b->step != 0`) and hold no state.
 This is very likely the whole of observation 2. Enter is already bound as a
 push; it simply stopped working after its first use.
 
-**The fix, made and verified.** Discovery came out of the loop body: the devices
-are scanned once, polled with a deadline (`EVDEV_IDLE_MS`, 1000 ms) instead of
-`-1`, and the set is re-checked only when a round times out or the poll fails.
-One change for two defects — it also closes the hot-add gap in observation 4,
-because a device that appears while nothing else is happening was previously
+**The fix, made and verified on the unit.** Discovery came out of the loop body:
+the devices are scanned once, polled with a deadline (then `EVDEV_IDLE_MS`, 1000 ms)
+instead of `-1`, and the set is re-checked only when a round times out or the poll
+fails. One change for two defects — it also closes the hot-add gap in observation
+4, because a device that appears while nothing else is happening was previously
 never noticed at all (the loop was parked in `poll(..., -1)` and never
 iterated).
 
-`poll_round()` now returns `1` for the deadline and `0` for "read something", so
-the caller can tell the two apart; `unseen_source()` is what a deadline runs —
-it looks for an `/dev/input/event*` not already open, and returns true the
-moment one can be opened, which is the rescan trigger.
+> **That first fix has since been replaced, and the names above no longer exist.**
+> It stopped the *churn*, which is what the lost release was, but it left three
+> other ways to lose or delay an event — a rescan still closed every live device, a
+> 500 ms blind window sat before each reopen, and the 1000 ms deadline re-armed
+> every round so a chatty mouse postponed it without bound. The reader was rewritten
+> around **no live fd is ever closed on a rescan** and **one absolute deadline**;
+> `EVDEV_IDLE_MS` and `unseen_source()` are gone, and the current loop is described
+> in [§4](#4-hot-swap). The section above is kept as the record of how the defect
+> was found, not as a description of the code.
 
 Verified on the unit, same synthetic keyboard, same 120 ms hold that used to be
 lost:
@@ -166,41 +180,82 @@ n already use, so the risk is in the keycode, and the keycode is pinned.
 
 ## 4. Hot-swap
 
-Three separate paths, three different answers.
+Five paths now, and the answers differ enough that they are worth keeping apart —
+especially the *two* mouse paths, which are different code with the same device
+under them.
 
-**MIDI — already implemented.** `midi_connect_try()` runs once a second and
-detects the surface going away, logging "control surface '%s' disappeared
-(unplugged?); waiting for it to come back" and re-subscribing on a new client
-number when it returns ([midi_io.c:200-280](../scripts/shims/midi_io.c)). Its
-own comment says the call is cheap and idempotent, which is what lets the read
-loop call it forever. **Not yet verified on the unit with an actual unplug** —
-that is a 30-second test and should be done before telling anyone it works.
+**evdev (keyboard, mouse buttons, wheel) — rewritten, fixed, verified.** A hot
+*add* used to be noticed only if some other event happened to arrive afterwards:
+the loop rescanned on every iteration, but it was parked in `poll(..., -1)` when
+nothing was happening, so there was no iteration to rescan in. That was one of
+the four defects in the release bug above and it is the same loop, so it went with
+the same rewrite.
 
-**evdev (keyboard, mouse) — fixed and verified.** A hot *add* used to be
-noticed only if some other event happened to arrive afterwards: the loop
-rescanned on every iteration, but it was parked in `poll(..., -1)` when nothing
-was happening, so there was no iteration to rescan in. This was the same loop as
-the release defect, and the same fix closed it.
+Three things changed beyond "it works now", and each was a way for the reader to
+drop something:
+
+* **A rescan no longer closes a live device.** It used to close *every* fd and
+  reopen the set, which is what discarded the queued release (evdev queues per
+  open client). Now only a device that has actually failed is dropped, and only
+  its own fd is closed; the others keep their queues and are drained in the same
+  round.
+* **The deadline is absolute.** `EVDEV_UNSEEN_MS` (1000 ms) is a wall-clock
+  instant, not a timeout re-armed per round, so a device plugged in is noticed
+  within a second *regardless of how much traffic is on the other devices*. With
+  a 1000 Hz mouse the old per-round re-arm postponed the rescan without bound —
+  the old code only ever delivered on this promise when the bus was quiet.
+* **Losing a device releases the keys it was holding.** A device that goes away
+  with a key down would otherwise leave the map's `b->down` latched (the same
+  latch as the release defect), so the *next* press of that key would be ignored —
+  a wired keyboard unplugged mid-press would look like a dead key after replug.
+  The reader emits `(EV_KEY, code, 0)` for each held key before it closes the fd,
+  which reuses the map's own tested release path and adds no interface.
 
 Verified on the unit by creating a virtual keyboard while rbp was already
-running:
+running. The reader's own line now carries the millisecond it happened at, so
+this is a duration rather than "within a second":
 
 ```
-knobshim2: evdev: /dev/input/event11 'rblive4-vkeyd' appeared; rescanning
+knobshim2: evdev[41302] /dev/input/event11 'rblive4-vkeyd' appeared; adding it
 ```
 
-The new device was enumerated, and a press on it reached rbp (state probe:
-`mode=12 dev=3`). Before the fix the device was never seen and every test had to
-begin with `systemctl restart rblive4`.
+Before the fix the device was never seen and every test had to begin with
+`systemctl restart rblive4`.
 
-Also unchanged and still worth knowing: a device is opened **once** and left
-open. That is what `unseen_source()` checks against — a path already in the open
-set is not a reason to rescan.
+**The mouse pointer is a separate path and was never broken.** `fbshim.so`'s
+`pointsrc.c` holds one absolute device, rescans when that one dies, and clears its
+touch state — but it is one device at a time and is unaffected by what the evdev
+reader does. Do not read a fix in one as a fix in the other: the reader is what
+carries the mouse's *buttons* and *wheel* to the keyboard map, and the pointer is
+painted by the framebuffer shim. They are unrelated code that happen to open the
+same node (both may; evdev gives every reader every event).
 
-**audio — measured 2026-09-26, and it does NOT come back.** `audioshim.c` has a
-prepare-retry after a failed write
-([audioshim.c:1296](../scripts/shims/audioshim.c)) but no device-loss or reopen
-handling, and the unit has now demonstrated exactly what that costs:
+**MIDI (the FLX4) — already implemented, now verified.** `midi_connect_try()`
+runs once a second and detects the surface going away, logging "control surface
+'%s' disappeared (unplugged?); waiting for it to come back" and re-subscribing on
+a new client number when it returns
+([midi_io.c:200-280](../scripts/shims/midi_io.c)). Its own comment says the call
+is cheap and idempotent, which is what lets the read loop call it forever.
+**Verified on the unit with a real unplug**, and the one predicted defect did not
+appear: ALSA recycles client ids from a low free id, so a re-enumerated FLX4 could
+have landed on the same number and been left subscribed to a dead client — but the
+measured re-enumeration gap is about 5 s and the walk runs every 1 s, so the
+address had always changed. The test is a press on a pad afterwards, because
+`find_surface` succeeding is not the same question as a pad working.
+
+**USB media — was already fine.** `usb-watch.sh` polls every 2 s, so the latency
+is that poll and the recovery is `USB1 detected -> registered (dev=3)`. Nothing
+here changed; it is listed so the five paths are all accounted for.
+
+**audio — measured 2026-09-26 as "does NOT come back"; now fixed in code, not yet
+verified on the unit.** This is the largest thing in this document and the one
+piece here that has not been on the hardware, so read the whole entry before
+believing it.
+
+The measurement first, because it is what shapes the fix. `audioshim.c` had a
+prepare-retry after a failed write ([audioshim.c:1296](../scripts/shims/audioshim.c))
+but no device-loss or reopen handling, and the unit demonstrated exactly what that
+costs:
 
 ```
 09:24:43  usb 1-1.2: USB disconnect, device number 3
@@ -209,9 +264,9 @@ handling, and the unit has now demonstrated exactly what that costs:
 
 The FLX4 dropped off the bus and re-enumerated five seconds later — the
 under-voltage symptom this target already has ([13](13-raspberrypi4.md) S6), not
-a bad connector. The card is back and `cat /proc/asound/cards` lists it, but the
-PCM rbp holds was opened against the *old* device, so from the moment of the drop
-every master write returns `-19`:
+a bad connector. The card was back and `cat /proc/asound/cards` listed it, but the
+PCM rbp held had been opened against the *old* device, so from the moment of the
+drop every master write returned `-19`:
 
 ```
 writei #175001 frames=64 bytes=768 written=-19 peak_m=1763519 mainvol=1.000
@@ -230,12 +285,81 @@ Two things make this worth reading carefully rather than skimming:
   first, and the log's own `open('hw:CARD=DDJFLX4,DEV=0') ... res=-19` is a
   different case again — that one is the card being absent at startup.
 
-**Nothing was changed here**, and the reason is that a reopen is not a small
-edit: it means detecting `-ENODEV` on the master path, dropping and rebuilding
-the PCM, re-negotiating the format and re-arming the startup mute, all from
-inside the write path. The workaround, which is what the port does today, is
-**restart the player** — the card is present by then and the write path comes
-back. Whether to make that automatic is an open decision, not an oversight.
+**The fix, and why it is shaped the way it is.** `snd_pcm_open` hands rbp the
+real `snd_pcm_t *` itself, and `is_master`/`is_real` are pointer *equality*
+against the shim's global — there is no shim-owned wrapper to swap underneath
+rbp. So the reopen needs a **retired-handle set**, and that turns out to be the
+smaller fix rather than a compromise: a stable token would have to be unwrapped
+again at the ~13 sites that deliberately forward the *caller's own pointer*
+(`is_forwardable`'s doctrine, which exists because gating on "is this the master"
+alone once left the hw slave unconfigured and produced `written=-22` with nothing
+in the log). The retired set is three predicate edits and **zero** call-site
+edits:
+
+* `is_master()` also accepts a retired handle, so a stale write still routes into
+  the one place that writes through the *global* and needs no unwrapping;
+* `is_real()` stays "the live master", because it gates the calls
+  (`reset_stream_state`, `sw_params`, `prepare`, the channel negotiation) that
+  must act on a live handle only;
+* `is_forwardable()` **excludes** a retired handle — this is the one that matters,
+  since otherwise a dead pointer reaches those thirteen sites and is used as a
+  live `snd_pcm_t`.
+
+In the write path, `-ENODEV` now calls `master_lost()`, which clears the global
+before closing (so a re-entrant inner call cannot mistake itself for the master),
+retires the pointer, closes it, records the absence, and logs **one** line:
+
+```
+audioshim: MASTER LOST: the card went away mid-stream (writei said No such device,
+after 175001 write(s) on that handle). Audio is silent until it is back; this shim
+is now looking for it. The stream map is kept
+```
+
+The stream map is deliberately *not* reset: `g_cfg.*` has already been clamped
+against the real channel count, and clearing the channel count would silently
+change what the pair indices mean. Recovery happens from the write path itself
+under a 500 ms → 5 s backoff (no new thread; rbp calls it continuously), and the
+recovered handle has the whole negotiation **replayed** through the shim's own
+interposed setters — the format, the negotiated channel count and the rate, which
+are exactly what the pair indices were resolved against:
+
+```
+audioshim: MASTER RECOVERED: reopened hw:CARD=DDJFLX4,DEV=0. Replaying the
+negotiation on the new handle
+audioshim: replay: access=3 channels=4 rate=44100 period=... periods=... ...
+audioshim: the pair map is unchanged: master=0,1 headphones=2,3 ...
+audioshim: startup mute released after 79424 frames
+```
+
+The line shapes above are from the source; **the values are not a capture** —
+this sequence has not been run on the unit yet. The values shown are the ones
+[09](09-audio.md) records from the working negotiation, which is what a correct
+replay should reproduce exactly.
+
+The last line is the startup mute being re-armed, because the card thumps on a
+reopen exactly as it does on an open. It costs 1.8 s of silence per replug, which
+is a choice against a pop the operator has heard. The recovery line preceding it
+is what makes it unambiguous, where before it could have been the silent path
+([§5](#5-the-pop-when-rbp-first-opens-the-flx4s-audio)).
+
+**The cold case is the same mechanism**, which is the pleasant part: a unit booted
+with no FLX4 already had `g_real_playback == NULL` and ran the no-device path, so
+being *absent* at startup and being *lost* mid-session are the same state — only
+the return was missing. One honest limit: in the cold case `resolve_pairs()` had
+already latched the 2-channel fallback and dropped the headphones and booth pairs,
+so plugging in a controller after boot recovers **master-pair audio only**, and
+the recovery line says so and says to restart.
+
+**Still unverified on the unit, and one hole that is deliberately not fixed.**
+The on-unit sequence is in [13](13-raspberrypi4.md) S8.6: pull the FLX4 mid-play,
+expect `MASTER LOST` **once** rather than per block, then on replug
+`MASTER RECOVERED` and `written=64` with a non-zero `peak_m`. Until that has been
+seen, this is code that passes its tests and has never met a card. Separately,
+`snd_ctl_open` hands rbp a real `snd_ctl_t` for the card, which is just as stale;
+nothing recovers it, and `snd_ctl_pcm_info` never forwards, so if rbp re-probes
+the control interface it may learn nothing. A `grep -c snd_ctl_open` after a
+replug settles whether it is inert — if the count does not grow, rbp never asks
+again and the hole does not matter.
 
 ## 5. The pop when rbp first opens the FLX4's audio
 
@@ -321,9 +445,16 @@ fix. As of 2026-09-26 the file holds:
 
 * `RB_MIDI_MAP=flx4` — **this one is now the default in `rb.conf` and the line is
   redundant**; it is kept only so the file records what changed and why. It was
-  `kbd` for the earlier bring-up, and reverting to `kbd` is what makes the FLX4
-  appear dead ([below](#the-kbd-override-and-why-it-looked-like-a-broken-flx4)).
-* `RB_KNOB_VERBOSE=1` — to see what the map receives.
+  `kbd` for the earlier bring-up, and under the one-map rule that alone is what
+  made the FLX4 look dead ([below](#two-selections-not-one)).
+* `RB_KNOB_VERBOSE=1` — to see what the map receives. **Note what this now costs,
+  because it changed:** the per-event trace still prints a line per mapped key,
+  but an *unmapped* evdev event is rate-limited to one line per `(type, code)` per
+  second, because a mouse's motion is unmapped by design and arrives thousands of
+  times a second. Before that limit, leaving verbose on with a mouse attached
+  filled the input thread's time with logging — which is the operator's "the keys
+  arrive late" — so verbose is now cheap enough to leave on while working, though
+  it still writes a line per keypress and is not what to measure latency under.
 * `RB_MIDI_DUMP=/tmp/flx4.dump` — records every sequencer event the shim
   receives, so a control whose note number is only *published* is measured rather
   than assumed. Its one open question is note 66, the SHIFT + browse push
@@ -336,29 +467,67 @@ line is. `seqinject2` sends velocity **100** and the FLX4 sends **127**, so
 an injected press and a real one are the same line in the same file.
 
 `rb.local.conf` is on the unit only and is not a tracked file, which is the point
-of it. The fixes themselves are three tracked files —
-`scripts/shims/evdev_io.c`, `scripts/shims/map_kbd.c` and the two constants in
-`scripts/device/rb.conf` — plus their tests and the docs.
+of it. The fixes themselves are four tracked files —
+`scripts/shims/evdev_io.c`, `scripts/shims/map_kbd.c`, `scripts/shims/audioshim.c`
+and the constants in `scripts/device/rb.conf` — plus their tests and the docs.
 
-### The `kbd` override, and why it looked like a broken FLX4
+### Two selections, not one
 
-Worth keeping, because the symptom is indistinguishable from a dead controller
-and it is a *configuration* fact rather than a bug: **`MIDI_MAP` selects exactly
-one map**, and `ctrlshim.c` starts the evdev reader only when the selected map
-declares devices. So under `kbd` the FLX4 is not partially handled — it is
-ignored, no subscription to its port is made, and nothing about the controller
-reaches rbp. Under `flx4` the reverse holds and the keyboard is dead. "The
-controller's buttons do nothing" and "the map is still `kbd`" are the same
-observation.
+This replaces a section that said the opposite, and the correction matters because
+the old text described a *configuration* fact that is now gone.
 
-That is what the 2026-09-26 report turned out to be: the overrides were doing
-what they said, and the FLX4 was working the whole time. With the map on `flx4`
-the shim logs `subscribed to 20:0 'DDJ-FLX4 MIDI 1'` and the operator's own
-crossfader and PLAY presses are visible in the log.
+**What it used to be.** `MIDI_MAP` chose exactly one map, and `ctrlshim.c` started
+the evdev reader only when that map declared non-MIDI devices. The FLX4's map does
+not — a controller has no `/dev/input/event*` — so with `MIDI_MAP=flx4` **no evdev
+reader was started at all**: the keyboard was not partially working, it was not
+being read. `MIDI_MAP=kbd` was the same fact from the other side, and that is the
+whole of "the keyboard does nothing while the controller works".
+
+The old text also claimed that under `kbd` the FLX4 got no subscription. That was
+wrong on both counts: `seq_setup()` runs unconditionally, so the FLX4 *was* found
+and subscribed under `kbd` — it only looked ignored because the LED/meter output
+route is disabled by `RB_LED_DISABLE=1` and the keyboard map has no `event()` to
+consume what was arriving.
+
+**What it is now.** Two independent selections, one per event source:
+
+| Variable | Chooses | Default |
+|---|---|---|
+| `RB_MIDI_MAP` / `MIDI_MAP` | the controller, on the ALSA sequencer: `flx4`, `jp21`, `kbd`, `none` | `flx4` |
+| `RB_EVDEV_MAP` / `EVDEV_MAP` | the non-MIDI surface, on `/dev/input/event*`: `kbd`, `none` | `kbd` |
+
+So a controller, a keyboard and a mouse are all live with no configuration, which
+is what the operator asked for. Both knobs are ordinary: `EVDEV_MAP=none` is how
+to ask for the old "controller only" behaviour without a rebuild, and `MIDI_MAP=kbd`
+still means what it always did — no controller, keyboard only — because `kbd` is
+in *both* tables and is then built once, not twice. The startup line says which is
+which, and `EVDEV_MAP` has to be listed in `start-rb.sh`'s `SHIM_VARS` for
+`RB_EVDEV_MAP` in `rb.conf` to reach the shim at all.
+
+Three consequences worth knowing, all of them in the code rather than in a note
+here:
+
+* **A build is additive now.** The shared binding tables are cleared once by the
+  front end before either map is built, and no map resets them itself. That is not
+  tidiness: `kbd_build()` deliberately adds nothing, so a reset inside it would
+  wipe the FLX4's bindings — a working keyboard would silently kill every button on
+  the controller. `test_kbd` pins this directly now ("a second build must add, not
+  wipe").
+* **The evdev reader belongs to `EVDEV_MAP`, never to `MIDI_MAP`.** That is the
+  fix, stated as a rule.
+* **Two surfaces can drive the same rbp key.** The keyboard and the FLX4 map
+  overlap on PLAY, CUE, SYNC, LOAD, SOURCE, BACK and the selector, each with its
+  own held state. Holding the FLX4's PLAY and tapping SPACE therefore delivers two
+  presses and one release, and whether rbp's KeyManager latches on that is not
+  knowable from the source. **It is on the on-unit list** ([13](13-raspberrypi4.md)
+  S8.5): hold PLAY on the controller, tap SPACE, release. If playback stops when it
+  should, nothing more is needed; if it does not, the fix is a per-(keycode,
+  channel) aggregator in the front end that forwards a release only when the last
+  holder releases it. Not built speculatively.
 
 **Nothing here was fixed by the `kbd` map in the end.** The gap it was working
 around — no SOURCE binding — is closed on `flx4` now, by two bindings of its own:
 SHIFT + browse push is `K_SOURCE`, and CUE/LOOP CALL ◁ is `K_BACK`
-([15](15-flx4-midi.md)). The one thing `kbd` still covers that `flx4` cannot is
-the pointing device, for reaching rbp's on-screen controls — see the note in the
-FLX4 map's header.
+([15](15-flx4-midi.md)). `kbd` has since found its own reason to exist — it is the
+only map that reads a keyboard and a mouse — but that is what `EVDEV_MAP=kbd` now
+says, on its own variable, without displacing the controller.

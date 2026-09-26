@@ -93,9 +93,14 @@ each row there says whether it has been run, and what it measured.
 * **Tearing, and the console over the UI** (S2.3/S2.4).
 * **The LED bridge**, still off at `RB_LED_DISABLE=1` and blocked on the FLX4's
   illumination notes; `rbp_led.c` carries the previous target's.
-* **The keyboard fallback's reader**, which starts only under `RB_MIDI_MAP=kbd`
-  and has therefore not run on the Pi at all; its map and keycodes are
-  fixture-tested under `qemu-arm`.
+* **The keyboard fallback's reader.** It starts under `EVDEV_MAP`, which defaults
+  to `kbd` — so the keyboard and mouse are live alongside the FLX4 with no
+  configuration, and the "keyboard does nothing while the controller works"
+  defect is closed. Its map and keycodes are fixture-tested under `qemu-arm`
+  (`test_kbd`), and the reader itself now has a suite of its own (`test_evdev`,
+  the kernel faked at the `syscall()` boundary); both have also been driven on the
+  Pi through a virtual keyboard. What is still open on hardware is only the
+  selector's *direction*.
 
 Where a number in these documents is an expectation rather than a measurement,
 it says so; [docs/README](docs/README.md) explains the convention.

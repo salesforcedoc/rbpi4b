@@ -166,18 +166,20 @@ target this project has run on.
    you actually need. ([06](06-display.md), [13](13-raspberrypi4.md))
 4. **Pointing** — evdev discovery + the tsc2007 protocol. ([07](07-touch.md))
 5. **Audio** — device, channels and pair map. ([09](09-audio.md))
-6. **Controls** — the keyboard fallback first (`MIDI_MAP=kbd`, no hardware
-   needed), then the FLX4 map: written from Pioneer's published MIDI list, and
+6. **Controls** — the keyboard fallback first (`EVDEV_MAP=kbd`, no hardware
+   needed — and it is the default, so it needs no configuration either), then the
+   FLX4 map: written from Pioneer's published MIDI list, and
    corrected from a dump off the hardware.
    ([08](08-controls.md), [15](15-flx4-midi.md))
 7. **USB** — `usb-watch.sh` + DeviceSQL import of `export.pdb`. ([10](10-usb.md))
 8. **Launcher** — `start-rb.sh`. ([11](11-runtime-launcher.md))
 
 Steps 5 and 6 can be worked with nothing but a keyboard attached, which is
-deliberate: it keeps a missing controller from blocking the rest of the port. Its
-first half is now written — `MIDI_MAP=kbd` needs no controller, no MIDI and no
-`/dev/snd/seq`, so the surface half of step 6 can be exercised before the FLX4
-tables are measured.
+deliberate: it keeps a missing controller from blocking the rest of the port.
+That is now the *architecture* rather than a workaround — `EVDEV_MAP` and
+`MIDI_MAP` are independent selections, so the keyboard is live whether or not a
+controller is, and `EVDEV_MAP=kbd` needs no controller, no MIDI and no
+`/dev/snd/seq`.
 
 ## 4. Working commands
 

@@ -84,10 +84,13 @@ swallowed** — the single most likely "the pointer doesn't work" report on this
 target, and the first thing to raise if taps seem to need holding.
 
 The wheel and right-button do not go through the pointer path: they are bound in
-the keyboard map (`RB_MIDI_MAP=kbd`) to selector rotation and `K_BACK`, so the
-same mouse that drives the cursor can also scroll a list and leave a screen.
-Two readers of one evdev node both get every event, so this costs the pointer
-path nothing. See [08 — Controls](08-controls.md#the-keyboard-map-rb_midi_mapkbd)
+the keyboard map to selector rotation and `K_BACK`, so the same mouse that drives
+the cursor can also scroll a list and leave a screen. That map is selected by
+`EVDEV_MAP`, which defaults to `kbd` — so the wheel and right-button work on this
+target without configuration, and the only variable that turns them off is
+`RB_EVDEV_MAP=none`. Two readers of one evdev node both get every event, so this
+costs the pointer path nothing. See
+[08 — Controls](08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)
 and [15 — FLX4 MIDI](15-flx4-midi.md).
 
 ### The arrow on the screen (`POINT_CURSOR`)
@@ -159,8 +162,10 @@ before the arrow existed. What is still the operator's to confirm (S3.2/S3.3 in
 [13](13-raspberrypi4.md#s32-pointing)) is the *aim* — that the pixel a click lands
 on is the pixel the arrow points at, which is the axis algebra above.
 
-The keyboard half of the reader has not run on the Pi at all: it only starts under
-`RB_MIDI_MAP=kbd`, which is not this target's default.
+The keyboard half of the reader **has now run on the Pi**: it is selected by
+`EVDEV_MAP`, which defaults to `kbd` on this target, and a virtual keyboard was
+hot-plugged into a running player to measure the release and hot-add paths
+([16](16-input-and-hotplug.md)).
 
 ## Required files
 

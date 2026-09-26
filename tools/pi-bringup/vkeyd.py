@@ -6,7 +6,6 @@ then presses whatever it is told to, one keycode per line, from a FIFO:
 
     mkfifo /tmp/vkeyfifo
     setsid nohup python3 vkeyd.py >/tmp/vkeyd.log 2>&1 &
-    systemctl restart rblive4        # the device MUST exist before rbp starts
     echo 6 > /tmp/vkeyfifo           # press KEY_5 (SOURCE)
     echo "6@3000" > /tmp/vkeyfifo    # press KEY_5 and hold it 3000 ms
 
@@ -15,11 +14,16 @@ held state per key, and evdev_io.c's reader was dropping the release of any
 press shorter than the window it spends with its devices closed. A human presses
 a key for ~100 ms, so a human is exactly the wrong instrument for measuring
 this. With a hold time you can dial, the release either arrives or it does not
-(see docs/16-input-and-hotplug.md).
+(see docs/16-input-and-hotplug.md). The release defect is fixed; the hold time is
+still what makes the *hot-plug* cases deterministic, which is the other thing
+this daemon is for.
 
-It must be started **before** rbp: evdev_io.c discovers devices once and then
-only rescans when the device set changes, so a device created afterwards is
-never enumerated by a running player.
+It used to be required to start **before** rbp: evdev_io.c discovered devices once
+and then only rescanned when the device set changed, so a device created afterwards
+was never enumerated by a running player. That was the hot-add defect and it is
+fixed — the reader now notices a new device within a second regardless of traffic,
+so this daemon can be started against an already-running rbp, which is what makes
+it a hot-plug test rather than a startup test.
 
 The FIFO is reopened after every EOF. A writer closing it is an EOF for us, and
 a bare `for line in rf` would end the daemon the first time the shell closes the

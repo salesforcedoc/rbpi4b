@@ -618,10 +618,13 @@ static void load_config(void)
     parse_map(env_str("AUDIO_MAP", ""));
     parse_pair("AUDIO_MONITOR_PAIR", env_str("AUDIO_MONITOR_PAIR", ""), &g_cfg.monitor);
 
-    /* USB audio has no codec power-up transient, so rb.conf ships both of these
-     * at 0 on the Pi. The mechanism stays because a card that does thump on open
-     * is a real thing, and 44100 is the rate rbp speaks regardless of what the
-     * card ends up running at. */
+    /* The in-source default is 0, but rb.conf ships 1500/300: the FLX4 DOES thump
+     * when the card is opened (the operator heard it), so the "USB audio has no
+     * codec power-up transient" reasoning this comment used to carry was wrong for
+     * this card. The zero default stays because a shim run by hand with no
+     * environment should not impose 1.8 s of silence on anyone, and because a card
+     * that is merely LATE benefits from having the mute off. 44100 is the rate rbp
+     * speaks regardless of what the card ends up running at. */
     mute_ms = env_int("STARTUP_MUTE_MS", 0);
     fade_ms = env_int("STARTUP_FADE_MS", 0);
     if (mute_ms < 0) mute_ms = 0;
