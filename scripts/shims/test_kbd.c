@@ -518,6 +518,18 @@ int main(void)
            "map_none built %d notes and %d absolute controls into the shared "
            "tables", note_map_n, abs_map_n);
 
+     /* Neither of the surfaces this link knows has a panel to light, and that has
+      * to be a declared NULL rather than an omission. rbp_led.c asks the front
+      * end for the selected surface's table and sends NOTHING when it gets NULL,
+      * so a map that leaves this field out is a map that lights nothing -- and
+      * the whole reason it is a field is that "nothing" must be distinguishable
+      * from "the previous target's notes". Pinned here because this is the only
+      * suite that links both of these maps. */
+     CHECK(map_kbd.leds == NULL,
+           "map_kbd declares a panel to light, and a keyboard has none");
+     CHECK(map_none.leds == NULL,
+           "map_none declares a panel to light, and it has no surface at all");
+
      drive();
      check_clamp();
 

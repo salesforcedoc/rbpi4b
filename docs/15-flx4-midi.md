@@ -336,15 +336,16 @@ would fight the operator for it.
 
 ## The LEDs
 
-Recorded, driven nowhere yet. The unit's illumination messages are MIDI-OUT (the
-list's last section), and `rbp_led.c` is still shaped for the previous target's
-channels and notes. `rb.conf` therefore ships `RB_LED_DISABLE=1` for this target
-as an **interim** setting: with the bridge unwired, driving the old target's
-notes at an FLX4 would light nothing at best, and the transport/pad/loop LED
-notes are not in the list at all — so they are simply unknown. Turn it back to 0
-when `rbp_led.c` has this table.
+**The machinery is in place and the notes are not measured yet.** The panel's
+numbers now live in the selected map's `struct led_notes` (`map_flx4.c`) rather
+than in `rbp_led.c`, so the bridge holds no note number at all, and a row that
+reads `-1` means "this surface has no such LED" and transmits **nothing**. That
+is what makes `RB_LED_DISABLE=0` safe to ship before the numbers are known: the
+bridge runs, and every FLX4 row is `-1` until it is *seen to light*. Filling a
+row in is then a one-line edit. See [08 — controls](08-controls.md#led-output)
+for the machinery, and `ctrl_map.h`'s `struct led_notes` for the table's shape.
 
-What the list does document:
+What the vendor list documents:
 
 | Illumination | Message | list ch |
 |---|---|---|
@@ -352,20 +353,111 @@ What the list does document:
 | VINYL MODE (footnote *2: only the *application* can set it) | note 23 | 1 / 2 |
 | CH LEVEL METER | CC 2 — **a value ramp, not a bitmask** | 1 / 2 |
 
-The meter is the one that matters, and it is the one that does not fit the
-existing bridge: its value is a level, ramped `0x26-0x40` green1, `0x41-0x56`
-green2, `0x57-0x64` orange1, `0x65-0x76` orange2, `0x77-0x7F` red, where rbp's
-own meter is an 11-segment **bitmask** and the shim's rescale assumes a segment
-count. The list's type column calls that row a NOTE while its own status byte is
-`B0`, a control change; the status byte is what the wire carries.
+The meter is the one that does not fit the existing bridge: its value is a level,
+ramped `0x26-0x40` green1, `0x41-0x56` green2, `0x57-0x64` orange1, `0x65-0x76`
+orange2, `0x77-0x7F` red, where rbp's own meter is an 11-segment **bitmask** and
+the shim's rescale assumes a segment count. The list's type column calls that row
+a NOTE while its own status byte is `B0`, a control change; the status byte is
+what the wire carries. Meters are out of scope for the LED pass — and note that
+this row contradicts the "the FLX4 has no level meters" claim that used to sit in
+`rb.conf` and [09](09-raspberrypi4-audio.md); the ramp is documented even though
+it has not been measured here.
 
-The pad **colours** are the third unknown: the existing encoder assumes the
-Engine OS Prime convention (bits 4-5 red, 2-3 green, 0-1 blue, two bits each;
-`RB_PAD_BRIGHT=1` sets bit 6 for the bright range), and nothing in the list
-confirms the FLX4 uses it.
+The pad **colours** are still unknown: the existing encoder assumes the Engine OS
+Prime convention (bits 4-5 red, 2-3 green, 0-1 blue, two bits each;
+`RB_PAD_BRIGHT=1` sets bit 6 for the bright range), and nothing confirms the FLX4
+uses it. The FLX4 table's `pad_enc` is therefore `LED_ENC_NONE`, which means a
+plain on with no colour — and `RB_PAD_BRIGHT` is inert until that changes.
+`test_flx4.c` fails the suite if a row claims the Engine OS encoding before it has
+been measured, because that is a tempting guess rather than a hypothetical one.
 
-See [08 — controls](08-controls.md#led-output) for the LED and meter machinery
-this would plug into.
+### Measuring the notes: the route, and the loopback result
+
+Two things had to be settled before any note could be probed, and both were
+measured on the unit on 2026-09-26.
+
+**`amidi` cannot be used on this unit.** The obvious tool —
+
+```bash
+amidi -p hw:1,0,0 -S "90 54 7F"        # does NOT work here
+```
+
+— fails with `Device or resource busy`. The kernel's `snd_seq_midi` holds the
+rawmidi node once the sequencer attaches it, so a userspace open of `hw:1,0,0`
+is refused even though `amidi -l` lists the port. **The probe must go through the
+sequencer**, which is also the route the shim's own LED writes take, so a probe
+through it measures what the shim can actually do:
+
+```bash
+# seqinject2 is built by scripts/shims/Makefile (`make` builds it; it is not
+# deployed with the shims -- copy it to /tmp on the unit)
+scp scripts/shims/seqinject2 root@<unit>:/tmp/ && ssh root@<unit> chmod +x /tmp/seqinject2
+
+# /tmp/ledprobe.sh names the candidates and sweeps a channel:
+#   sh /tmp/ledprobe.sh cand          # the named candidates, 3 s each
+#   sh /tmp/ledprobe.sh sweep <ch>    # every note 0..127 on one channel
+#   sh /tmp/ledprobe.sh pair <ch> <n> # one note on/off, for a single check
+```
+
+**A write to the device port does not loop back into the shim's input.** This is
+the property that decides whether the whole feature is safe, because the shim
+reads and writes the *same* port (`20:0`): if the shim's own LED writes were
+delivered to its input port, every LED message would arrive as a phantom button
+press. Measured, three ways:
+
+| Test | Result |
+|---|---|
+| the device echoes what is sent to it | **no** — a write to `20:0` never comes back out |
+| a write to `20:0` reaches the shim's input port | **no** — 0 new lines in `/tmp/knobshim.log` |
+| a *real* button press does reach it | **yes** — the log is full of them |
+
+The third row is what makes the second meaningful: the subscription
+(`20:0` -> `rbp-knob2-in`) demonstrably delivers, so a write that never appears
+there is genuinely not being delivered rather than being lost on a dead route.
+The sequencer's own port listing is the explanation — `seqinject2`'s attempt to
+subscribe to the shim's out port fails with `EPERM`, because `rbp-knob2-out`
+advertises `R-e-` (not writable) while the device port `20:0` advertises `RWeX`:
+
+```
+Client  20 : "DDJ-FLX4" [Kernel Legacy]
+  Port   0 : "DDJ-FLX4 MIDI 1" (RWeX) [In/Out]
+    Connecting To: 128:0
+    Connected From: 128:1
+Client 128 : "rbp-knob2" [User Legacy]
+  Port   0 : "rbp-knob2-in" (-We-) [Out]     Connected From: 20:0
+  Port   1 : "rbp-knob2-out" (R-e-) [In]     Connecting To: 20:0
+```
+
+**What is still unmeasured is the only thing the panel can answer:** whether a
+write to `20:0` lights anything at all, and which note lights which control. The
+kernel accepts the write (`20:0` is writable, and `seqinject2` calls
+`die("write event")` on a failed `write()`, which never fired), but a note number
+that has not been *seen* to light must stay `-1`. Nothing in the test suite can
+see an LED.
+
+The hypothesis to test first is **a button's LED uses the same note as its
+input**, which was true of the previous target (`rbp_led.c`'s old header) and is
+Pioneer's convention. The input notes are known from the S5.1 capture:
+
+| Control | Candidate | Probe |
+|---|---|---|
+| CH CUE deck 1 | note 84 on ch 0 | `sh /tmp/ledprobe.sh pair 0 84` |
+| BEAT SYNC deck 1 | note 88 on ch 0 | `sh /tmp/ledprobe.sh pair 0 88` |
+| hot-cue pad 1 deck 1 | note 0 on ch 7 (list ch 8) | `sh /tmp/ledprobe.sh pair 7 0` |
+| PLAY / CUE deck 1 | notes 11 / 12 on ch 0 | `sh /tmp/ledprobe.sh pair 0 11` |
+| MASTER CUE | note 99 on ch 6 (list ch 7) | `sh /tmp/ledprobe.sh pair 6 99` |
+
+**Do not guess a note that has not lit.** A wrong guess here is not a dark LED —
+the SC Live 4's pad notes are `15 + pad` on channels 4/5, and this unit's Beat FX
+section has notes 16/17 as the FX CH SELECT legs — so a copied number is a
+**phantom control press**. `test_flx4.c` refuses any FLX4 row carrying a
+`(channel, note)` pair the SC Live 4's table already uses, and refuses a row
+whose channel base is `-1` while its count is non-zero (which would put strip 1
+on channel 0).
+
+While the notes are unmeasured, `RB_LED_DISABLE=0` is nevertheless the right
+setting: the bridge is on, and it transmits nothing.
+
 
 ## Step 1 — dump the surface
 
@@ -485,9 +577,10 @@ Two absences drive design decisions rather than just config:
   `me_set_master_cue(1)` and stereo cue mode at startup on **every** target, and
   the unit's own MASTER CUE button toggles the same engine state from the map.
 
-Pad illumination stays on (`RB_LED_PADS=1`) for a target whose LEDs do work; on
-this one `RB_LED_DISABLE=1` is what is actually in force until the bridge has
-the FLX4's table.
+Pad illumination stays on (`RB_LED_PADS=1`) and `RB_LED_DISABLE=0` is now the
+setting — the switch no longer waits on anything, because an unmeasured row
+transmits nothing. What did wait on the notes was the *lighting*: see
+[the LEDs](#the-leds).
 
 ### What the unit cannot reach on rbp
 
@@ -538,8 +631,8 @@ is still open or has been answered (with S5.1, the `aseqdump` capture).
 |---|---|---|
 | 1 | **The MIDI channel of each section** — the single conversion the whole map rests on. The list is 1-based, the map is 0-based. | **Answered in S5.1.** Deck-2 PLAY arrived on ch 1, and MASTER CUE — list ch 7 — on ch 6: the list is 1-based and the map's conversion is right. The same capture confirmed PLAY note 11 on both decks, CH CUE note 84, MASTER CUE note 99, the jog touch note 54, and that CC 34 is 0x40-centred rather than `0x01`/`0x7F`. |
 | 2 | **The pad base+pad encoding** — whether `base + pad` and the eight bases are what the unit sends, and whether the four +SHIFT modes pair with the four shift notes the way the list's ordering implies. | **Partly answered in S5.1**: pad 1 in HOT CUE arrived as note 0 on list ch 8 (rch 7), so HOT CUE's base is 0 and pad 1 is +0. The other seven bases are unmoved — press one pad in each pad mode with `aseqdump` running; `LED_VERBOSE=1` shows what rbp then does with it |
-| 3 | The pad-LED **velocity → colour** table. The encoder assumes the Engine OS Prime convention (bits 4-5 red, 2-3 green, 0-1 blue, 2 bits each); `PAD_BRIGHT=1` sets bit 6 for the bright range. | `LED_VERBOSE=1` and read the pads: wrong colour means the bit layout differs, wrong brightness means the bit-6 question |
-| 4 | The **transport/pad/loop LED note numbers**, which the list does not give at all beyond LOADED and VINYL MODE. | watch the unit's own LEDs while it is driven from rekordbox, or send candidate notes and watch. This is what `RB_LED_DISABLE=1` waits on |
+| 3 | The pad-LED **velocity → colour** table. The encoder assumes the Engine OS Prime convention (bits 4-5 red, 2-3 green, 0-1 blue, 2 bits each); `PAD_BRIGHT=1` sets bit 6 for the bright range. | **Narrowed, still open.** The FLX4 table's `pad_enc` is now `LED_ENC_NONE`, so no colour is claimed and `RB_PAD_BRIGHT` is inert for this target until the encoding is measured; `test_flx4.c` fails a row that claims the Engine OS encoding first. Measure with `sh /tmp/ledprobe.sh pair <pad_ch> <pad_note>` and watch whether any colour at all appears, then ramp the velocity (`0x10 0x04 0x01 0x40 0x3F 0x7F 0x2A`) and read the pads |
+| 4 | The **transport/pad/loop LED note numbers**, which the list does not give at all beyond LOADED and VINYL MODE. | **The tooling and the safety answer are both settled; the numbers are not.** `amidi` does not work on this unit (rawmidi is EBUSY — the sequencer holds the node), so the probe goes through the sequencer via `seqinject2`/`/tmp/ledprobe.sh`, which is the route the shim's own writes take. The loopback question is **answered: no** — a write to `20:0` is not delivered to the shim's input port, and the device does not echo (measured 2026-09-26; see [the LEDs section](#measuring-the-notes-the-route-and-the-loopback-result)). What remains is the measurement itself: send each candidate and watch. `RB_LED_DISABLE=0` is now correct **because** every unmeasured row is `-1`, so the bridge runs and transmits nothing |
 | 5 | Jog `RB_JOG_PPR` (shipped as the previous unit's 128), `RB_JOG_REV` and pitch polarity/resolution. | **`RB_JOG_PPR` answered in S5.1: 720** (ten revolutions → 7183 forward counts → 718.3/rev; see [Step 3](#step-3--calibrate-the-continuous-controls)). `RB_JOG_REV`, polarity and pitch resolution are still open: the capture's jog turn direction and pitch push direction were not recorded, so neither sign can be read out of it. `TEMPO_VERBOSE=1`/`JOG_VERBOSE=1` on the device settle all three. |
 | 6 | The **Level/Depth knob's channel**, where the list's Channel column (6) disagrees with its own status byte (`B4`). Both are bound, so the knob works either way — but one of the two rows is dead weight and should go. | the dump: the CC appears on one channel only |
 | 7 | **Which position the FX CH SELECT lever rests in**, and rbp's default Beat FX target. The map deliberately does not force a target, so it does nothing until the lever moves. | move the lever through all three positions and watch `KNOB_VERBOSE=1`; then note what rbp had selected before the first move |

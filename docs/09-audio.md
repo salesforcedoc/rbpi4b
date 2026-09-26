@@ -209,7 +209,7 @@ true here:
 * the `snd_pcm_prepare()` retry after a failed `writei`;
 * `readi` answering silence forever, for the capture;
 * `snd_ctl_open` fakery (matching the configured card now, not `hw:1,0`);
-* `g_vu_peak` still being published even on a target with no meters to light —
+* `g_vu_peak` still being published even where the bridge drives no meter —
   the controls shim decides what to do with it.
 
 ## `SCHED_RT`
@@ -274,8 +274,9 @@ The consequence to know about: **on a first start, both channels come up at
 unity until their faders are touched once.** A channel fader parked at the
 bottom will therefore play at full level until it is moved. The seed is
 deliberately on both `vu_thread` paths (`LED_VU=0` included) because the target
-with no meters is exactly the target with no absolute controls — putting it
-inside the meter loop made it dead code on the only unit that needed it.
+whose meter this bridge cannot drive is exactly the target with no absolute
+controls — putting it inside the meter loop made it dead code on the only unit
+that needed it.
 
 The measurement that pins it (unit, 2026-09-26), and the shape of the trap:
 
@@ -406,9 +407,11 @@ it. Since `snd_ctl_pcm_info` never forwards, rbp may simply never ask again — 
 The master level comes from `audioshim.so`, which sees the master mix in
 `snd_pcm_writei()`, computes a per-channel true-S24 peak with a ~300 ms release,
 and publishes it to the shared `g_vu_peak[2]`. The controls shim turns that into
-whatever the target can display — and on the FLX4, which has no meters,
-`RB_LED_VU=0` means the meter hook is not installed and nothing reads it. See
-[08 — Controls](08-controls.md).
+whatever the target can display — and on the FLX4, whose meter is a CC 2 **value
+ramp** rather than the 11-segment bitmask this bridge drives, `RB_LED_VU=0` means
+the meter hook is not installed and nothing reads it. (This used to say the unit
+"has no meters", which is wrong — it has one of a different kind; see
+[15](15-flx4-midi.md#the-leds).) See [08 — Controls](08-controls.md).
 
 ## For reference: the previous target's 8-channel codec
 

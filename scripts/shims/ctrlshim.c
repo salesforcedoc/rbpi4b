@@ -55,6 +55,17 @@ static const struct ctrl_map *g_evdev;
  * bindings to replay into -- a dump fed to empty tables looks like a broken map. */
 static volatile int maps_ready;
 
+/* The LED table the bridge should drive, or NULL. This is the one place that
+ * knows the selection (ctrl_map.h), and the MIDI side only: the panel belongs to
+ * the controller, so a keyboard selection lights nothing. NULL until the map has
+ * been built, which is why rbp_led.c asks for this rather than caching a pointer
+ * of its own -- a NULL here means "nothing to drive yet", and the bridge treats
+ * it exactly as it treats a surface with no LEDs. */
+const struct led_notes *ctrl_sel_leds(void)
+{
+     return g_midi ? g_midi->leds : NULL;
+}
+
 /* MIDI_DUMP */
 static FILE *dump_f;
 static unsigned long long dump_t0;
@@ -314,9 +325,10 @@ static void *midi_thread(void *arg)
       * unconditionally above -- so a map with no event() is not "no controller",
       * it is "nothing done with the controller's events". Saying so is worth a
       * line: under MIDI_MAP=kbd the FLX4 is still found and its LED/meter route
-      * still exists, and the only reason this is invisible is that RB_LED_DISABLE
-      * ships as 1. (docs/16 used to claim no subscription was made, which was
-      * wrong on both counts.) */
+      * still exists. What that map does NOT get is a panel to light: it publishes
+      * leds = NULL, and ctrl_sel_leds() below returns it, so the LED bridge sends
+      * nothing. (docs/16 used to claim no subscription was made, which was wrong
+      * on both counts.) */
      if (!g_midi->event)
           klog("knobshim2: MIDI map '%s' has no event handler: sequencer events "
                "are read and dropped, and any controller found is subscribed "

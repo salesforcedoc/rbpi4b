@@ -87,4 +87,5 @@ const struct ctrl_map map_none = {
      NULL,   /* tick(): nothing is about time */
      NULL,   /* devices(): no non-MIDI source wanted */
      NULL,   /* input(): ditto */
+     NULL,   /* leds: no surface, so nothing to illuminate */
 };

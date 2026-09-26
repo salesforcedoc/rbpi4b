@@ -480,6 +480,71 @@ static void check_state(void)
            apply_calls);
 }
 
+/* ==========================================================================
+ * The LED table the SC Live 4 map publishes.
+ *
+ * These numbers used to live in rbp_led.c, which made the SC Live 4's notes the
+ * property of a bridge; they moved to map_jp21.c so that a panel's notes belong
+ * to the surface and a bridge never learns one. The move is supposed to be a
+ * PURE move, so this is the guard that it stayed one: a row dropped in the
+ * shuffle is a dark LED on the previous target, which is the hardest kind of
+ * defect to notice and the easiest to introduce. Every number is asserted
+ * EXACTLY rather than merely "present", so neither a lost row nor an altered one
+ * passes -- a "the table is non-empty" check would pass with half of it gone.
+ *
+ * What this cannot check is whether rbp_led.c still reads them: that file is not
+ * in this link, because it needs rbp. Its half of the contract is held by review
+ * and by the on-unit drills, not here.
+ * ========================================================================== */
+static void check_leds(void)
+{
+     const struct led_notes *n = map_jp21.leds;
+
+     CHECK(n != NULL, "the SC Live 4 map publishes no LED table");
+     if (!n)
+          return;
+
+     CHECK(n->deck_ch == 4,
+           "deck LEDs go out on channel %d, were 4", n->deck_ch);
+     CHECK(n->n_sync == 8 && n->n_cue == 9 && n->n_play == 10,
+           "the transport LEDs are %d/%d/%d, were 8/9/10",
+           n->n_sync, n->n_cue, n->n_play);
+     CHECK(n->n_keylock == 34 && n->n_vinyl == 35 && n->n_slip == 36,
+           "keylock/vinyl/slip are %d/%d/%d, were 34/35/36",
+           n->n_keylock, n->n_vinyl, n->n_slip);
+     CHECK(n->n_loopin == 37 && n->n_loopout == 38 && n->n_autoloop == 39,
+           "loopin/loopout/autoloop are %d/%d/%d, were 37/38/39",
+           n->n_loopin, n->n_loopout, n->n_autoloop);
+
+     CHECK(n->pad_ch == 4 && n->n_pad_first == 15,
+           "pads are notes from %d on channel %d, were 15 from 4",
+           n->n_pad_first, n->pad_ch);
+     CHECK(n->pad_enc == LED_ENC_PRIME_6BIT,
+           "the pad encoding is %d, was LED_ENC_PRIME_6BIT (%d)",
+           n->pad_enc, (int)LED_ENC_PRIME_6BIT);
+
+     CHECK(n->strip_ch_first == 0 && n->strip_count == 2 && n->n_strip_cue == 13,
+           "the strip CUE LEDs are note %d on channels %d..%d, were 13 on 0..1",
+           n->n_strip_cue, n->strip_ch_first,
+           n->strip_ch_first + n->strip_count - 1);
+     CHECK(n->master_ch_first == 2 && n->master_ch_count == 2 &&
+           n->n_master_cue == 13,
+           "the master CUE LED is note %d on channels %d..%d, was 13 on 2..3",
+           n->n_master_cue, n->master_ch_first,
+           n->master_ch_first + n->master_ch_count - 1);
+
+     CHECK(n->fx_ch == 15, "the FX group is on channel %d, was 15", n->fx_ch);
+     CHECK(n->n_fx[LED_FX_BFX_ONOFF] == 26 &&
+           n->n_fx[LED_FX_CFX_FILTER] == 21 &&
+           n->n_fx[LED_FX_CFX_DUBECHO] == 22 &&
+           n->n_fx[LED_FX_CFX_NOISE] == 23 &&
+           n->n_fx[LED_FX_CFX_SWEEP] == 24,
+           "the FX notes are %d/%d/%d/%d/%d, were 26/21/22/23/24",
+           n->n_fx[LED_FX_BFX_ONOFF], n->n_fx[LED_FX_CFX_FILTER],
+           n->n_fx[LED_FX_CFX_DUBECHO], n->n_fx[LED_FX_CFX_NOISE],
+           n->n_fx[LED_FX_CFX_SWEEP]);
+}
+
 int main(void)
 {
      /* The map reads its calibration from the environment, and `make test`
@@ -518,6 +583,7 @@ int main(void)
 
      check_stream();
      check_state();
+     check_leds();
 
      /* And once more with pacing on, which is the path MIDI_REPLAY_SPEED takes.
       * At this speed every sleep is zero-length, so only the count is asserted:

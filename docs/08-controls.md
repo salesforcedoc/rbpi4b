@@ -565,12 +565,23 @@ both decks, plus the FX group LEDs. Pad illumination is on where the target has
 pads (`RB_LED_PADS=1`); pad **colours** depend on a velocity→colour table that
 has not been measured for the FLX4 ([15](15-flx4-midi.md)).
 
-**None of that is in force on the Pi yet.** The notes below are the previous
-target's, and the FLX4's own LED notes are largely not published, so
-`rb.conf` ships `RB_LED_DISABLE=1` for this target as an interim setting — pad
-illumination included, since `LED_DISABLE` is the switch that covers them. The
-FLX4's LED table, and the reasons the bridge cannot be guessed, are in
-[15 — DDJ-FLX4 MIDI](15-flx4-midi.md#the-leds).
+**Which surface a note belongs to is now part of the code, not of this file.**
+This section used to present the SC Live 4's note numbers as if they were the
+port's, which is exactly the mistake the split removes: the numbers live in the
+selected map's `struct led_notes` (`jp21_leds` in `map_jp21.c`, `flx4_leds` in
+`map_flx4.c`), and `rbp_led.c` walks whichever table the front end selected. It
+holds **no note number at all** — see `ctrl_map.h` ("a map never contains an rbp
+address, a bridge never learns a note number") and `ctrl_sel_leds()` in
+`ctrlshim.c`, which is the one place that knows the selection.
+
+Every table row is `-1` by default, and `-1` means **this surface has no such
+LED** and transmits nothing. That is what makes it safe for `rb.conf` to ship
+`RB_LED_DISABLE=0` while the FLX4's notes are still unmeasured: the bridge runs
+and sends nothing. A keyboard selection has `leds = NULL`, which is a declared
+answer rather than an omission — the panel belongs to the controller, so a
+keyboard lights nothing. `test_kbd.c` pins that NULL; `test_flx4.c` pins that no
+FLX4 row carries an SC Live 4 `(channel, note)` pair, because a copied number is
+not a dark LED but a phantom control press.
 
 ### How a controller's LEDs are addressed
 
@@ -584,8 +595,19 @@ aplaymidi -p 16:0 ledtest.mid      # note8/9/10 ch4 -> SYNC/CUE/PLAY light up
 amidi -p hw:0,0 -S "94 0A 3F"      # PLAY deck1 bright
 ```
 
-Writing LED MIDI does **not** loop back into the control-surface input path on
-those units (verified with `aseqdump`), so it is safe to do from inside `rbp`.
+On the Pi's DDJ-FLX4 those rawmidi one-liners **do not work**: `hw:1,0,0` is
+EBUSY to userspace because the kernel's `snd_seq_midi` holds the node once the
+sequencer attaches it. Drive the panel through the sequencer instead
+(`seqinject2`, or `/tmp/ledprobe.sh` on the unit) — which is the same route the
+shim's own writes take. See
+[15](15-flx4-midi.md#measuring-the-notes-the-route-and-the-loopback-result).
+
+Writing LED MIDI does **not** loop back into the control-surface input path.
+That was verified on the previous target with `aseqdump`, and it has now been
+re-verified on the FLX4 specifically, because the FLX4 case is the one where the
+shim reads and writes the *same* port (`20:0`) — a write there reaches the device
+and is delivered neither to the shim's own input port nor to a monitor, while a
+real button press demonstrably is. It is safe to do from inside `rbp`.
 
 ### The bridge
 
@@ -594,17 +616,23 @@ EUP/SUB micons, sent to `/dev/subucom_spi1.0` — a dead FIFO in this port. The
 LED thread therefore polls rbp's own engine state at 20 Hz through the
 `playengine::PlayEngine` singleton and mirrors it onto the panel's notes:
 
-| LED | note (ch 4/5, JP21) | source |
+| LED | note | source |
 |---|---|---|
-| SYNC | 8 | **rbp LedStat id 4** (off / solid / blink) |
-| CUE | 9 | loaded && !playing |
-| PLAY | 10 | `isPlaying` → solid; loaded && !playing → blink; else off |
-| KEY LOCK | 34 | `PlayEngine::isMasterTempo(ch)` |
-| VINYL | 35 | `PlayEngine::isVinylMode(ch)` |
-| SLIP | 36 | `PlayEngine::isSlipModeOn(ch)` |
-| LOOP IN | 37 | derived (rbp's loop ids arrive on channel 0) |
-| LOOP OUT | 38 | derived (`isLooping`) |
-| AUTO LOOP | 39 | `isAutoBeatLoop(ch)` |
+| SYNC | `n_sync` | **rbp LedStat id 4** (off / solid / blink) |
+| CUE | `n_cue` | loaded && !playing |
+| PLAY | `n_play` | `isPlaying` → solid; loaded && !playing → blink; else off |
+| KEY LOCK | `n_keylock` | `PlayEngine::isMasterTempo(ch)` |
+| VINYL | `n_vinyl` | `PlayEngine::isVinylMode(ch)` |
+| SLIP | `n_slip` | `PlayEngine::isSlipModeOn(ch)` |
+| LOOP IN | `n_loopin` | derived (rbp's loop ids arrive on channel 0) |
+| LOOP OUT | `n_loopout` | derived (`isLooping`) |
+| AUTO LOOP | `n_autoloop` | `isAutoBeatLoop(ch)` |
+
+The note column names a **field**, not a number, and that is the point: this
+table's notes are the SC Live 4's (`8/9/10/34/35/36/37/38/39` on channels 4/5),
+the FLX4's are not measured, and a bridge that spelled either of them out would
+be wrong for the other surface. Read the number from `map_jp21.c`'s `jp21_leds`
+or `map_flx4.c`'s `flx4_leds`.
 
 Deck 1 = PlayEngine channel 0, deck 2 = channel 1 (mirrors the RX3
 `EnPlayerChannel`; the JP21 panel MIDI channels are 4/5 — the FLX4's differ).
@@ -614,20 +642,30 @@ shim has fallen back to rawmidi it holds that device exclusively instead, and
 `amidi`/`aplaymidi` will report "Device or resource busy"; `LED_DISABLE=1`
 releases it.
 
-Not yet driven anywhere: pad colours (RGB) on the FLX4, pad-mode LEDs (11–13),
-LOAD / browse LEDs, CUE id, and the loop LEDs.
+Not yet driven anywhere, because no FLX4 row has been *seen* to light: pad
+colours (RGB) on the FLX4, its transport/pad/loop notes, LOAD / browse LEDs, and
+the CUE id. Every one of them is `-1` in `flx4_leds` and therefore silent; the
+pad-mode LEDs (11–13) and the LOAD/browse LEDs are the same open question. The
+loop LEDs are *not* in that list for the JP21 — they are driven there today, and
+the FLX4 has no loop section at all, which is the case the `-1` row exists for.
 
 ### Global LEDs driven straight from rbp
 
 The LedStat id for the FX group is **`LedDef::ID + 8`**:
 
-| control | panel note (ch 15, JP21) | rbp LED id |
+| control | field | rbp LED id |
 |---|---|---|
-| Sound Color FX: Dual Filter | 21 | 41 (`CfxFilter` 33+8) |
-| Sound Color FX: Dub Echo | 22 | 43 (`CfxDubEcho` 35+8) |
-| Sound Color FX: Noise | 23 | 44 (`CfxNoise` 36+8) |
-| Sound Color FX: Wash (Sweep) | 24 | 42 (`CfxSweep` 34+8) |
-| Beat FX ON/OFF | 26 | **48** (`EffectOnOff` 40+8) |
+| Sound Color FX: Dual Filter | `n_fx[LED_FX_CFX_FILTER]` | 41 (`CfxFilter` 33+8) |
+| Sound Color FX: Dub Echo | `n_fx[LED_FX_CFX_DUBECHO]` | 43 (`CfxDubEcho` 35+8) |
+| Sound Color FX: Noise | `n_fx[LED_FX_CFX_NOISE]` | 44 (`CfxNoise` 36+8) |
+| Sound Color FX: Wash (Sweep) | `n_fx[LED_FX_CFX_SWEEP]` | 42 (`CfxSweep` 34+8) |
+| Beat FX ON/OFF | `n_fx[LED_FX_BFX_ONOFF]` | **48** (`EffectOnOff` 40+8) |
+
+The note numbers are `21/22/23/24/26` on channel 15 for the SC Live 4 —
+`jp21_leds.fx_ch` and its `n_fx[]`. **The FLX4 has only one of these**: it has a
+Beat FX ON/OFF button (`flx4_leds.n_fx[LED_FX_BFX_ONOFF]`, input note 71) and a
+single Sound Color FX knob rather than four buttons, so the four Colour FX rows
+are permanently `-1` there — the absent case, not a pending one.
 
 These use the same `0` off / `1` solid / `2` blink mapping, so the beat-FX
 button blinks exactly while rbp does.
@@ -717,15 +755,22 @@ The master meter comes from rbp's own master meter rather than the audio shim's
 peak whenever the hook is capturing it, with the Main Vol applied in dB, so
 master and channels read consistently.
 
-### On the FLX4, which has no meters
+### On the FLX4, whose meter is a different kind
+
+The heading here used to read "which has no meters", and that is wrong: Pioneer's
+list documents a **CH LEVEL METER on CC 2**. What is true is that it is a
+*continuous value* (ramped `0x26`-`0x7F` across green/orange/red) while this
+bridge drives rbp's 11-segment **bitmask**, so one cannot be fed to the other
+without a new bridge — and the ramp has not been measured on the unit
+([15](15-flx4-midi.md#the-leds)).
 
 `RB_LED_VU=0` (the shim's own default is on, because the SC Live 4 has meters),
 and that does more than silence output: `install_meter_hook()` patches rbp's
-**machine code**, so with no meters on the target the patch is **not installed
-at all** — no `MonoLvMeter` prologue hook, no trampoline, no meter CCs, and
-therefore no `led_query_absolute()` either. Nothing polls rbp's meters when
-there is nothing to display them on. `VU_TEST`/`VU_DEBUG` are diagnostic
-overrides of the *output* only; they do not bring the hook back.
+**machine code**, so where the bridge cannot read the meter the patch is **not
+installed at all** — no `MonoLvMeter` prologue hook, no trampoline, no meter CCs,
+and therefore no `led_query_absolute()` either. Nothing polls rbp's meters when
+the answer cannot be displayed. `VU_TEST`/`VU_DEBUG` are diagnostic overrides of
+the *output* only; they do not bring the hook back.
 
 What `LED_VU=0` deliberately does **not** skip is engine setup that has nothing
 to do with meters: `vu_thread` still waits for rbp's mixer (`mixer_engine()`,
@@ -736,6 +781,15 @@ that waits for the mixer rather than to a map: rbp has no PFL keycode, and on
 the FLX4 — which *does* have a MASTER CUE button, bound in the map — a startup
 assertion from the map would be a second writer fighting the operator for the
 same engine state.
+
+**`rbp_vu.c` still holds the same doctrine violation the LED bridge just shed.**
+It hard-codes the SC Live 4's meter numbers — `midi_cc(15, 32/33, …)` and
+`midi_cc(m - 1, 10, …)` at `rbp_vu.c:317-327` — while `rbp_led.c` now takes every
+number from the selected map's table. Nothing is *wrong* on this target today,
+because `RB_LED_VU=0` means those sends never run; but the numbers belong in the
+map for the same reason the LED ones did, and a meter bridge (a value ramp rather
+than a bitmask) is what would force the move. Recorded here so the asymmetry is a
+known debt rather than a surprise.
 
 ## Key gestures added by the port
 

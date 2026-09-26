@@ -103,14 +103,12 @@ knobshim.so: $(CTRL_OBJS) shmstate.o $(CTRL_HDRS) \
 $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 	$(CC) $(CFLAGS) -fvisibility=hidden -c -o $@ $<
 
-# map_jp21.o's initializer predates the map's non-MIDI members (ctrl_map.h's
-# devices()/input(), added after tick for the keyboard fallback), so it stops
-# short of the struct's end and -Wextra's -Wmissing-field-initializers fires on
-# a zero-initialised suffix that is exactly right. The map is extracted JP21
-# behaviour and is not the file to re-indent, so the warning is off here rather
-# than project-wide, where it does catch a real omitted field. Scoped to one
-# file, like fb_shim.o's below.
-map_jp21.o: CFLAGS += -Wno-missing-field-initializers
+# A note on what used to be here: map_jp21.o carried
+# -Wno-missing-field-initializers, because the map's initializer predated the
+# non-MIDI members (ctrl_map.h's devices()/input()) and stopped short of the
+# struct's end. The LED table gave that initializer reason to spell out every
+# member, so the suppression is gone and -Wmissing-field-initializers now guards
+# this file like the rest.
 
 # audioshim must bind dlopen/dlsym to libdl GLIBC_2.4 (the .symver directives
 # are in the source); link the RX3 libdl explicitly. It deliberately does NOT
@@ -285,7 +283,13 @@ test_midi.o: FORCE test_midi.c ctrl_map.h mididump.h shmstate.h rbp_abi.h \
 # an address that is not mapped in this process is a segfault, not a failed
 # check. That is the same reason the JP21 fixture avoids the events that reach an
 # absolute address.
-FLX4_TEST_OBJS := test_flx4.o map_flx4.o ctrl_map.o mididump.o shimutil.o shmstate.o
+#
+# map_jp21.o is here for one assertion: the FLX4's LED table must not carry any
+# of the SC Live 4's (channel, note) pairs, and that comparison needs both
+# tables. It costs one object and no new stubs -- the two maps' rbp calls are the
+# same set, already stubbed below.
+FLX4_TEST_OBJS := test_flx4.o map_flx4.o map_jp21.o ctrl_map.o mididump.o \
+                  shimutil.o shmstate.o
 
 test_flx4: $(FLX4_TEST_OBJS) tests/midi_flx4.dump
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \

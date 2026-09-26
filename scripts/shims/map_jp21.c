@@ -699,6 +699,42 @@ static void *bfx_init_thread(void *arg)
      return NULL;
 }
 
+/* The SC Live 4's panel LEDs. These numbers were read off the hardware and are
+ * the same notes the map's buttons send (which is why they look like the input
+ * rows above), moved here verbatim from rbp_led.c -- that file used to carry
+ * them, which put one surface's notes in a bridge. Nothing about them changed in
+ * the move, so the previous target's LED behaviour is byte-for-byte what it was.
+ *
+ * Which rbp state lights each of these is rbp_led.c's business and is not
+ * recorded here; this is only what the panel is called. */
+static const struct led_notes jp21_leds = {
+     .deck_ch = 4,             /* deck LEDs go out on channel 4 + deck */
+     .n_sync = 8, .n_cue = 9, .n_play = 10,
+     .n_keylock = 34, .n_vinyl = 35, .n_slip = 36,
+     .n_loopin = 37, .n_loopout = 38, .n_autoloop = 39,
+
+     .pad_ch = 4,              /* pads share the deck channel... */
+     .n_pad_first = 15,        /* ...and are notes 15..22 */
+     .pad_enc = LED_ENC_PRIME_6BIT,
+
+     .strip_ch_first = 0,      /* strip m's CUE LED is channel m, note 13 */
+     .strip_count = 2,
+     .n_strip_cue = 13,
+
+     .master_ch_first = 2,     /* the master CUE LED is on the strips 3/4 send */
+     .master_ch_count = 2,
+     .n_master_cue = 13,
+
+     .fx_ch = 15,              /* the global FX group is on channel 15 */
+     .n_fx = {
+          [LED_FX_BFX_ONOFF]   = 26,
+          [LED_FX_CFX_FILTER]  = 21,
+          [LED_FX_CFX_DUBECHO] = 22,
+          [LED_FX_CFX_NOISE]   = 23,
+          [LED_FX_CFX_SWEEP]   = 24,
+     },
+};
+
 static void jp21_build(void)
 {
      /* ADDITIVE, deliberately -- see the note on ctrl_bindings_reset() in
@@ -869,4 +905,7 @@ const struct ctrl_map map_jp21 = {
      jp21_startup,
      jp21_event,
      jp21_tick,
+     NULL,            /* devices(): a MIDI surface, so no evdev reader */
+     NULL,            /* input(): ditto -- never sees an evdev triple */
+     &jp21_leds,
 };

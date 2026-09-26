@@ -78,6 +78,71 @@ extern int abs_map_n;
  * struct abs_ctrl, or a third table with a threshold -- and until one exists,
  * the honest answer at a call site is a comment saying so. */
 
+/* The global FX group's rows, in the order rbp_led.c pairs them with rbp's
+ * LedStat ids. Named rather than positional so a map can fill the array with
+ * designated initializers and a reorder cannot silently swap two LEDs. */
+enum led_fx {
+     LED_FX_BFX_ONOFF = 0,
+     LED_FX_CFX_FILTER,
+     LED_FX_CFX_DUBECHO,
+     LED_FX_CFX_NOISE,
+     LED_FX_CFX_SWEEP,
+     LED_FX_COUNT
+};
+
+/* How a pad's stored 0..255 RGB becomes a Note On velocity. One function per
+ * value, because the encoding is a property of the SURFACE and not of the bridge:
+ * the SC Live 4 uses Engine OS's 6-bit layout, the FLX4's is not assumed to be
+ * the same (docs/15's open question 3), and a surface whose pads are not RGB at
+ * all says NONE. */
+enum led_enc {
+     LED_ENC_NONE = 0,     /* plain on/off: the pad takes any non-zero velocity */
+     LED_ENC_PRIME_6BIT,   /* bits 4-5 red, 2-3 green, 0-1 blue (Engine OS Prime) */
+};
+
+/* ---- the panel LEDs ------------------------------------------------------
+ *
+ * A surface's ILLUMINATION note numbers. Same rule as every other table here:
+ * these are the panel's numbers, and nothing in them is an rbp address. Which
+ * rbp state each LED mirrors, and the LedStat ids it is read from, are rbp's and
+ * stay in rbp_led.c/rbp_abi.h -- the map only says which note that surface lights
+ * for it, and on which channel.
+ *
+ * The shape is flat, one field per control, because that is what a panel is: one
+ * note per button. `-1` means THIS SURFACE HAS NO SUCH LED, and it is the
+ * load-bearing value in the whole struct -- the reason the table exists is that
+ * one target's notes must never be transmitted at a panel that does not have
+ * them (driving the SC Live 4's numbers at an FLX4 lands on the Beat FX section,
+ * where notes 16/17 are the FX CH SELECT legs). So an absent or unmeasured LED is
+ * -1 and sends nothing, and a neighbouring surface's number is never substituted
+ * for it. `0` is a legal note, so the "no LED" value cannot be zero.
+ *
+ * Both surfaces this build knows send a deck's LEDs on one channel per deck and
+ * its pads on another, so the channel fields come in pairs with a base: deck d's
+ * LEDs are on deck_ch + d, its pads on pad_ch + d. */
+struct led_notes {
+     int deck_ch;          /* deck 1's send channel; deck 2 is +1 */
+
+     /* one note per deck LED, in the order rbp_led.c reads them */
+     int n_sync, n_cue, n_play, n_keylock, n_vinyl, n_slip;
+     int n_loopin, n_loopout, n_autoloop;
+
+     int pad_ch;           /* pads: send channel pad_ch + deck */
+     int n_pad_first;      /* pads: note n_pad_first + pad; -1 = no pad LEDs */
+     int pad_enc;          /* how an RGB value becomes a velocity (enum led_enc) */
+
+     int strip_ch_first;   /* mixer strip m: send channel strip_ch_first + m */
+     int strip_count;      /* how many strips this surface has; 0 = no strip LEDs */
+     int n_strip_cue;      /* the strip CUE note; -1 = none */
+
+     int master_ch_first;  /* master CUE goes to a run of channels, ... */
+     int master_ch_count;  /* ... this many of them, all on the one note */
+     int n_master_cue;     /* the master CUE note; -1 = none */
+
+     int fx_ch;            /* the global FX group's send channel */
+     int n_fx[LED_FX_COUNT];   /* indexed by enum led_fx; -1 = no such LED */
+};
+
 /* Empty both tables. Called by the front end exactly once, before any build():
  * two maps can be live at once, so a build that reset them would wipe the other
  * surface's bindings -- and map_kbd.c's build leaves both tables empty on
@@ -142,6 +207,13 @@ struct ctrl_map {
       * reader never learns a keycode. Only ever called when devices() > 0, and
       * only once rbp's KeyManager exists. */
      void (*input)(int type, int code, int value);
+
+     /* The panel LEDs this surface can light, or NULL when it has none to drive
+      * (a keyboard has no LEDs; `none` has no surface at all). Optional, and NULL
+      * is a real answer rather than an omission: it means "send nothing", which
+      * is what keeps a selection with no LED table from being driven by one it
+      * never published. */
+     const struct led_notes *leds;
 };
 
 /* "Nothing on this side." The absence of a surface is a real selection and not a
@@ -160,5 +232,12 @@ extern const struct ctrl_map map_kbd;
  * published DDJ-FLX4 MIDI message list and are unverified until a dump from the
  * unit confirms them -- see the provenance block in map_flx4.c and docs/15. */
 extern const struct ctrl_map map_flx4;
+
+/* The selected MIDI surface's LED table, or NULL if it has none to drive. Defined
+ * in ctrlshim.c because that is the only file that knows the selection, and asked
+ * of the MIDI side alone: the LED panel belongs to the controller, so lighting
+ * nothing under MIDI_MAP=kbd is a selection rather than an omission. A caller
+ * that gets NULL sends nothing -- it must not fall back to another map's notes. */
+const struct led_notes *ctrl_sel_leds(void);
 
 #endif /* RBLIVE4_CTRL_MAP_H */

@@ -486,8 +486,9 @@ whole of "the keyboard does nothing while the controller works".
 The old text also claimed that under `kbd` the FLX4 got no subscription. That was
 wrong on both counts: `seq_setup()` runs unconditionally, so the FLX4 *was* found
 and subscribed under `kbd` — it only looked ignored because the LED/meter output
-route is disabled by `RB_LED_DISABLE=1` and the keyboard map has no `event()` to
-consume what was arriving.
+route was disabled (`RB_LED_DISABLE=1` then; it is `0` now that the note numbers
+live in the map rather than in `rbp_led.c`) and the keyboard map has no `event()`
+to consume what was arriving.
 
 **What it is now.** Two independent selections, one per event source:
 
@@ -518,12 +519,15 @@ here:
 * **Two surfaces can drive the same rbp key.** The keyboard and the FLX4 map
   overlap on PLAY, CUE, SYNC, LOAD, SOURCE, BACK and the selector, each with its
   own held state. Holding the FLX4's PLAY and tapping SPACE therefore delivers two
-  presses and one release, and whether rbp's KeyManager latches on that is not
-  knowable from the source. **It is on the on-unit list** ([13](13-raspberrypi4.md)
-  S8.5): hold PLAY on the controller, tap SPACE, release. If playback stops when it
-  should, nothing more is needed; if it does not, the fix is a per-(keycode,
-  channel) aggregator in the front end that forwards a release only when the last
-  holder releases it. Not built speculatively.
+  presses and one release, and whether rbp's KeyManager acts on the redundant press
+  is not knowable from the source. **The operator ran it on 2026-09-26 and reported
+  playback undisturbed — a pass, so no aggregator was built and none is owed**
+  ([13](13-raspberrypi4.md) S8.5). One thing that pass does not carry is a log: the
+  same reboot wiped `/tmp`, and no surviving window contains a `KEY_SPACE` event at
+  all, so the result rests on the operator's report rather than on a record. The
+  corroboration, if it is ever wanted, is one press of `space` with the log live.
+  Absent that, the aggregator stays **unbuilt and unruled-out** — and it must not be
+  built speculatively.
 
 **Nothing here was fixed by the `kbd` map in the end.** The gap it was working
 around — no SOURCE binding — is closed on `flx4` now, by two bindings of its own:

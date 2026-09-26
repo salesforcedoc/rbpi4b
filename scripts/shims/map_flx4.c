@@ -79,10 +79,8 @@
  *
  * ============================== the LEDs ==================================
  *
- * Recorded here, driven nowhere yet. The unit's illumination messages are all
- * MIDI-OUT (the list's last section), and rbp_led.c is still shaped for the
- * previous target's channels and notes, so with RB_LED_DISABLE=1 (rb.conf, this
- * target's interim setting) nothing illuminates at all:
+ * The unit's illumination messages are all MIDI-OUT (the list's last section).
+ * Only three kinds are in that list, and NONE of them is a transport or pad LED:
  *
  *   LOADED (track-load illumination)  note 0 / 1, list ch 16 (0-based 15)
  *   VINYL MODE (app-set, footnote *2) note 23,     list ch 1 / 2 (0-based 0/1)
@@ -92,10 +90,34 @@
  *     type column calls this row a NOTE while its own status byte is B0, a
  *     control change; the status byte is what the wire carries.
  *
- * The transport/pad/loop LEDs are not in the list at all beyond the two rows
- * above, so their note numbers are simply unknown -- another reason the LED
- * bridge is off for this target rather than guessed. docs/15-flx4-midi.md has
- * the full table and the open question.
+ * So the note numbers for PLAY, CUE, BEAT SYNC, the channel-strip CUE, the pads
+ * and the loops are NOT published anywhere -- and they are not guessable either.
+ * The hypothesis worth testing first is Pioneer's usual one, that a button's LED
+ * is the same note as its input (which was true of the previous target, whose
+ * numbers are in map_jp21.c), and the input notes ARE known from the S5.1
+ * capture: PLAY 11, CUE 12, CH CUE 84, BEAT SYNC 88, MASTER CUE 99, pad 1 = note
+ * 0. But "worth testing first" is not "known", and the difference is not
+ * cosmetic here: the SC Live 4's numbers, driven at this panel, land on the Beat
+ * FX section, where notes 16/17 are the FX CH SELECT legs. A wrong guess is not
+ * a dark LED, it is a phantom control.
+ *
+ * So every note below is -1 -- "this surface has no such LED as far as we know"
+ * -- and the probe in docs/15's LED section is what fills them in. -1 sends
+ * NOTHING (rbp_led.c), which is why the bridge can be switched on
+ * (RB_LED_DISABLE=0) before the measurement: the machinery runs, the panel stays
+ * dark, and each row becomes a one-line edit once its note has been seen to
+ * light. Do not fill a row from the vendor list or from the JP21 table.
+ *
+ * Which rows the unit will ultimately have is a separate question from which are
+ * measured, and two of them are already settled by what the panel physically
+ * is: KEY LOCK and SLIP are absent (no button on the unit, so no LED -- see the
+ * "cannot reach" block above), and so are the four Sound Color FX rows (the unit
+ * has CFX knobs, not CFX buttons). Those four stay -1 permanently rather than
+ * pending. The loops, the Beat FX ON/OFF LED and VINYL MODE are the opposite
+ * case: the unit does have those controls, so their rows are pending a
+ * measurement rather than absent. VINYL MODE additionally has a documented note
+ * (23, above) but no button, and the list footnotes it as application-set -- a
+ * display-only decision to take deliberately rather than as a side effect.
  */
 #define _GNU_SOURCE
 #include <stdint.h>         /* uint32_t, for the two mixer-route words */
@@ -849,6 +871,52 @@ static void flx4_event(const struct snd_seq_event *ev)
      }
 }
 
+/* The DDJ-FLX4's panel LEDs -- every row -1, and deliberately so. The block at
+ * the top of this file says why: this unit's illumination notes for the
+ * transport, the pads, the channel CUE and the loops are not published and not
+ * guessable, and a wrong number here does not produce a dark LED, it produces a
+ * phantom control. rbp_led.c sends nothing for a -1 row, so the bridge can run
+ * with these unfilled and the panel simply stays dark until the probe in
+ * docs/15's LED section has named a note for each. Each is then a one-line edit.
+ *
+ * KEY LOCK, SLIP and the four Sound Color FX rows are -1 for a different reason:
+ * the unit has no such control, so it has no such LED and never will. Recording
+ * them as absent rather than omitting them is the point -- an omission is what a
+ * future reader fills in by guessing. */
+static const struct led_notes flx4_leds = {
+     .deck_ch = -1,            /* unmeasured: the deck LEDs' send channel */
+     .n_sync = -1,             /* pending: BEAT SYNC is input note 88 ch 0 */
+     .n_cue = -1,              /* pending: CUE is input note 12 ch 0 */
+     .n_play = -1,             /* pending: PLAY is input note 11 ch 0 */
+     .n_keylock = -1,          /* absent: the unit has no KEY LOCK button */
+     .n_vinyl = -1,            /* pending, not absent: documented note 23, no button */
+     .n_slip = -1,             /* absent: the unit has no SLIP button */
+     .n_loopin = -1,           /* pending: the unit HAS LOOP IN (input note 16) */
+     .n_loopout = -1,          /* pending: ...and LOOP OUT (input note 17) */
+     .n_autoloop = -1,         /* pending: ...and 4 BEAT / EXIT (input note 77) */
+
+     .pad_ch = -1,             /* unmeasured: hot-cue pad 1 is input note 0 ch 7 */
+     .n_pad_first = -1,
+     .pad_enc = LED_ENC_NONE,  /* and the colour encoding is open question 3 */
+
+     .strip_ch_first = -1,     /* unmeasured: CH CUE is input note 84 ch 0 */
+     .strip_count = 0,
+     .n_strip_cue = -1,
+
+     .master_ch_first = -1,    /* unmeasured: MASTER CUE is input note 99 */
+     .master_ch_count = 0,
+     .n_master_cue = -1,
+
+     .fx_ch = -1,              /* pending: the unit HAS Beat FX ON/OFF (note 71) */
+     .n_fx = {
+          [LED_FX_BFX_ONOFF]   = -1,
+          [LED_FX_CFX_FILTER]  = -1,   /* absent: CFX knobs, no CFX buttons */
+          [LED_FX_CFX_DUBECHO] = -1,   /* absent, ditto */
+          [LED_FX_CFX_NOISE]   = -1,   /* absent, ditto */
+          [LED_FX_CFX_SWEEP]   = -1,   /* absent, ditto */
+     },
+};
+
 const struct ctrl_map map_flx4 = {
      "flx4",
      flx4_build,
@@ -857,4 +925,5 @@ const struct ctrl_map map_flx4 = {
      flx4_tick,
      NULL,   /* devices(): a MIDI surface, so no evdev reader is started */
      NULL,   /* input(): ditto -- this map never sees an evdev triple */
+     &flx4_leds,
 };

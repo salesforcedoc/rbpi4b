@@ -91,8 +91,13 @@ each row there says whether it has been run, and what it measured.
   settles the rest of S6, and it is also the precondition for playing a track and
   therefore for hearing anything.
 * **Tearing, and the console over the UI** (S2.3/S2.4).
-* **The LED bridge**, still off at `RB_LED_DISABLE=1` and blocked on the FLX4's
-  illumination notes; `rbp_led.c` carries the previous target's.
+* **The LED bridge**, on at `RB_LED_DISABLE=0` and transmitting nothing yet. The
+  note numbers moved out of `rbp_led.c` into the selected map's `struct
+  led_notes`, so a row that reads `-1` means "this surface has no such LED" and
+  sends nothing — which is what lets the bridge run before the FLX4's
+  illumination notes are known. Every FLX4 row is `-1` until it is *seen* to
+  light; only the panel can confirm a number, and the probe now exists
+  ([docs/15](docs/15-flx4-midi.md#the-leds)).
 * **The keyboard fallback's reader.** It starts under `EVDEV_MAP`, which defaults
   to `kbd` — so the keyboard and mouse are live alongside the FLX4 with no
   configuration, and the "keyboard does nothing while the controller works"
@@ -113,10 +118,11 @@ it says so; [docs/README](docs/README.md) explains the convention.
   `TODO: unverified` in `scripts/shims/map_flx4.c` too.
 * The booth stream is dropped (one log line): the FLX4 has two output pairs, so
   master and headphones are what there is.
-* No LEDs yet: `RB_LED_DISABLE=1` for this target, because the LED bridge is
-  still shaped for the previous surface and the FLX4's transport/pad LED notes
-  are not published. Pad illumination, and the velocity→colour encoding with it,
-  land with that bridge.
+* No LEDs lit yet: the bridge is on (`RB_LED_DISABLE=0`) but every FLX4 LED row
+  is `-1`, because the unit's transport/pad LED notes are not published and a
+  guess is not a dark LED — it is a phantom control press. Each row becomes a
+  one-line edit once it is seen to light. Pad illumination, and the
+  velocity→colour encoding with it, land with those numbers.
 * DJ FX parameter / layer encoders, StopTime and some shift actions are not
   mapped.
 * Autostart is not provided; the launcher is run manually.

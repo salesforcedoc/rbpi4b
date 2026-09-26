@@ -409,4 +409,5 @@ const struct ctrl_map map_kbd = {
      NULL,            /* no tick: nothing in this map is about time */
      kbd_devices,
      kbd_input,
+     NULL,            /* leds: a keyboard has no panel to light */
 };

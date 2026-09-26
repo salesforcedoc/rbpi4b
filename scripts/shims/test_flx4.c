@@ -51,9 +51,12 @@
  *     the idle edge at the end, and it waits for real time to pass rather than
  *     pretending the fixture's timestamps are seconds.
  *   - The LED and meter bridge. RB_LED_VU=0 for this target and this map drives
- *     no meter; rbp_led.c is still shaped for the previous unit's channels and
- *     the FLX4's own LED note numbers are not in the vendor list, so there is
- *     nothing here to assert.
+ *     no meter. The FLX4's LED TABLE is checked here (check_leds()): every row
+ *     is -1 until a note is measured to light, it may not carry one of the SC
+ *     Live 4's numbers, and it must name a legal note on a legal channel. What
+ *     no assertion here can do is see an LED light -- the note numbers come from
+ *     the probe in docs/15's LED section and the operator's eye, and the
+ *     assertions are there to stop a GUESS being mistaken for a measurement.
  *
  * One side effect worth knowing about: klog() is unconditional, and the map logs
  * every FX SELECT step, FX CH SELECT move and master-cue toggle, so running this
@@ -73,6 +76,7 @@
 #include "rbp_bridge.h"    /* the keycode calls, and the signatures to match */
 #include "shmstate.h"      /* the gains the mixer knobs write */
 #include "rbp_vu.h"        /* g_fader, g_fader_seen */
+#include "rbp_led.h"       /* led_loop_armed */
 #include "ctrl_map.h"
 #include "mididump.h"
 
@@ -98,15 +102,36 @@ static int checks, failures;
  *
  * Each is declared by the header included above rather than re-declared, so a
  * change to one of those types fails to compile here instead of quietly
- * disagreeing about the size of an array. aloop_enabled and led_loop_armed are
- * NOT here: this map never calls the beat-loop or LED path (see the header), so
- * nothing in this link refers to them.
+ * disagreeing about the size of an array.
+ *
+ * aloop_enabled, led_loop_armed, plinn, aloop_is_looping and aloop_apply USED to
+ * be absent from this list, on the grounds that the FLX4 map never reaches the
+ * beat-loop or LED path. That is still true of map_flx4.c, which is why none of
+ * them is called: the definitions below exist only because check_leds() compares
+ * the FLX4's LED table against map_jp21's, and linking map_jp21.o drags in its
+ * unresolved references. They are deliberately inert -- plinn() returns NULL and
+ * nothing looping -- so that if a future FLX4 row does reach the beat loop, the
+ * apply counters below catch it rather than the beat loop firing in a test.
  * ========================================================================== */
 
 int verbose = 0;          /* every klog() in the map is gated on this */
 
 int g_fader[3] = { 1023, 1023, 1023 };
 int g_fader_seen[3];
+
+/* The beat loop and the loop-arm flags, inert. See the comment above: map_jp21.o
+ * is in this link for the LED-table comparison, not for these. */
+int aloop_enabled = -1;
+int led_loop_armed[2];
+static int plinn_calls, looping_calls, apply_calls;
+void *plinn(int deck)                { (void)deck; plinn_calls++; return NULL; }
+int aloop_is_looping(int deck)       { (void)deck; looping_calls++; return 0; }
+void aloop_apply(int deck, void *p, int idx)
+{
+     (void)deck; (void)p; (void)idx;
+     apply_calls++;   /* reaching here with nothing looping is the destructive
+                       * case rbp_bridge.c's BEATLOOP gate exists to prevent */
+}
 
 /* ==========================================================================
  * The bridge: every call the map makes that would otherwise reach rbp or the
@@ -655,6 +680,189 @@ static void check_idle(void)
      }
 }
 
+/* ==========================================================================
+ * The LED table.
+ *
+ * Be exact about what this can say, because the feature it guards is only
+ * visible by eye. Nothing here can see an LED light. What it pins is the table's
+ * SHAPE and the one decision that has a wrong answer:
+ *
+ *   - an unmeasured row must be -1, which sends nothing. That is what lets the
+ *     bridge be switched on before the note numbers are known, and it is why a
+ *     GUESSED note fails the suite instead of lighting the wrong control;
+ *   - a row that is not -1 must be a legal MIDI note on a legal channel, so a
+ *     half-filled row cannot transmit something out of range;
+ *   - no row may carry a note the SC Live 4 already uses, because the JP21
+ *     numbers driven at this panel land on the Beat FX section -- notes 16/17
+ *     there are the FX CH SELECT legs -- so that mistake is not a dark LED, it
+ *     is a phantom control.
+ *
+ * The third needs the previous target's table, which is why map_jp21.o is linked
+ * into this suite. Comparing the two tables is the only mechanical check that
+ * can catch a copy-paste from map_jp21.c, and it is worth the extra object.
+ *
+ * Be exact about what this suite covers today, because a check that iterates
+ * over nothing is indistinguishable in the output from one that passed. While
+ * every FLX4 row is -1, the two row loops below have no rows to walk: what
+ * actually runs is that both maps publish a table, that the SC Live 4's
+ * flattened to something (or the comparison would be a tautology), and the two
+ * pad-encoding pins. The row loops are the checks that must keep holding as the
+ * probe fills rows in -- they are written now so that the first measured note is
+ * constrained the moment it lands, and a half-filled or copy-pasted row fails
+ * then, when the operator can still see which note lit.
+ * ========================================================================== */
+static void check_leds(void)
+{
+     const struct led_notes *n = map_flx4.leds;
+     const struct led_notes *j = map_jp21.leds;
+     /* (channel, note) pairs this surface sends, flattened so the comparison
+      * below is one loop rather than a field-by-field argument. A -1 row is not
+      * recorded at all: it is not transmitted, so it cannot collide with
+      * anything, and the range checks below are about what IS transmitted. */
+     struct pair { int sch, note; } f[64], p[64];
+     int nf = 0, np = 0;
+
+     CHECK(n != NULL, "the FLX4 map publishes no LED table");
+     CHECK(j != NULL, "the SC Live 4 map publishes no LED table");
+     if (!n || !j)
+          return;
+
+     /* Written out rather than looped over the struct, because the fields are
+      * named and a loop would index them by position -- the coupling the field
+      * names exist to remove.
+      *
+      * The channel bases are guarded here exactly as rbp_led.c guards them
+      * (ctrl_map.h says -1 means "this surface has no such LED"): a -1 base must
+      * not be allowed to arithmetically land on channel 0 for deck 2, which is a
+      * real channel on both surfaces. */
+     /* The parameters are deliberately NOT named sch/note: the preprocessor
+      * substitutes inside the whole body, so a parameter sharing a name with the
+      * struct member rewrites `(vec)[cnt].sch` into a computed member access --
+      * which GCC accepts for a plain argument and rejects for an expression, so
+      * the mistake shows up on the JP21 half of the loop rather than the FLX4
+      * one. The trailing underscores are the whole reason this compiles. */
+     #define PAIR(vec, cnt, ch_, nt_) do {                        \
+          if ((ch_) >= 0 && (nt_) >= 0) {                         \
+               (vec)[(cnt)].sch = (ch_);                          \
+               (vec)[(cnt)].note = (nt_);                         \
+               (cnt)++;                                           \
+          }                                                       \
+     } while (0)
+
+     for (int d = 0; d < 2; d++) {
+          int sch = (n->deck_ch < 0) ? -1 : n->deck_ch + d;
+          PAIR(f, nf, sch, n->n_sync);
+          PAIR(f, nf, sch, n->n_cue);
+          PAIR(f, nf, sch, n->n_play);
+          PAIR(f, nf, sch, n->n_keylock);
+          PAIR(f, nf, sch, n->n_vinyl);
+          PAIR(f, nf, sch, n->n_slip);
+          PAIR(f, nf, sch, n->n_loopin);
+          PAIR(f, nf, sch, n->n_loopout);
+          PAIR(f, nf, sch, n->n_autoloop);
+          if (n->pad_ch >= 0 && n->n_pad_first >= 0)
+               for (int pd = 0; pd < 8; pd++)
+                    PAIR(f, nf, n->pad_ch + d, n->n_pad_first + pd);
+     }
+     for (int m = 0; m < n->strip_count; m++)
+          PAIR(f, nf, n->strip_ch_first + m, n->n_strip_cue);
+     for (int k = 0; k < n->master_ch_count; k++)
+          PAIR(f, nf, n->master_ch_first + k, n->n_master_cue);
+     for (int g = 0; g < LED_FX_COUNT; g++)
+          PAIR(f, nf, n->fx_ch, n->n_fx[g]);
+
+     for (int d = 0; d < 2; d++) {
+          int sch = (j->deck_ch < 0) ? -1 : j->deck_ch + d;
+          PAIR(p, np, sch, j->n_sync);
+          PAIR(p, np, sch, j->n_cue);
+          PAIR(p, np, sch, j->n_play);
+          PAIR(p, np, sch, j->n_keylock);
+          PAIR(p, np, sch, j->n_vinyl);
+          PAIR(p, np, sch, j->n_slip);
+          PAIR(p, np, sch, j->n_loopin);
+          PAIR(p, np, sch, j->n_loopout);
+          PAIR(p, np, sch, j->n_autoloop);
+          if (j->n_pad_first >= 0)
+               for (int pd = 0; pd < 8; pd++)
+                    PAIR(p, np, j->pad_ch + d, j->n_pad_first + pd);
+     }
+     for (int m = 0; m < j->strip_count; m++)
+          PAIR(p, np, j->strip_ch_first + m, j->n_strip_cue);
+     for (int k = 0; k < j->master_ch_count; k++)
+          PAIR(p, np, j->master_ch_first + k, j->n_master_cue);
+     for (int g = 0; g < LED_FX_COUNT; g++)
+          PAIR(p, np, j->fx_ch, j->n_fx[g]);
+
+     #undef PAIR
+
+     /* The previous target's table has to be non-empty, or the comparison below
+      * is a tautology. If this fails, the JP21 move has gone wrong and
+      * test_midi.c's exact pins name the row. */
+     CHECK(np > 0, "the SC Live 4 table flattened to no rows at all");
+
+     /* A row that IS sent must name a real note on a real channel. Every row is
+      * -1 today; this is the check that has to keep holding as they are filled
+      * in, and it is the one that catches a half-filled row. */
+     for (int i = 0; i < nf; i++) {
+          CHECK(f[i].note >= 0 && f[i].note <= 127,
+                "LED row %d names note %d, outside 0..127", i, f[i].note);
+          CHECK(f[i].sch >= 0 && f[i].sch <= 15,
+                "LED row %d (note %d) is sent on channel %d, outside 0..15",
+                i, f[i].note, f[i].sch);
+     }
+
+     /* And it must not be one of the previous target's, on a channel that target
+      * uses. This assertion exists for the operator's sake rather than mine: a
+      * wrong note is not a dark LED on this unit, it is a phantom control, and
+      * the two are indistinguishable from the log. */
+     for (int i = 0; i < nf; i++) {
+          for (int k = 0; k < np; k++) {
+               CHECK(!(f[i].sch == p[k].sch && f[i].note == p[k].note),
+                     "the FLX4 sends note %d on channel %d, which is the SC "
+                     "Live 4's number for a different control -- this unit's own "
+                     "note is not measured yet and must stay -1",
+                     f[i].note, f[i].sch);
+          }
+     }
+
+     /* The encoding must be one this build implements. An unknown value falls
+      * through to a plain on in rbp_led.c, which is survivable for a panel whose
+      * pads are not RGB but is not what a pad row means to say. */
+     CHECK(n->pad_enc == LED_ENC_NONE || n->pad_enc == LED_ENC_PRIME_6BIT,
+           "the FLX4's pad encoding is %d, which is not one this build has",
+           n->pad_enc);
+     /* And it must not claim Engine OS's colours before they have been measured
+      * on this unit (docs/15 open question 3). The pads are RGB on both
+      * surfaces, so this one is a real temptation, not a hypothetical. */
+     CHECK(n->n_pad_first < 0 || n->pad_enc != LED_ENC_PRIME_6BIT,
+           "the FLX4 claims Engine OS pad colours, which have not been measured "
+           "on this unit (docs/15 open question 3)");
+
+     /* A count with no channel base is the one shape that sends on a channel
+      * nobody chose. rbp_led.c computes the strip channel as base + m, so a -1
+      * base means strip 1 lands on channel 0 -- a real channel on every surface --
+      * and once a strip note has been measured the -1 note guard no longer covers
+      * it. The bridge clamps the loop; this is what stops a table being written
+      * that way in the first place. */
+     CHECK(n->strip_count == 0 || n->strip_ch_first >= 0,
+           "the FLX4 says it has %d strips but its channel base is %d: strip 1 "
+           "would be sent on channel 0", n->strip_count, n->strip_ch_first);
+     CHECK(n->master_ch_count == 0 || n->master_ch_first >= 0,
+           "the FLX4 says it sends master CUE on %d channels but its channel base "
+           "is %d", n->master_ch_count, n->master_ch_first);
+     /* The same question for the array the state is kept in: LED_STRIP_MAX in
+      * rbp_led.c is a bound on that array, and a table above it is a write past
+      * the end of a module the tests do not link. Spelled out as a literal rather
+      * than included from rbp_led.c, for the same reason the rest of this file is:
+      * the test must not import the thing it is checking. */
+     CHECK(n->strip_count >= 0 && n->strip_count <= 2,
+           "the FLX4's strip_count is %d, above the 2 strips the bridge keeps "
+           "state for", n->strip_count);
+     CHECK(n->master_ch_count >= 0 && n->master_ch_count <= 16,
+           "the FLX4's master_ch_count is %d, which is not a channel count",
+           n->master_ch_count);
+}
+
 int main(void)
 {
      /* The map reads its calibration from the environment, and `make test`
@@ -708,6 +916,7 @@ int main(void)
      check_stream();
      check_state();
      check_idle();
+     check_leds();
 
      /* And once more with pacing on, which is the path MIDI_REPLAY_SPEED takes.
       * At this speed every sleep is zero-length, so only the count is asserted:

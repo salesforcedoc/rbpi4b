@@ -652,8 +652,11 @@ correct some of them — the channel conversion and the pad base+pad encoding ar
 the two whose failure mode is a whole section doing nothing. The dump procedure,
 the tables and the explicitly-unverified parts are in
 [15 — DDJ-FLX4 MIDI](15-flx4-midi.md). The LED bridge is a further step behind:
-`RB_LED_DISABLE=1` is set for this target because `rbp_led.c` still carries the
-previous target's notes.
+it is **on** (`RB_LED_DISABLE=0`) but every FLX4 note row is `-1`, which sends
+nothing — so the bridge runs and the panel stays dark. The notes moved out of
+`rbp_led.c` into the map's `struct led_notes`, so the previous target's numbers
+can no longer be driven at this one by accident; what remains is to *see* each
+one light, which only the panel can settle (S9 below).
 
 **The keyboard fallback is written, and it now runs on this target.** A map with a
 key table, plus the evdev reader that feeds it, with the keycodes it produces
@@ -684,10 +687,15 @@ Two things about the Pi are worth knowing here:
   output until the module is loaded, so the check is still the fix. That is true
   **with a controller selected as well**, which is the difference the two
   selections made: a missing sequencer no longer costs you the keyboard.
-* **The FLX4 has no level meters.** `RB_LED_VU=0` is the setting for that, and it
-  does more than silence output: it skips `install_meter_hook()` entirely, so
-  `rbp`'s machine code is never patched for a meter that does not exist — which
-  is why the hook is skipped rather than left installed with nowhere to write.
+* **The FLX4's meters are a different kind of meter, so the VU bridge is off.**
+  `RB_LED_VU=0` is the setting, and it does more than silence output: it skips
+  `install_meter_hook()` entirely, so `rbp`'s machine code is never patched for a
+  meter this bridge cannot read. The reason is not that the unit lacks meters —
+  Pioneer's list documents a **CH LEVEL METER on CC 2**, one continuous value per
+  channel — but that the bridge drives an 11-segment **bitmask** and this is a
+  value ramp; feeding one to the other needs a different bridge, and the ramp has
+  not been measured here ([15](15-flx4-midi.md#the-leds)). The earlier claim that
+  the unit "has no level meters" was wrong.
   It does *not* skip the cue: `rbp` has no PFL keycode, so the shim asserts
   `me_set_master_cue(1)` and stereo cue mode at startup on every target, waiting
   for `rbp`'s mixer on its own — and the unit's own MASTER CUE button then
@@ -774,14 +782,69 @@ is the point.
 | S8.2 | **Keyboard, hot remove with a key held.** Hold a mapped key down and pull the keyboard's USB | `evdev[…] … went away (…); released 1 held key(s), N device(s) left`, then a `release` line for that keycode, and **the next press is not `ignored`** | no `released N held key(s)` line ⇒ held-key tracking regressed; the next press logging `ignored` is the same defect seen from the map's side |
 | S8.3 | **Mouse.** Pull and replug the mouse, then right-click and roll the wheel | `went away` / `appeared` as above, and BACK and selector rotation still work | the *pointer* keeps working while the buttons do not, or vice versa — these are two different modules ([16](16-input-and-hotplug.md#4-hot-swap)) and a report that says "the mouse is fine" may only mean the pointer |
 | S8.4 | **FLX4 MIDI.** Pull the controller's USB mid-play, wait ~5 s, replug | `control surface 'FLX4' disappeared (unplugged?); waiting for it to come back`, then `subscribed to N:0 'DDJ-FLX4 MIDI 1'` — **write N down**, because whether the client number changed is the thing this drill exists to record — then press a pad and see it work | the surface is re-found (`subscribed to`) but a pad does nothing ⇒ the recycled-client-id case the retry was written for; press nothing and check the LED/meter route line instead |
-| S8.5 | **The double-press question.** With the keyboard attached *and* the controller live, hold the FLX4's PLAY, tap `space` once, release PLAY | playback stops when PLAY is released — the keyboard's release does not undo the controller's hold | playback stops on the *space release* instead, or does not stop at all ⇒ rbp's KeyManager latches, and the fix is the per-(keycode, channel) aggregator described in [16](16-input-and-hotplug.md#two-selections-not-one). **This is the one drill that decides whether more work exists**, and it is the first thing to run |
+| S8.5 | **The double-press question.** With the keyboard attached *and* the controller live, hold the FLX4's PLAY, tap `space` once, release PLAY | **playback continues through the gesture** — **operator-reported pass, 2026-09-26** ("worked as expected, playback did not stop"), and confirmed by the operator as the outcome this row predicts. The second press lands on a key rbp is already holding, and PLAY acts on the press edge, so the only outcomes that would matter are rbp acting on the redundant press or on the early release; neither happened. **No aggregator was built, and none is owed** ([16](16-input-and-hotplug.md#two-selections-not-one)). What *is* still owed is to the record rather than to the result: `/tmp` is tmpfs, the 11:37 reboot destroyed the pre-reboot log, and the surviving window (11:37–11:51) contains **no `KEY_SPACE` (code 57) event at all** while every `note=11` in `/tmp/flx4.dump` is a tap of 100–330 ms and never a hold — so unlike S8.1 and S8.2 this pass has no log behind it. **The two-second corroboration (not a re-run):** with the log live, press `space` once and look for `kbd: evdev type=1 code=57 value=1 -> 0x4101` | playback stops, or stops and PLAY cannot restart it afterwards ⇒ rbp *does* act on the redundant press or the early release, and the per-(keycode, channel) aggregator described in [16](16-input-and-hotplug.md#two-selections-not-one) becomes real work — built on that observation and on nothing else. As run, rbp does neither |
 | S8.6 | **Audio.** Play, pull the FLX4, replug (S4.4 re-run) | in order: `writei … written=-19` → **one** `MASTER LOST` line (not one per block) → `writei #` stops → `MASTER RECOVERED: reopened hw:CARD=DDJFLX4,DEV=0` → `replay: access=… channels=4 rate=44100 …` → `the pair map is unchanged: master=0,1 headphones=2,3 …` → `startup mute released after 79424 frames` → `written=64` again **with non-zero `peak_m`**. The operator confirms by ear with no restart | recovers but only the master pair, with the "only the master pair" note ⇒ this was the cold case, which means the shim thought no card had ever been open; `MASTER LOST` repeating ⇒ the guard is not clearing the global; no `MASTER RECOVERED` at all ⇒ watch whether the backoff is climbing (it logs only after three failures) |
 | S8.7 | **USB media.** Pull the stick while rbp is browsing it, then replug | `knobshim2: USB removed`, the Source screen clears, then `USB1 detected -> registered (dev=3)` and the label is readable again | the screen keeps showing the removed stick ⇒ the screen, not the mount; **this row is the one nobody has tested** ([10](10-usb.md)) |
 
-Two things to record while running these, because they are numbers no log gives
+Three things to record while running these, because they are numbers no log gives
 directly: the **latency** between plug and `appeared` (S8.1, read off the
-timestamps), and the **client number** the FLX4 comes back on (S8.4). Both go in
-the row above when they are known.
+timestamps), the **client number** the FLX4 comes back on (S8.4), and **the window
+the log actually covers**. That last one is not a nicety: `/tmp` is tmpfs, so the
+log's first line is the current boot, and a reboot destroys the record of every
+drill run before it — silently, and in a way that makes a report look verified.
+Measured 2026-09-26: S8.5 passed on the operator's report, and no trace of it
+survives, because the 11:37 reboot had already cleared `/tmp`. The pass stands —
+the operator ran the drill and is the authority on what they saw; what is missing
+is only the log that would corroborate it. Check
+`ls -l --time-style=long-iso /tmp/knobshim.log` against `uptime -s` before
+believing *or* disbelieving any on-unit report — and before a reboot, read the log,
+because afterwards there is nothing left to read.
+
+## S9 — the LED drills
+
+The LED bridge is switched **on** for this target as of 2026-09-26
+(`RB_LED_DISABLE=0`), and it transmits nothing, because every FLX4 note row is
+`-1`. That is the design, not a defect: `-1` means "this surface has no such LED"
+and short-circuits the send, so the bridge could be turned on before the unit's
+illumination notes were known. **Every row below therefore starts dark, and S9.0
+is what turns a row from `-1` into a number.**
+
+Nothing in `make -C scripts/shims test` can see an LED light. The suite pins the
+*table's shape* — every unmeasured row is `-1`, a filled row names a legal note on
+a legal channel, no row carries an SC Live 4 `(channel, note)` pair (a copied
+number is not a dark LED, it is a **phantom control press**), and a channel base
+of `-1` may not sit next to a non-zero count. The operator's eye is the only
+evidence that the lights are right, and the rows below say so rather than
+implying the suite covers it.
+
+`LED_VERBOSE=1` is what makes an *absent* row legible: a row that is `-1` logs
+nothing at all, so "the pad never lit" and "the shim never sent" look identical
+on the panel and are only distinguishable in the log.
+
+**The route, first, because it is not the obvious one.** `amidi` does not work on
+this unit: `hw:1,0,0` is `EBUSY` to userspace because the kernel's `snd_seq_midi`
+holds the node once the sequencer attaches it. Drive the panel through the
+sequencer — `seqinject2`, or `/tmp/ledprobe.sh` on the unit — which is the same
+route the shim's own writes take ([15](15-flx4-midi.md#measuring-the-notes-the-route-and-the-loopback-result)).
+
+| # | Drill | Pass | Fail |
+|---|---|---|---|
+| S9.0 | **Measure the notes (this is the one that gates the rest).** Run `sh /tmp/ledprobe.sh cand`, watching the panel; then `pair <ch> <n>` for any candidate that lit, then `sweep <ch>` on any channel whose candidates all stayed dark | each control's own note is *seen* to light and clears on velocity 0, and the number goes into `flx4_leds` as a one-line edit | a candidate lights a **different** control than the one named ⇒ the same-note hypothesis is wrong for that row and the sweep is the answer; nothing lights anywhere ⇒ the write is not reaching the panel at all, which is a different problem from a wrong note and should be reported as such |
+| S9.1 | **CH CUE tracks rbp.** With a track loaded on deck 1, press the FLX4's channel-1 CUE, then press again | the button's LED lights on the first press and goes dark on the second, matching rbp's own channel CUE state; `LED_VERBOSE=1` logs one `led sch… note… on` and then one `off` | lit but not tracking ⇒ the strip loop is reading `me_get_cue()` wrongly; never lit ⇒ `n_strip_cue` is still `-1` (check the log before the hardware) |
+| S9.2 | **BEAT SYNC.** Engage SYNC on deck 1, disengage, then sync and nudge the tempo so rbp blinks it | solid while engaged, dark when disengaged, and it **blinks in step with rbp** rather than staying solid — the state that lights it is `LedStat` id 4, where 2 means blink | solid where rbp blinks ⇒ the `== 2` case is not being honoured; dark while rbp's own screen shows SYNC engaged ⇒ the row is unmeasured or on the wrong channel |
+| S9.3 | **Hot-cue pads.** Set two hot cues on deck 1, leave a third pad empty | the two pads light **in the right colours and the third stays dark**; an empty pad is not merely dim | right pads, wrong colours ⇒ the velocity encoding is not the Engine OS convention and `pad_enc`/`RB_PAD_BRIGHT` change; all pads the same colour ⇒ the stored RGB is not being read (`ledstat_rgb()`), which is a different failure from a wrong encoding |
+| S9.4 | **PLAY / CUE.** With a track loaded: play, pause, then unload | PLAY solid while playing; PLAY blinks and CUE lights with a track loaded and stopped; both dark with nothing loaded | PLAY lights with nothing loaded ⇒ the `loaded` test; CUE never lights ⇒ `n_cue` still `-1` |
+| S9.5 | **MASTER CUE.** Press the unit's MASTER CUE button, then press it again | the LED follows the button, and rbp's own master-cue state agrees — this one is engine state rather than a mirror, because `me_set_master_cue()` is asserted at startup and the button toggles the same state | the LED and rbp's screen disagree ⇒ the button is bound to a different call than the LED reads |
+| S9.6 | **Absent rows stay absent.** With `LED_VERBOSE=1`, exercise the controls this unit does not have (there are none for Colour FX, KEY LOCK, VINYL, SLIP and the loop section) | **no** send is logged for those rows; the FLX4 has no loop section and no KEY LOCK/VINYL/SLIP LED, and the four Sound Color FX rows are permanently `-1` | a send appears for a row this unit does not have ⇒ a row was filled in that should have stayed `-1`, and on this panel a wrong note is a control, not a dark LED |
+| S9.7 | **No regression on the previous target.** Run the suite and read the counts | `test_midi`, `test_flx4`, `test_kbd` green with the JP21 move a pure move — the SC Live 4's behaviour byte-for-byte unchanged | a JP21 count changes ⇒ the move was not pure, and `test_midi`'s exact pins name the row |
+| S9.8 | **Hot-swap the FLX4 with the bridge on.** Pull the controller mid-play, wait, replug (this is S8.4 with the LEDs live) | no crash, and the LEDs **come back on replug** — `midi_note()` retries every tick while there is no route, so the mirror re-establishes itself without a restart. Write down whether the client number changed (S8.4's number) | the LEDs never return after replug while the controls do ⇒ the LED output route did not re-subscribe, which is a different code path from the input subscription and worth reporting separately |
+
+The loopback property that makes all of this safe was measured on 2026-09-26
+rather than assumed: a write to the device port reaches the panel and is
+delivered neither to the shim's own input port nor to a monitor, while a real
+button press demonstrably is. The FLX4 is the case that needed checking, because
+the shim reads and writes the *same* port `20:0` — on the previous target the two
+were different routes ([15](15-flx4-midi.md#measuring-the-notes-the-route-and-the-loopback-result)).
 
 ## Risks specific to this target
 
