@@ -71,6 +71,7 @@
 #include <stdarg.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/time.h>   /* gettimeofday, for the reopen backoff — see now_ms() */
 
 /* Declarations of the state owned by the controls shim (which is preloaded
  * before us), plus the constructor-time check that it is actually there. */
@@ -248,6 +249,14 @@ static snd_pcm_sframes_t (*real_snd_pcm_writei)(snd_pcm_t *, const void *, snd_p
 static int (*real_snd_ctl_open)(snd_ctl_t **, const char *, int) = NULL;
 static int (*real_snd_ctl_close)(snd_ctl_t *) = NULL;
 static const char *(*real_snd_pcm_format_name)(int) = NULL;
+/* The params allocators, for the reopen only: see replay_negotiation(). rbp's own
+ * params objects are unreachable from here, and must not be borrowed — the values
+ * inside one are rbp's to own and one of them may live on a frame that has
+ * already returned. */
+static int (*real_snd_pcm_hw_params_malloc)(snd_pcm_hw_params_t **) = NULL;
+static void (*real_snd_pcm_hw_params_free)(snd_pcm_hw_params_t *) = NULL;
+static int (*real_snd_pcm_sw_params_malloc)(snd_pcm_sw_params_t **) = NULL;
+static void (*real_snd_pcm_sw_params_free)(snd_pcm_sw_params_t *) = NULL;
 
 /* Confirm that the hand-rolled SND_PCM_FORMAT_* values above name the formats this
  * shim believes they name, by asking libasound to name them. A mismatch is not
@@ -331,6 +340,10 @@ static void init_real_alsa(void)
     real_snd_ctl_open = dlsym(lib, "snd_ctl_open");
     real_snd_ctl_close = dlsym(lib, "snd_ctl_close");
     real_snd_pcm_format_name = dlsym(lib, "snd_pcm_format_name");
+    real_snd_pcm_hw_params_malloc = dlsym(lib, "snd_pcm_hw_params_malloc");
+    real_snd_pcm_hw_params_free = dlsym(lib, "snd_pcm_hw_params_free");
+    real_snd_pcm_sw_params_malloc = dlsym(lib, "snd_pcm_sw_params_malloc");
+    real_snd_pcm_sw_params_free = dlsym(lib, "snd_pcm_sw_params_free");
 
     check_format_constants();
 
@@ -377,6 +390,69 @@ static int g_pack_failed_logged;
  * would not describe them. See the note where the fade is applied. */
 static unsigned long long g_startup_frames_done;
 static int g_startup_released;
+
+/* Set by resolve_pairs() when it had to assume a channel count because no device
+ * was ever negotiated with. It is what lets the recovery line below say "master
+ * pair only" and mean it, rather than leaving the operator to work out that the
+ * cue and booth streams are missing because the map was latched before the card
+ * existed. */
+static int g_channels_assumed;
+
+/* ---- losing the card, and getting it back ----------------------------------
+ *
+ * The FLX4 is a USB device, so it can be pulled while rbp is playing. What that
+ * does to this shim is not subtle: rbp holds the real snd_pcm_t as an opaque
+ * pointer, the card is re-enumerated, and every write on that handle then fails
+ * with -ENODEV (-19) for as long as the process lives. Measured on the unit:
+ * 5.1 million such lines, and a restart was the only cure.
+ *
+ * Everything below exists to make the same handle work again. */
+
+/* rbp calls flush_master() from its audio thread continuously, so the clock for
+ * everything here is the wall clock rather than a thread of our own.
+ *
+ * gettimeofday and not clock_gettime: this shim deliberately does not link
+ * librt, and does not link shimutil.o either — its only shared dependency is
+ * libasound, resolved by dlsym. */
+static unsigned long long now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (unsigned long long)tv.tv_sec * 1000ULL
+         + (unsigned long long)(tv.tv_usec / 1000);
+}
+
+#define REOPEN_MIN_MS 500
+#define REOPEN_MAX_MS 5000
+
+static unsigned long long g_master_absent_ms;   /* 0 = unknown, or a card is open */
+static unsigned long g_reopen_backoff_ms = REOPEN_MIN_MS;
+static unsigned g_reopen_failures;              /* consecutive failed reopen tries */
+static unsigned long g_master_losses;           /* mid-stream card losses */
+
+/* What rbp asked the card for, recorded as it asked, so that a reopen can ask
+ * again.
+ *
+ * The format, the channel count and the rate are deliberately NOT here: this shim
+ * forces all three itself (set_format() writes AUDIO_FMT's format, set_channels()
+ * writes the count it negotiated, set_rate_near() forces 44100), so replaying
+ * through those setters reproduces them from the same source the first
+ * negotiation used. Everything else is rbp's own choice and would otherwise go
+ * down with its params object.
+ *
+ * `mode` is snd_pcm_open()'s, as rbp passed it — open_real_device() re-masks
+ * SND_PCM_NONBLOCK out of it on every call, so what is stored is rbp's request
+ * and not our adjustment of it. */
+static struct {
+    int mode;
+    int access;
+    snd_pcm_uframes_t period_size;   /* after the near call; 0 = never seen */
+    unsigned int periods;            /* ditto */
+    snd_pcm_uframes_t silence_threshold, silence_size;
+    snd_pcm_uframes_t start_threshold, stop_threshold;
+} g_nego = {
+    SND_PCM_STREAM_PLAYBACK, SND_PCM_ACCESS_RW_INTERLEAVED, 0, 0, 0, 0, 0, 0,
+};
 
 /* ---- configuration -------------------------------------------------------- */
 
@@ -606,8 +682,15 @@ static void resolve_pairs(void)
     if (g_out_channels == 0) {
         /* set_channels() never arrived, so there is no params object left to ask.
          * Two channels — master only — is the honest degradation, and it is logged
-         * so it cannot be mistaken for a routing bug. */
+         * so it cannot be mistaken for a routing bug.
+         *
+         * This is also the state a unit boots into with the controller unplugged,
+         * and the reason a card that appears later recovers the master pair and
+         * nothing else: everything below clamps against this 2 and drops the cue
+         * and booth pairs for the life of the process. The flag is what lets the
+         * recovery line say so. */
         g_out_channels = 2;
+        g_channels_assumed = 1;
         alog("audioshim: set_channels() was never called; assuming 2 channels\n");
     }
 
@@ -689,14 +772,62 @@ static unsigned int negotiate_channels(const snd_pcm_hw_params_t *params)
 
 /* ---- open / close --------------------------------------------------------- */
 
+/* Handles that used to be the master and are not any more — a card that was
+ * pulled and re-enumerated, so the snd_pcm_t rbp is still holding is dead. The
+ * old pointer cannot be replaced (see the write path: rbp keeps it as an opaque
+ * value and nothing here can rewrite rbp's variable), so it has to be
+ * *recognised*, and the two things that must then happen to it are opposite:
+ *
+ *   a write on it must still reach flush_master(), which writes through the
+ *   *global* and needs no unwrapping. That is what makes the recovery driven by
+ *   rbp's own audio stream rather than by a timer: the moment rbp next writes,
+ *   this shim is in a position to notice the card is back.
+ *
+ *   a parameter call on it must NOT be forwarded. is_forwardable()'s doctrine is
+ *   to pass the caller's own pointer straight to libasound — deliberately, see
+ *   the note there — and a dead pointer handed to a live libasound is a
+ *   use-after-free.
+ *
+ * A ring rather than a set: the number that matters is "at least one", a replug
+ * cycle retires at most one, and a handle retired long enough ago to have been
+ * overwritten cannot still be in rbp's hands. */
+#define RETIRED_MAX 8
+static snd_pcm_t *g_retired[RETIRED_MAX];
+static unsigned g_retired_next;
+
+static int is_retired(snd_pcm_t *pcm)
+{
+    unsigned i;
+
+    if (pcm == NULL)
+        return 0;
+    for (i = 0; i < RETIRED_MAX; i++)
+        if (g_retired[i] == pcm)
+            return 1;
+    return 0;
+}
+
+static void retire(snd_pcm_t *pcm)
+{
+    if (pcm == NULL || is_retired(pcm))
+        return;      /* idempotent: losing the same handle twice is one loss */
+    g_retired[g_retired_next] = pcm;
+    g_retired_next = (g_retired_next + 1) % RETIRED_MAX;
+}
+
 /* The master stream is the only one backed by a real device. When the device
  * could not be opened at all, stream 0 gets g_h_master instead of a NULL pointer:
  * rbp is not written to handle a NULL pcm, and the write path still needs a
- * recognisable identity so it can pace itself with a sleep. */
+ * recognisable identity so it can pace itself with a sleep.
+ *
+ * A retired handle counts. rbp still writes to the pointer it was given, and
+ * dropping those writes would leave the stream unflushed *and* the recovery with
+ * nothing to run on. */
 static inline int is_master(snd_pcm_t *pcm)
 {
     return pcm != NULL &&
-           (pcm == g_real_playback || pcm == (snd_pcm_t *)&g_h_master);
+           (pcm == g_real_playback || pcm == (snd_pcm_t *)&g_h_master ||
+            is_retired(pcm));
 }
 
 /* Strictly "this is the handle we were given by a successful real open()". The
@@ -719,6 +850,17 @@ static inline int is_fake(snd_pcm_t *pcm)
            pcm == (snd_pcm_t *)&g_h_cap;
 }
 
+/* rbp's own master stream, whether or not a device could be opened for it. This
+ * is where a negotiation is *recorded* (see g_nego), and it is deliberately not
+ * is_master(): a retired handle is still routed to flush_master — its write must
+ * not be dropped — but it is not a stream rbp is negotiating with, and letting
+ * one overwrite the recorded request would replay a dead stream's parameters onto
+ * a freshly opened card. */
+static inline int is_rbp_master(snd_pcm_t *pcm)
+{
+    return pcm == (snd_pcm_t *)&g_h_master || is_real(pcm);
+}
+
 /* The rule for the whole parameter plumbing: answer the handles *this shim
  * invented* with a local success, and forward everything else to the real
  * function — passing the caller's own pointer, never g_real_playback.
@@ -734,10 +876,16 @@ static inline int is_fake(snd_pcm_t *pcm)
  *
  * On a hw: device this is inert: no plugin sits below us, so only the fakes and
  * g_real_playback ever reach these functions, and for those it means exactly what
- * is_real() meant. */
+ * is_real() meant.
+ *
+ * A retired handle is excluded. It was a real snd_pcm_t once, so it passes the
+ * "not one of ours" test, and forwarding it would hand a dead pointer to
+ * libasound — the one thing this predicate must never do. Answering locally is
+ * also the honest answer for a card that is gone: the setter has nothing to
+ * configure. */
 static inline int is_forwardable(snd_pcm_t *pcm)
 {
-    return pcm != NULL && !is_fake(pcm);
+    return pcm != NULL && !is_fake(pcm) && !is_retired(pcm);
 }
 
 /* Forget everything a negotiation established, so the next open renegotiates
@@ -754,7 +902,15 @@ static void reset_stream_state(void)
     memset(g_out, 0, sizeof g_out);
 }
 
-static void open_real_device(int mode)
+/* Walk the candidate chain and take the first device that opens.
+ *
+ * `quiet` suppresses the per-candidate failure lines and the final NO OUTPUT
+ * DEVICE one. It is set by the reopen below and only ever on a *repeat* failure:
+ * a unit whose operator runs it with no controller at all is a supported
+ * configuration, not an emergency, and a line every five seconds forever is how a
+ * log stops being read. A success is logged either way — that line is the one the
+ * operator is waiting for. */
+static void open_real_device(int mode, int quiet)
 {
     /* rbp asks for nonblocking and then relies on the device to pace it. Masking
      * SND_PCM_NONBLOCK is what makes the card the audio clock. */
@@ -764,15 +920,25 @@ static void open_real_device(int mode)
     for (i = 0; g_dev_candidates[i] != NULL; i++) {
         err = real_snd_pcm_open(&g_real_playback, g_dev_candidates[i],
                                 SND_PCM_STREAM_PLAYBACK, real_mode);
-        alog("audioshim: open('%s') mode=%d->%d res=%d handle=%p\n",
-             g_dev_candidates[i], mode, real_mode, err, g_real_playback);
-        if (err >= 0)
+        if (err >= 0) {
+            alog("audioshim: open('%s') mode=%d->%d res=%d handle=%p\n",
+                 g_dev_candidates[i], mode, real_mode, err, g_real_playback);
             return;
+        }
+        if (!quiet)
+            alog("audioshim: open('%s') mode=%d->%d res=%d handle=%p\n",
+                 g_dev_candidates[i], mode, real_mode, err, g_real_playback);
         g_real_playback = NULL;
     }
 
-    alog("audioshim: NO OUTPUT DEVICE — rbp will run silent and every stream will "
-         "sleep to pace itself\n");
+    if (!quiet)
+        alog("audioshim: NO OUTPUT DEVICE — rbp will run silent and every stream "
+             "will sleep to pace itself\n");
+    /* When this process first found itself cardless, which is what the reopen
+     * backoff counts from. Left alone on a later failure so the backoff keeps
+     * growing instead of restarting at half a second. */
+    if (g_master_absent_ms == 0)
+        g_master_absent_ms = now_ms();
 }
 
 int snd_pcm_open(snd_pcm_t **pcm, const char *name, int stream, int mode)
@@ -793,9 +959,12 @@ int snd_pcm_open(snd_pcm_t **pcm, const char *name, int stream, int mode)
 
     switch (g_playback_open_count++) {
     case 0:
-        /* Output 0: master -> the real device. */
+        /* Output 0: master -> the real device. The mode is remembered before the
+         * open, because it is one of the things the reopen has to replay, and this
+         * is the only place rbp ever states it. */
+        g_nego.mode = mode;
         if (g_real_playback == NULL && real_snd_pcm_open)
-            open_real_device(mode);
+            open_real_device(mode, 0);
         *pcm = g_real_playback ? g_real_playback : (snd_pcm_t *)&g_h_master;
         alog("audioshim: stream 0 is the master stream (handle=%p)\n", *pcm);
         return 0;
@@ -879,6 +1048,11 @@ int snd_pcm_hw_params_set_access(snd_pcm_t *pcm, snd_pcm_hw_params_t *params, in
 {
     init_real_alsa();
     alog("audioshim: set_access req=%d\n", access);
+    /* Recorded whether or not there is a device to forward to: rbp's request is
+     * rbp's request, and on a unit that booted with no card this is the only
+     * record of it there will ever be. See g_nego. */
+    if (is_rbp_master(pcm))
+        g_nego.access = access;
     if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_access)
         return real_snd_pcm_hw_params_set_access(pcm, params, access);
     return 0;
@@ -945,26 +1119,34 @@ int snd_pcm_hw_params_set_rate_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *params,
 
 int snd_pcm_hw_params_set_period_size_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *params, snd_pcm_uframes_t *val, int *dir)
 {
+    int err = 0;
+
     init_real_alsa();
     alog("audioshim: set_period_size_near req=%lu\n", val ? *val : 0);
     if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_period_size_near) {
-        int err = real_snd_pcm_hw_params_set_period_size_near(pcm, params, val, dir);
+        err = real_snd_pcm_hw_params_set_period_size_near(pcm, params, val, dir);
         alog("audioshim: real set_period_size_near res=%d period=%lu\n", err, val ? *val : 0);
-        return err;
     }
-    return 0;
+    /* After the call: what a reopen has to ask for is the period the first
+     * negotiation *ended* with, which is not always what rbp asked for. */
+    if (is_rbp_master(pcm) && val)
+        g_nego.period_size = *val;
+    return err;
 }
 
 int snd_pcm_hw_params_set_periods_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *params, unsigned int *val, int *dir)
 {
+    int err = 0;
+
     init_real_alsa();
     alog("audioshim: set_periods_near req=%u\n", val ? *val : 0);
     if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_periods_near) {
-        int err = real_snd_pcm_hw_params_set_periods_near(pcm, params, val, dir);
+        err = real_snd_pcm_hw_params_set_periods_near(pcm, params, val, dir);
         alog("audioshim: real set_periods_near res=%d periods=%u\n", err, val ? *val : 0);
-        return err;
     }
-    return 0;
+    if (is_rbp_master(pcm) && val)
+        g_nego.periods = *val;
+    return err;
 }
 
 /* The 2/2 lie, kept deliberately. rbp sizes its stream handling from this and
@@ -1035,6 +1217,8 @@ int snd_pcm_sw_params_get_boundary(const snd_pcm_sw_params_t *params, snd_pcm_uf
 int snd_pcm_sw_params_set_silence_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
+    if (is_rbp_master(pcm))
+        g_nego.silence_threshold = val;
     if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_silence_threshold)
         real_snd_pcm_sw_params_set_silence_threshold(pcm, params, val);
     alog("audioshim: set_silence_threshold(%lu) -> ok\n", val);
@@ -1044,6 +1228,8 @@ int snd_pcm_sw_params_set_silence_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t 
 int snd_pcm_sw_params_set_silence_size(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
+    if (is_rbp_master(pcm))
+        g_nego.silence_size = val;
     if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_silence_size)
         real_snd_pcm_sw_params_set_silence_size(pcm, params, val);
     alog("audioshim: set_silence_size(%lu) -> ok\n", val);
@@ -1053,6 +1239,8 @@ int snd_pcm_sw_params_set_silence_size(snd_pcm_t *pcm, snd_pcm_sw_params_t *para
 int snd_pcm_sw_params_set_start_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
+    if (is_rbp_master(pcm))
+        g_nego.start_threshold = val;
     if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_start_threshold)
         real_snd_pcm_sw_params_set_start_threshold(pcm, params, val);
     alog("audioshim: set_start_threshold(%lu) -> ok\n", val);
@@ -1062,6 +1250,8 @@ int snd_pcm_sw_params_set_start_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *p
 int snd_pcm_sw_params_set_stop_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
+    if (is_rbp_master(pcm))
+        g_nego.stop_threshold = val;
     if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_stop_threshold)
         real_snd_pcm_sw_params_set_stop_threshold(pcm, params, val);
     alog("audioshim: set_stop_threshold(%lu) -> ok\n", val);
@@ -1092,6 +1282,218 @@ int snd_pcm_link(snd_pcm_t *pcm1, snd_pcm_t *pcm2)
     (void)pcm1; (void)pcm2;
     alog("audioshim: snd_pcm_link intercepted -> success\n");
     return 0;
+}
+
+/* ---- the card going away, and coming back ---------------------------------- */
+
+/* One mid-stream loss of the master handle. Modelled on snd_pcm_close()'s own
+ * handling, for the same reason it exists there: the close re-enters this shim
+ * for the plugin's slave handle, so the global has to be cleared *before* the
+ * call or that inner call mistakes itself for the master.
+ *
+ * `err` is the negative errno the write failed with. It is not assumed to be one
+ * value — it is only *acted* on for -ENODEV, but the line names whatever it was,
+ * because "the write failed and we did not handle it" is a different report from
+ * "the write failed with a number nobody has seen yet". */
+static void master_lost(int err)
+{
+    snd_pcm_t *dead = g_real_playback;
+
+    if (dead == NULL)
+        return;
+
+    /* rbp writes the master stream from one thread, so this is not made
+     * re-entrant-safe with a lock; what it is made safe against is the inner call
+     * snd_pcm_close() makes, which is what the ordering below is for. */
+    g_real_playback = NULL;
+    retire(dead);
+
+    if (real_snd_pcm_close)
+        real_snd_pcm_close(dead);
+
+    /* Deliberately NOT reset_stream_state(): resolve_pairs() has already clamped
+     * g_cfg.* against g_out_channels, and clearing the channel count would
+     * silently change what the pair indices mean — the cue pair would come back on
+     * top of the master. The map is kept and the recovery is logged against it. */
+    g_master_losses++;
+    g_master_absent_ms = now_ms();
+    g_reopen_backoff_ms = REOPEN_MIN_MS;
+    g_reopen_failures = 0;
+    alog("audioshim: MASTER LOST: the card went away mid-stream (writei said %s, "
+         "after %lu write(s) on that handle). Audio is silent until it is back; "
+         "this shim is now looking for it. The stream map is kept\n",
+         strerror(-err), g_write_count);
+}
+
+/* Put a freshly opened handle back into the configuration rbp negotiated on the
+ * one that died.
+ *
+ * Why replay at all, rather than let the next open negotiate: rbp negotiates once,
+ * when it opens its stream, and it is never going to do it again — it still holds
+ * the old handle and believes that handle is configured. Everything the card needs
+ * has to be put there from this side.
+ *
+ * The values are replayed *through this shim's own setters*, and that is the point
+ * rather than a convenience: those setters are what force AUDIO_FMT's format, the
+ * negotiated channel count and 44100 — the three things the pair indices were
+ * resolved against. Calling the real_* functions here would configure the card
+ * with rbp's raw requests instead, which is the one configuration we know the map
+ * does not match.
+ *
+ * The params objects are ours, from libasound's allocators. rbp's are unreachable
+ * (it holds them, and one may be alloca'd on a frame that has already returned),
+ * and there is no params object anywhere in the process that describes this card:
+ * with a real device open, every setter the shim was sent has already been
+ * forwarded and the object it was applied to is rbp's.
+ *
+ * Returns 0 when the card accepted the configuration. */
+static int replay_negotiation(snd_pcm_t *pcm)
+{
+    snd_pcm_hw_params_t *hp = NULL;
+    snd_pcm_sw_params_t *sp = NULL;
+    snd_pcm_uframes_t period_size = g_nego.period_size;
+    snd_pcm_uframes_t boundary = 0;
+    unsigned int periods = g_nego.periods;
+    unsigned int rate = 44100;
+    int dir = 0, err, bad = 0;
+
+    if (!real_snd_pcm_hw_params_malloc || !real_snd_pcm_hw_params_free ||
+        !real_snd_pcm_sw_params_malloc || !real_snd_pcm_sw_params_free) {
+        alog("audioshim: replay: this libasound has no params allocator, so the "
+             "reopened handle cannot be configured\n");
+        return -1;
+    }
+    if (real_snd_pcm_hw_params_malloc(&hp) < 0)
+        return -1;
+    if (real_snd_pcm_sw_params_malloc(&sp) < 0) {
+        real_snd_pcm_hw_params_free(hp);
+        return -1;
+    }
+
+    /* rbp's order, as far as the order matters at all: every setter has to be
+     * applied to the params object before snd_pcm_hw_params() commits it. */
+    snd_pcm_hw_params_any(pcm, hp);
+    snd_pcm_hw_params_set_access(pcm, hp, g_nego.access);
+    /* The format argument is ignored by set_format(), which writes AUDIO_FMT's
+     * format; S24_LE is passed because that is rbp's own container and the value
+     * is only read by a build where the shim is not doing the deciding. */
+    snd_pcm_hw_params_set_format(pcm, hp, SND_PCM_FORMAT_S24_LE);
+    snd_pcm_hw_params_set_channels(pcm, hp, g_out_channels);
+    snd_pcm_hw_params_set_rate_near(pcm, hp, &rate, &dir);
+    if (period_size)
+        snd_pcm_hw_params_set_period_size_near(pcm, hp, &period_size, &dir);
+    if (periods)
+        snd_pcm_hw_params_set_periods_near(pcm, hp, &periods, &dir);
+
+    err = snd_pcm_hw_params(pcm, hp);
+    if (err < 0) {
+        alog("audioshim: replay: snd_pcm_hw_params failed on the new handle: %s\n",
+             strerror(-err));
+        bad = 1;
+    }
+
+    if (!bad) {
+        snd_pcm_sw_params_current(pcm, sp);
+        snd_pcm_sw_params_set_silence_threshold(pcm, sp, g_nego.silence_threshold);
+        snd_pcm_sw_params_set_silence_size(pcm, sp, g_nego.silence_size);
+        snd_pcm_sw_params_set_start_threshold(pcm, sp, g_nego.start_threshold);
+        snd_pcm_sw_params_set_stop_threshold(pcm, sp, g_nego.stop_threshold);
+        snd_pcm_sw_params_get_boundary(sp, &boundary);
+        snd_pcm_sw_params(pcm, sp);
+        snd_pcm_prepare(pcm);
+
+        alog("audioshim: replay: access=%d channels=%u rate=%u period=%lu "
+             "periods=%u boundary=%lu — the configuration rbp negotiated, put "
+             "back on a card libasound has just opened\n",
+             g_nego.access, g_out_channels, rate,
+             (unsigned long)period_size, periods, (unsigned long)boundary);
+    }
+
+    real_snd_pcm_sw_params_free(sp);
+    real_snd_pcm_hw_params_free(hp);
+    return bad ? -1 : 0;
+}
+
+/* One attempt at getting the card back, at most one per backoff interval.
+ *
+ * Called from the no-device branch of flush_master(), which is where rbp's audio
+ * thread already is: no new thread, and the retry cadence follows the one clock
+ * that is definitely still running. That branch is also the state a unit boots
+ * into with the controller unplugged, so this is both the mid-session recovery and
+ * the cold one — they differ only in whether a handle was ever opened.
+ *
+ * 500 ms, doubling to 5 s and staying there: a USB re-enumeration takes about that
+ * long, and a unit with no controller at all must not be probing the card nine
+ * times a second forever. */
+static void reopen_try(void)
+{
+    unsigned long long now;
+    int quiet;
+
+    if (g_real_playback || !real_snd_pcm_open)
+        return;
+    now = now_ms();
+    if (g_master_absent_ms && now - g_master_absent_ms < g_reopen_backoff_ms)
+        return;
+
+    /* The first few failures are reported one by one — that is a card that was
+     * there and went away. After that this is a unit that is meant to run without
+     * a controller, and the useful thing is silence in the log until something
+     * changes. */
+    quiet = g_reopen_failures >= 3;
+    open_real_device(g_nego.mode, quiet);
+
+    if (!g_real_playback) {
+        g_reopen_failures++;
+        g_master_absent_ms = now;
+        if (g_reopen_backoff_ms < REOPEN_MAX_MS)
+            g_reopen_backoff_ms *= 2;
+        if (!quiet)
+            alog("audioshim: no output device yet (%u attempt(s)); next try in "
+                 "%lu ms\n", g_reopen_failures, g_reopen_backoff_ms);
+        return;
+    }
+
+    g_reopen_failures = 0;
+    g_reopen_backoff_ms = REOPEN_MIN_MS;
+    g_master_absent_ms = 0;
+
+    alog("audioshim: MASTER RECOVERED: reopened %s%s. Replaying the negotiation "
+         "on the new handle\n", g_cfg.dev,
+         g_master_losses ? "" : " (it was never open — this is the cold case)");
+
+    if (replay_negotiation(g_real_playback) < 0) {
+        snd_pcm_t *bad = g_real_playback;
+
+        g_real_playback = NULL;
+        retire(bad);
+        if (real_snd_pcm_close)
+            real_snd_pcm_close(bad);
+        g_master_absent_ms = now;
+        alog("audioshim: the reopened handle would not configure; closed it "
+             "again and will keep trying\n");
+        if (g_reopen_backoff_ms < REOPEN_MAX_MS)
+            g_reopen_backoff_ms *= 2;
+        return;
+    }
+
+    /* The card thumps when it is opened, so a recovery is muted exactly like a
+     * start is. Unambiguous in the log, too: this line precedes the release. */
+    g_startup_frames_done = 0;
+    g_startup_released = 0;
+
+    if (g_channels_assumed)
+        alog("audioshim: NOTE the channel count was resolved with no device "
+             "present, so it is the 2-channel fallback: only the master pair "
+             "(channels %d,%d) is recovered. %s has %u channel(s) and the cue and "
+             "booth pairs were dropped before it appeared — restart to get them "
+             "back\n", g_cfg.master.a, g_cfg.master.b, g_cfg.dev, g_out_channels);
+    else
+        alog("audioshim: the pair map is unchanged: master=%d,%d headphones=%d,%d "
+             "booth=%d,%d monitor=%d,%d on %u channel(s)\n",
+             g_cfg.master.a, g_cfg.master.b, g_cfg.headphones.a, g_cfg.headphones.b,
+             g_cfg.booth.a, g_cfg.booth.b, g_cfg.monitor.a, g_cfg.monitor.b,
+             g_out_channels);
 }
 
 /* ---- the write path ------------------------------------------------------- */
@@ -1291,13 +1693,22 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
     if (g_real_playback && real_snd_pcm_writei) {
         snd_pcm_sframes_t written =
             real_snd_pcm_writei(g_real_playback, out, size);
-        if (written < 0) {
+
+        if (written != -ENODEV && written < 0) {
             /* The usual cause is an underrun or an XRUN after a stall; preparing
-             * and rewriting once recovers it, and rbp never learns. */
+             * and rewriting once recovers it, and rbp never learns.
+             *
+             * -ENODEV is the one error this retry is skipped for, and skipping it
+             * is the point: it is the measured value once the FLX4 has
+             * re-enumerated, it means the handle's card is gone rather than the
+             * stream being out of sync, and no amount of preparing revives it.
+             * Retrying would double the log rate and delay nothing. */
             if (real_snd_pcm_prepare)
                 real_snd_pcm_prepare(g_real_playback);
             written = real_snd_pcm_writei(g_real_playback, out, size);
         }
+        if (written == -ENODEV)
+            master_lost(-ENODEV);
         if ((g_write_count % 500) == 1)
             alog("audioshim: writei #%lu frames=%lu bytes=%u written=%ld "
                  "peak_m=%d mainvol=%.3f\n",
@@ -1305,6 +1716,10 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
                  s_peak_master, (double)master_gain);
     } else {
         pace_without_device(size);
+        /* No card: either one was never opened (a unit booted with the controller
+         * unplugged) or it was lost above. Both recover the same way, and this is
+         * the only place a still-running thread already is. */
+        reopen_try();
     }
     /* Reset every block, not only on the logged one: left to run, this is a
      * running maximum that never comes back down. */
