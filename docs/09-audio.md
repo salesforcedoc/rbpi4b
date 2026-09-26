@@ -343,6 +343,17 @@ lsusb | grep 2b73:0045                                        # the FLX4 itself
 and the fallbacks below it (`plughw:`, `default`) then fail too, which is how a
 missing controller turns into `NO OUTPUT DEVICE`.
 
+**Two different `-19`s, and only one of them is a startup problem.** The `open()`
+above is the card being absent when the shim starts. The other is `written=-19`
+on the *write*, which means the PCM handle rbp holds is stale because the card
+re-enumerated underneath it — the USB device dropped and came back with a new
+device number, so `/proc/asound/cards` lists it and `lsusb` sees it while the
+open fd is dead. There is **no reopen path**: the shim keeps writing to the old
+handle forever. The measured case is in
+[16](16-input-and-hotplug.md#4-hot-swap), and the tell is the write
+count, not the peak — `peak_m` keeps showing music from rbp's own buffer while
+the card hears nothing.
+
 ## VU meters
 
 The master level comes from `audioshim.so`, which sees the master mix in

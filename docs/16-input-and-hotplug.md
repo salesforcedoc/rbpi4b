@@ -197,12 +197,45 @@ Also unchanged and still worth knowing: a device is opened **once** and left
 open. That is what `unseen_source()` checks against — a path already in the open
 set is not a reason to rescan.
 
-**audio — unverified.** `audioshim.c` has a prepare-retry after a failed write
+**audio — measured 2026-09-26, and it does NOT come back.** `audioshim.c` has a
+prepare-retry after a failed write
 ([audioshim.c:1296](../scripts/shims/audioshim.c)) but no device-loss or reopen
-handling, so a PCM opened against a card that is unplugged has no obvious way
-back. Whether rbp survives the FLX4 being unplugged mid-track, and whether
-audio returns on replug, has not been tested. Nothing was changed here — this
-one is still open, and is the least likely of the three to survive a replug.
+handling, and the unit has now demonstrated exactly what that costs:
+
+```
+09:24:43  usb 1-1.2: USB disconnect, device number 3
+09:24:48  usb 1-1.2: new high-speed USB device number 7 ... Product: DDJ-FLX4
+```
+
+The FLX4 dropped off the bus and re-enumerated five seconds later — the
+under-voltage symptom this target already has ([13](13-raspberrypi4.md) S6), not
+a bad connector. The card is back and `cat /proc/asound/cards` lists it, but the
+PCM rbp holds was opened against the *old* device, so from the moment of the drop
+every master write returns `-19`:
+
+```
+writei #175001 frames=64 bytes=768 written=-19 peak_m=1763519 mainvol=1.000
+...                        <- and every write after it, ~5.1 million of them
+```
+
+Two things make this worth reading carefully rather than skimming:
+
+* **`peak_m` stays non-zero.** The peak is measured from rbp's own buffer, so it
+  goes on showing music while the card hears nothing. A healthy-looking audio log
+  is therefore doubly misleading: zero peaks mean rbp is silent (the fader
+  default, [09](09-audio.md#audibility-rbp-builds-the-channel-faders-at-zero)),
+  and non-zero peaks do **not** mean the card is being written to.
+* **The write count is the tell, not the peak.** `written=64` means the card took
+  the block; `written=-19` means the handle is stale. This is the line to read
+  first, and the log's own `open('hw:CARD=DDJFLX4,DEV=0') ... res=-19` is a
+  different case again — that one is the card being absent at startup.
+
+**Nothing was changed here**, and the reason is that a reopen is not a small
+edit: it means detecting `-ENODEV` on the master path, dropping and rebuilding
+the PCM, re-negotiating the format and re-arming the startup mute, all from
+inside the write path. The workaround, which is what the port does today, is
+**restart the player** — the card is present by then and the write path comes
+back. Whether to make that automatic is an open decision, not an oversight.
 
 ## 5. The pop when rbp first opens the FLX4's audio
 
