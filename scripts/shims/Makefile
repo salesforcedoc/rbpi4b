@@ -253,10 +253,16 @@ test_midi: $(MIDI_TEST_OBJS) tests/midi_jp21.dump
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ $(MIDI_TEST_OBJS) -lpthread -lm -lc
 
-test_midi.o: test_midi.c ctrl_map.h mididump.h shmstate.h rbp_abi.h rbp_bridge.h \
-             rbp_led.h rbp_vu.h
+# FORCE, because MIDI_FIXTURE is `$(CURDIR)` made absolute (see above) and make
+# has no way to see that value change: a .o left over from a build under a
+# different mount root carries the old path, is never rebuilt, and fails at run
+# time with `cannot open the fixture /w/scripts/shims/tests/midi_jp21.dump` --
+# which reads as a missing fixture, not as a stale object. Both fixture-baking
+# objects are therefore rebuilt on every `make`, which costs about a second.
+test_midi.o: FORCE test_midi.c ctrl_map.h mididump.h shmstate.h rbp_abi.h \
+             rbp_bridge.h rbp_led.h rbp_vu.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
-	    -Wall -Wextra -c -o $@ $< \
+	    -Wall -Wextra -c -o $@ test_midi.c \
 	    -DMIDI_FIXTURE='"$(CURDIR)/tests/midi_jp21.dump"'
 
 # test_flx4 links the PRODUCTION FLX4 map and the production binding tables, for
@@ -274,10 +280,11 @@ test_flx4: $(FLX4_TEST_OBJS) tests/midi_flx4.dump
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ $(FLX4_TEST_OBJS) -lpthread -lm -lc
 
-test_flx4.o: test_flx4.c ctrl_map.h mididump.h shmstate.h rbp_abi.h rbp_bridge.h \
-             rbp_vu.h
+# FORCE, for the same reason as test_midi.o above: FLX4_FIXTURE bakes $(CURDIR).
+test_flx4.o: FORCE test_flx4.c ctrl_map.h mididump.h shmstate.h rbp_abi.h \
+             rbp_bridge.h rbp_vu.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
-	    -Wall -Wextra -c -o $@ $< \
+	    -Wall -Wextra -c -o $@ test_flx4.c \
 	    -DFLX4_FIXTURE='"$(CURDIR)/tests/midi_flx4.dump"'
 
 # test_kbd links the PRODUCTION map (map_kbd.o) and the production binding
@@ -324,3 +331,8 @@ check: $(SHARED)
 
 clean:
 	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) pcmprobe *.o
+
+# The always-out-of-date prerequisite that keeps the two fixture-baking objects
+# above from being reused across working directories.
+.PHONY: FORCE
+FORCE:

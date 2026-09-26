@@ -428,8 +428,12 @@ int midi_cc(int midi_ch, int cc, int val)
  * This is a JP21 protocol message, and the sequencer route carries only the
  * three-byte LED/meter messages, so it goes out on rawmidi or not at all. A
  * surface matched by name (the FLX4) has no absolute controls to report and no
- * meters to light, so "not at all" is the correct outcome there. */
-void led_query_absolute(void)
+ * meters to light, so "not at all" is the correct outcome there.
+ *
+ * Returns whether the query went out, which is a different question from
+ * whether the panel will answer: rbp_vu.c reads the 0 as "nobody is going to
+ * tell rbp where the faders are", which is the case it has to seed them for. */
+int led_query_absolute(void)
 {
      static const unsigned char sysex[10] = {
           0xF0, 0x00, 0x02, 0x0B, 0x7F, 0x12, 0x04, 0x00, 0x00, 0xF7
@@ -446,7 +450,8 @@ void led_query_absolute(void)
                klog("knobshim2: absolute-value query not sent: the rawmidi route "
                     "is what carries it (sequencer route in use)\n");
           }
-          return;
+          return 0;
      }
      (void)write(led_fd, sysex, sizeof(sysex));
+     return 1;
 }

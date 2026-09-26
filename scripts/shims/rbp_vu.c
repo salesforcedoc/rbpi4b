@@ -159,6 +159,61 @@ static int vu_master_segments(void)
      return (1 << out) - 1;
 }
 
+/* The values rbp needs that are NOT meter work, re-asserted for ~30 s because
+ * rbp finishes initialising its mixer well after we are loaded: anything sent
+ * before that is silently dropped.
+ *
+ * They live here, and not in a map's startup(), because they are port
+ * requirements rather than surface bindings -- they have to hold on every
+ * target, including one whose map binds no fader and no master level at all.
+ * That is also why BOTH vu_thread paths call this: the LED_VU=0 branch returns
+ * before the meter loop, and a target with no meters (this one) is exactly the
+ * target that has no absolute controls to report. Putting the seed inside the
+ * meter loop made it dead code on the only unit that needs it.
+ *
+ * t is the caller's 40 Hz tick; the work happens every other second. */
+static void mixer_defaults_tick(unsigned long t)
+{
+     if (t < 1200 && (t % 80) == 0) {
+          int asked = led_query_absolute();
+          /* rbp's mixer inits after we load, so the one-shot unity master
+           * level in init() is dropped - re-assert it for ~30 s. */
+          send_rx_key_f(K_MASTERLVL, OP_VALUE, CH_GLOBAL, 1023, 1.0f);
+          /* ...and seed the two channel faders, when nobody is going to report
+           * them. rbp's mixer engine builds with them at ZERO -- the safe
+           * default for a panel that reports where its faders are, which is
+           * exactly what the query above is for -- so on a surface that cannot
+           * answer (the FLX4: a named surface with no absolute controls and no
+           * rawmidi route) rbp's master stream is digital silence while a deck
+           * plays. Measured on the unit 2026-09-26: `writei #N ... peak_m=0
+           * mainvol=1.000` on every block of a playing deck, and real signal on
+           * the next block after one CC 19 reached the map. Audibility had been
+           * open since the port began, because nothing else sets this.
+           *
+           * Unity, and only until that channel's own control has moved: the map
+           * sets g_fader_seen the moment the physical fader reports, so a fader
+           * already where the operator wants it takes over and is never fought.
+           * 30 s is the master level's window, reused rather than reinvented --
+           * a fader that moved inside it is already safe, and one that never
+           * moves wants the seed to stop anyway. */
+          if (!asked) {
+               static int told;
+               for (int m = 1; m <= 2; m++)
+                    if (!g_fader_seen[m]) {
+                         if (!told) {
+                              told = 1;
+                              klog("knobshim2: this surface cannot report its "
+                                   "absolute controls; channel faders seeded "
+                                   "at unity (rbp builds them at zero, which "
+                                   "is silence)\n");
+                         }
+                         send_rx_key_f(K_FADER, OP_VALUE, m, 1023, 1.0f);
+                    }
+          }
+     } else if ((!g_fader_seen[1] || !g_fader_seen[2]) && (t % 80) == 0)
+          led_query_absolute();
+}
+
 void *vu_thread(void *arg)
 {
      unsigned long t = 0;
@@ -204,6 +259,14 @@ void *vu_thread(void *arg)
                usleep(200000);
           }
           klog("knobshim2: LED_VU=0: meter bridge not installed\n");
+          /* Leaving here is what left this target silent: the absolute-value
+           * defaults below are not meter work, and the target that cannot
+           * report its absolute controls is the one that needs them most. Run
+           * the same 30 s window the meter path runs, then leave as before. */
+          for (t = 0; t < 1200; t++) {
+               mixer_defaults_tick(t);
+               usleep(25000);   /* 40 Hz, as below */
+          }
           return NULL;
      }
      vu_test = env_on("VU_TEST", 0);
@@ -271,19 +334,9 @@ void *vu_thread(void *arg)
                     last_c[1], last_c[2],
                     g_fader[1], g_fader[2], g_fader_seen[1], g_fader_seen[2]);
           /* Re-assert the physical fader/EQ/trim positions for the first
-           * ~30 s.  rbp finishes initialising its mixer well after we are
-           * loaded, and any value sent before that is lost - which is why a
-           * fader already up at startup played back quiet until moved once.
-           * The window is deliberately short: the panel just reports where
-           * the controls physically are, but we don't want to keep re-sending
-           * while the user is actively working. */
-          if (t < 1200 && (t % 80) == 0) {
-               led_query_absolute();
-               /* rbp's mixer inits after we load, so the one-shot unity master
-                * level in init() is dropped - re-assert it for ~30 s. */
-               send_rx_key_f(K_MASTERLVL, OP_VALUE, CH_GLOBAL, 1023, 1.0f);
-          } else if ((!g_fader_seen[1] || !g_fader_seen[2]) && (t % 80) == 0)
-               led_query_absolute();
+           * ~30 s.  See mixer_defaults_tick(): it is shared with the LED_VU=0
+           * branch above, which returns before this loop. */
+          mixer_defaults_tick(t);
           t++;
           usleep(25000);   /* 40 Hz */
      }

@@ -245,6 +245,51 @@ setHeadphoneStereoType(type)            @0x0005768c
 * a split-cue switch, where the target has one, is
   `HeadPhone::setStereoType` (0 = split, 1 = stereo).
 
+## Audibility: rbp builds the channel faders at ZERO
+
+The port was silent from the day it first played a track, and the reason is not
+in this file's chain at all — it is a value rbp needs and nothing was setting.
+
+rbp's mixer engine initialises its two channel faders to **zero**, which is the
+safe default when the panel is expected to report where its faders physically
+are. A panel that **cannot** report them therefore leaves rbp's master stream as
+digital silence while a deck plays: the fader, not the transport, is what is
+shut. Nothing in the audio path is broken, so it presents as "the audio shim
+does not work" while every log line looks healthy.
+
+`rbp_vu.c`'s `mixer_defaults_tick()` seeds both channel faders at **unity** from
+the shim side, under three conditions that make it a default rather than an
+override:
+
+* only while `led_query_absolute()` reports that the query **went out** — i.e.
+  only on a surface with no way to answer (the FLX4 is found by name on the
+  sequencer route, which carries no SysEx; see [15](15-flx4-midi.md));
+* only for the first ~30 s after the shim loads, the same window the master
+  level is re-asserted in;
+* only for a channel whose own control has not reported yet (`g_fader_seen[m]`).
+  The moment the physical fader moves, the map's value takes over and the seed
+  stops being re-sent, so a fader that is physically down is *not* fought.
+
+The consequence to know about: **on a first start, both channels come up at
+unity until their faders are touched once.** A channel fader parked at the
+bottom will therefore play at full level until it is moved. The seed is
+deliberately on both `vu_thread` paths (`LED_VU=0` included) because the target
+with no meters is exactly the target with no absolute controls — putting it
+inside the meter loop made it dead code on the only unit that needed it.
+
+The measurement that pins it (unit, 2026-09-26), and the shape of the trap:
+
+```
+audioshim: writei #N frames=64 bytes=768 written=64 peak_m=0 mainvol=1.000   <- 242 lines,
+                                                                               a deck playing
+```
+
+`peak_m` is the master stream's peak **before** the shim's own gain, so zeros
+there are proof of digital silence *from rbp* — not of a muted shim, and not of a
+missing device. One `cc 19` (the deck-1 channel fader) reaching the map turned
+the very next blocks into `peak_m=731447 2260018 1560110 580118`, which is what
+identified the fader rather than the transport as the thing that was shut.
+
 ## Startup transient
 
 A loud burst can occur right after the stream starts, because rbp's first

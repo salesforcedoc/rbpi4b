@@ -75,6 +75,10 @@
 0.031000 NOTEON ch=0 note=92 vel=127
 # Log-only controls: known to the table, no rbp keycode behind them.
 0.032000 NOTEON ch=0 note=63 vel=127
+# 81 is NOT one of them any more: it is BACK, bound below like any other button.
+# The NOTEON without a NOTEOFF is deliberate -- the press is the whole assertion
+# here, and the two call buttons appear together so that 83 going quiet while 81
+# speaks is one row of difference rather than two files.
 0.033000 NOTEON ch=0 note=81 vel=127
 0.034000 NOTEON ch=0 note=83 vel=127
 0.035000 NOTEON ch=0 note=30 vel=127
@@ -140,6 +144,12 @@
 # ---- mixer / browse / LOAD, all on list ch 7 ----
 0.077000 NOTEON ch=6 note=65 vel=127
 0.078000 NOTEOFF ch=6 note=65 vel=0
+# SHIFT + browse push (note 66): rbp's SOURCE screen, and the row the port had
+# no way to reach the USB stick without. It is a table row like any other, so it
+# is a press and a release -- and the shift note itself (63, above) sends
+# nothing, which is why holding SHIFT is not a state this map has to track.
+0.078500 NOTEON ch=6 note=66 vel=127
+0.078600 NOTEOFF ch=6 note=66 vel=0
 0.079000 CONTROLLER ch=6 cc=64 val=1
 0.080000 CONTROLLER ch=6 cc=64 val=127
 # The browse encoder's direction split: 63 is clockwise, 64 is anticlockwise.

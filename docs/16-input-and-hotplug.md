@@ -282,22 +282,50 @@ Two traps that cost time here, both worth knowing before writing another one:
 
 ## What is temporary on the unit
 
-The measurements — and the verification of the fixes — were taken with two
-bring-up overrides in `/opt/rblive4/rb.local.conf`, both marked TEMPORARY there
-and neither of them a fix:
+The measurements — and the verification of the fixes — were taken with overrides
+in `/opt/rblive4/rb.local.conf`, all marked TEMPORARY there and none of them a
+fix. As of 2026-09-26 the file holds:
 
-* `RB_MIDI_MAP=kbd` — because `map_flx4.c` binds no `K_SOURCE`/`K_BROWSE`, so
-  the controller alone cannot open the Source list
-  ([docs/13](13-raspberrypi4.md), the S6 row);
+* `RB_MIDI_MAP=flx4` — **this one is now the default in `rb.conf` and the line is
+  redundant**; it is kept only so the file records what changed and why. It was
+  `kbd` for the earlier bring-up, and reverting to `kbd` is what makes the FLX4
+  appear dead ([below](#the-kbd-override-and-why-it-looked-like-a-broken-flx4)).
 * `RB_KNOB_VERBOSE=1` — to see what the map receives.
+* `RB_MIDI_DUMP=/tmp/flx4.dump` — records every sequencer event the shim
+  receives, so a control whose note number is only *published* is measured rather
+  than assumed. Its one open question is note 66, the SHIFT + browse push
+  ([15](15-flx4-midi.md)); a real press from the panel settles it, and the dump
+  is what makes that a one-press answer instead of an argument.
 
-Worth being explicit about what that means: the fixes above were verified with
-**the FLX4 ignored entirely** and the keyboard driving everything, so what is
-verified is the keyboard map and the reader, not the controller path. They
-should go once `map_flx4.c` binds `K_SOURCE`, which needs note 66 measured with
-a MIDI dump first.
+The dump's first use is also its clearest: it distinguishes **whose** event a
+line is. `seqinject2` sends velocity **100** and the FLX4 sends **127**, so
+`grep 'vel=127'` is the panel and `grep 'vel=100'` is the harness. Without that,
+an injected press and a real one are the same line in the same file.
 
-`rb.local.conf` is on the unit only and is not a tracked file, which is the
-point of it. The fixes themselves are three tracked files —
+`rb.local.conf` is on the unit only and is not a tracked file, which is the point
+of it. The fixes themselves are three tracked files —
 `scripts/shims/evdev_io.c`, `scripts/shims/map_kbd.c` and the two constants in
 `scripts/device/rb.conf` — plus their tests and the docs.
+
+### The `kbd` override, and why it looked like a broken FLX4
+
+Worth keeping, because the symptom is indistinguishable from a dead controller
+and it is a *configuration* fact rather than a bug: **`MIDI_MAP` selects exactly
+one map**, and `ctrlshim.c` starts the evdev reader only when the selected map
+declares devices. So under `kbd` the FLX4 is not partially handled — it is
+ignored, no subscription to its port is made, and nothing about the controller
+reaches rbp. Under `flx4` the reverse holds and the keyboard is dead. "The
+controller's buttons do nothing" and "the map is still `kbd`" are the same
+observation.
+
+That is what the 2026-09-26 report turned out to be: the overrides were doing
+what they said, and the FLX4 was working the whole time. With the map on `flx4`
+the shim logs `subscribed to 20:0 'DDJ-FLX4 MIDI 1'` and the operator's own
+crossfader and PLAY presses are visible in the log.
+
+**Nothing here was fixed by the `kbd` map in the end.** The gap it was working
+around — no SOURCE binding — is closed on `flx4` now, by two bindings of its own:
+SHIFT + browse push is `K_SOURCE`, and CUE/LOOP CALL ◁ is `K_BACK`
+([15](15-flx4-midi.md)). The one thing `kbd` still covers that `flx4` cannot is
+the pointing device, for reaching rbp's on-screen controls — see the note in the
+FLX4 map's header.

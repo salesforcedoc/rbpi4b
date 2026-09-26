@@ -278,8 +278,14 @@ static const struct expect expect[] = {
      /* BEAT SYNC long press -> MASTER, as a pulse. */
      { 0, K_MASTER,         OP_PRESS,   1, 0,    0.0f, 0, 0 },
      { 0, K_MASTER,         OP_RELEASE, 1, 0,    0.0f, 0, 0 },
-     /* SHIFT, CUE/LOOP CALL, the PAD FX 1 and SAMPLER pad modes and a +SHIFT note
-      * all reach no keycode: they are in the table with key 0. */
+     /* CUE/LOOP CALL < is BACK -- the surface has no BACK button, and this is
+      * the spare one it was given instead. Its neighbour (83) stays log-only,
+      * which is the pair of rows below: one of the two call buttons speaks and
+      * the other does not, so a binding that fell on the wrong one is caught.
+      * The fixture sends no NOTEOFF for it, hence the press alone. */
+     { 0, K_BACK,           OP_PRESS,   1, 0,    0.0f, 0, 0 },
+     /* SHIFT, the PAD FX 1 and SAMPLER pad modes and a +SHIFT note all reach no
+      * keycode: they are in the table with key 0. */
      /* CH CUE produces no keycode at all -- the engine call is asserted in
       * check_state() -- and neither does the +SHIFT pad layer nor a pad in a mode
       * rbp has no equivalent for. */
@@ -350,6 +356,11 @@ static const struct expect expect[] = {
       * the send channel is CH_GLOBAL even though the events are on ch 6. */
      { 0, K_SELECTOR,       OP_PRESS,   1, 0,    0.0f, 0, 0 },
      { 0, K_SELECTOR,       OP_RELEASE, 1, 0,    0.0f, 0, 0 },
+     /* SHIFT + the same push is SOURCE instead -- a different keycode on the
+      * same note's shift variant, which is the whole reason the map binds the
+      * shift note separately rather than tracking a SHIFT state. */
+     { 0, K_SOURCE,         OP_PRESS,   1, 0,    0.0f, 0, 0 },
+     { 0, K_SOURCE,         OP_RELEASE, 1, 0,    0.0f, 0, 0 },
      { 0, K_SELECTOR,       OP_ROTATE,  1, 1,    0.0f, 0, 0 },
      { 0, K_SELECTOR,       OP_ROTATE,  1, -1,   0.0f, 0, 0 },
      /* 63 and 64: the encoder's direction split. This is the unit's only 63/64
@@ -668,13 +679,14 @@ int main(void)
      /* The tables' sizes, spelled out rather than merely "non-empty": a row that
       * silently falls off the end of add_note()/add_abs() is a control that stops
       * working, and it would otherwise only show up as an unmapped event.
-      * Deck 1/2 contribute 13 notes each (8 bound: play, cue, jog touch, loop in,
-      * loop out, 4 beat, hot cue mode, beat jump mode -- plus 5 log-only: shift,
-      * pad fx, sampler, and the two cue/loop calls), 8 pads x 2 bases each, and 5
-      * absolute controls; the mixer contributes 6 notes and 5 knobs, and the Beat
-      * FX 2 notes and 2 depth rows. */
-     CHECK(note_map_n == 66,
-           "the map built %d note rows, expected 66 (2 x (13 + 16) + 6 + 2)",
+      * Deck 1/2 contribute 13 notes each (9 bound: play, cue, jog touch, loop in,
+      * loop out, 4 beat, hot cue mode, beat jump mode, and CUE/LOOP CALL < as
+      * BACK -- plus 4 log-only: shift, pad fx, sampler, and the other call
+      * button), 8 pads x 2 bases each, and 5 absolute controls; the mixer
+      * contributes 7 notes and 5 knobs, and the Beat FX 2 notes and 2 depth
+      * rows. */
+     CHECK(note_map_n == 67,
+           "the map built %d note rows, expected 67 (2 x (13 + 16) + 7 + 2)",
            note_map_n);
      CHECK(abs_map_n == 17,
            "the map built %d absolute rows, expected 17 (2 x 5 + 5 + 2)",

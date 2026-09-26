@@ -130,7 +130,8 @@ the ones the capture did not exercise.
 | SHIFT | note 63 | *(none)* | log-only |
 | pad mode PAD FX 1 | note 30 | *(none)* | log-only — rekordbox-only mode |
 | pad mode SAMPLER | note 34 | *(none)* | log-only — ditto |
-| CUE/LOOP CALL ◁ / ▷ | notes 81 / 83 | *(none)* | log-only — rbp's keycode for them is not identified, see [open questions](#open-questions) |
+| CUE/LOOP CALL ◁ | note 81 | `0x420d` K_BACK, global | **not** log-only: this is the port's only BACK. The FLX4 has no BACK and no SOURCE button at all, and without a BACK the browse screen is a one-way door — every keycode that leaves it is one this surface does not have. Nothing is taken from the button by this: 81's real rbp keycode is unidentified, so it was dead, and "<" reads as "back one level", which is what it now does |
+| CUE/LOOP CALL ▷ | note 83 | *(none)* | log-only — rbp's keycode for it is not identified, see [open questions](#open-questions) |
 
 Footnote *3 of the list says the BEAT SYNC button sends its message **when the
 finger is released**, not when it is pressed. The map therefore treats whichever
@@ -215,6 +216,7 @@ quietly, because a wrong base lights nothing and sends nothing.
 | headphone MIX | CC 12 | `0x4405` K_HPMIX, global | also feeds `g_cue_mix` for the audio shim |
 | headphone LEVEL | CC 13 | `0x4406` K_HPLEVEL, global | also feeds `g_cue_gain` |
 | browse push | note 65 | `0x420c` K_SELECTOR, global | press / release |
+| SHIFT + browse push | note 66 | `0x0201` K_SOURCE, global | rbp's SOURCE screen, and the only row that reaches the mounted USB at all. **The note number is still an assumption** — see below |
 | browse rotate | CC 64 (+SHIFT CC 100) | `0x420c` K_SELECTOR, global | relative, **0x01/0x7F** two's complement — *not* the jog's convention. Measured (S5.1): values 1 and 127 only, and the two conventions are what tell it apart from the platter, so this is the row that could most easily have been mapped backwards |
 | LOAD, deck 1 / 2 | notes 70 / 71 | `0x4311` K_LOAD, global key with rbp ch 1 / 2 | |
 | MASTER CUE | note 99 | *(none — the mixer engine)* | toggles `me_set_master_cue()` from `me_get_master_cue()` |
@@ -237,6 +239,36 @@ counts from a **0x40** centre ("Turn clockwise: Increases from 0x41 / Turn
 counterclockwise: Decreases from 0x3F"), while the **browse** knob reports a
 **two's-complement delta** ("0x01 / 0x7F"). They are handled by two different
 functions with two different scales for that reason.
+
+### The SHIFT + browse push, and the two questions it is two questions about
+
+The row above is the only way this surface reaches the SOURCE screen, and it is
+the row with the weakest evidence behind it — so it is worth being exact about
+what has and has not been shown.
+
+There are **two independent things** that have to be right, and they fail
+differently:
+
+1. **What the binding does.** A `K_SOURCE` press is what opens the screen. This
+   is confirmed on the unit, by injection through the real code path: one
+   `ch6 note66` press and release took rbp from `mode 1` to `mode 12` (SOURCE)
+   and `dev 0` to `dev 3` (USB1), and a framebuffer capture showed the USB with
+   its 736 songs. The map's *disposition* of note 66 is therefore known good.
+2. **That note 66 is what the panel actually sends.** This is **not** measured.
+   The number comes from Pioneer's published MIDI list, which is also where
+   every other number in this file comes from — but this is the one row where
+   being wrong is silent: an injection tests (1) and says nothing about (2), and
+   a real SHIFT + browse press sends whatever it sends, mapped or not.
+
+(2) is settled by measurement, not by argument, and the measurement is one press
+away: `RB_MIDI_DUMP` records every sequencer event the shim receives, so a real
+SHIFT + browse push with the dump on answers it permanently. As of 2026-09-26
+the dump holds no note 66 at the panel's own velocity (100 is `seqinject2`;
+127 is the panel) — so **the operator's press has not been captured yet, and the
+number is unmeasured**. If the press turns out to send something else, the fix is
+one line in `map_flx4.c` and one line in the fixture; nothing else depends on it.
+The FLX4 dump's other use is the mirror image: note 65 and note 70 *are* measured,
+at the panel's velocity, which is why the browse push and LOAD are not in doubt.
 
 ### Beat FX (list ch 5 → rch 4, with a second leg on ch 6 → rch 5)
 
@@ -508,9 +540,10 @@ is still open or has been answered (with S5.1, the `aseqdump` capture).
 | 6 | The **Level/Depth knob's channel**, where the list's Channel column (6) disagrees with its own status byte (`B4`). Both are bound, so the knob works either way — but one of the two rows is dead weight and should go. | the dump: the CC appears on one channel only |
 | 7 | **Which position the FX CH SELECT lever rests in**, and rbp's default Beat FX target. The map deliberately does not force a target, so it does nothing until the lever moves. | move the lever through all three positions and watch `KNOB_VERBOSE=1`; then note what rbp had selected before the first move |
 | 8 | Whether the BEAT SYNC release (footnote *3) carries the ON edge, the OFF edge or both. | **Answered in S5.1**: one press produced both edges (`on/off x1/1` on note 88), so the map's first-edge rule is load-bearing rather than merely defensive. The map would handle either order without double-sending, so which came first is for the record — the dump has it in order (`grep 'note=88' flx4.dump`). |
-| 9 | rbp's **keycode for CUE/LOOP CALL** ◁/▷, which would turn two log-only rows into bindings. | rbp's own key table, or a keyboard/pointer session against the RX3 UI |
+| 9 | rbp's **keycode for CUE/LOOP CALL** ◁/▷. This is **half-answered and half-bypassed**: the keycodes are still unknown, and ◁ no longer waits on them — it is `K_BACK` now, because the port had no BACK at all and a dead button was worth more as one. ▷ is still log-only, and finding either real keycode would let them be what they say they are. | rbp's own key table, or a keyboard/pointer session against the RX3 UI |
 | 10 | ~~Whether the FLX4's USB audio is `S24_3LE`, `S16_LE` or `S32_LE`, and its native rate.~~ | **Answered in S1.4**, and it did change the shim: `aplay --dump-hw-params -D hw:CARD=DDJFLX4,DEV=0` reads `FORMAT S16_LE S24_3LE`, `SAMPLE_BITS [16 24]`, `FRAME_BITS [64 96]`, `CHANNELS 4`, `RATE [44100 48000]` — **no `S32_LE`**. The plan's `plughw:` default assumed the question did not matter, because the plug chain would convert whatever the answer was; the card's real count is what `AUDIO_MAP`'s hardware indices need, and a plug device reports 10000 for it (see [13](13-raspberrypi4.md) S1.4 and [09](09-audio.md)) |
 | 11 | The **units of the jog's `l` field** (the 16-bit `pos` in the `OP_ROTATE` message). The map fills it with raw platter counts, so the measured 720 counts/revolution now goes into a field rbp may *compare* rather than difference — and the map inherited 128 from the JP21. `RB_JOG_SCALE` cannot express that conversion: it scales `vpos` but cancels out of the speed, and it is clamped to ≥ 1, so it can only make the units larger. | if the platter misbehaves in a way the speed cannot explain (a deck that jumps when touched), log `JOG_VERBOSE=1`'s `pos=` against a known turn and compare it with what rbp does |
+| 12 | **The note number the SHIFT + browse push actually sends** — the one number in this file whose being wrong is silent, and the only thing standing between the port and "the SOURCE screen is reachable from the panel". Note 66 is Pioneer's published value; that the *binding* works is proven, that the *number* is right is not. | one press with `RB_MIDI_DUMP` on: the dump records the panel's velocity (127) separately from the harness's (100), so `grep 'note=66 vel=127' /tmp/flx4.dump` answers it outright. As of 2026-09-26 that grep is empty and this is open. See [the section above](#the-shift--browse-push-and-the-two-questions-it-is-two-questions-about) |
 
 ## Testing without the hardware
 

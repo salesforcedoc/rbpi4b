@@ -145,7 +145,8 @@
 
 /* ---- mixer / browse (all on list ch 7 unless noted) ---------------------- */
 #define N_MASTER_CUE  99  /* MASTER CUE         (+SHIFT 120) */
-#define N_BROWSE_PUSH 65  /* browse knob push   (+SHIFT 66) */
+#define N_BROWSE_PUSH 65  /* browse knob push   (+SHIFT 66 = SOURCE, see build) */
+#define N_BROWSE_PUSH_SHIFT 66  /* SHIFT + browse knob push -> rbp's SOURCE screen */
 #define N_LOAD1       70  /* LOAD deck 1        (+SHIFT 104) */
 #define N_LOAD2       71  /* LOAD deck 2        (+SHIFT 122) */
 #define N_SMART_CFX   0   /* SMART CFX          (+SHIFT 8)  -- no rbp equivalent */
@@ -641,14 +642,21 @@ static void flx4_build(void)
            * pad keycodes below mean HOT CUE and BEAT JUMP. */
           add_note(rch, N_MODE_HOT, K_HOTCUE, sch);
           add_note(rch, N_MODE_JUMP, K_BEATJUMP, sch);
-          /* Known, deliberately not routed (key 0). The two pad modes rbp has
+          /* Known, deliberately not routed (key 0): the two pad modes rbp has
            * no equivalent for (PAD FX 1/2 and SAMPLER are rekordbox features),
-           * the SHIFT button, and CUE/LOOP CALL -- rbp's keycode for the call
+           * the SHIFT button, and CUE/LOOP CALL > -- rbp's keycode for the call
            * buttons is not identified. See docs/15's open questions. */
           add_note(rch, N_SHIFT, 0, sch);
           add_note(rch, N_MODE_PFX1, 0, sch);
           add_note(rch, N_MODE_SMPL, 0, sch);
-          add_note(rch, N_CALL_PREV, 0, sch);
+          /* ...with one exception. CALL < is BACK, and it is the only spare
+           * button on this unit: the FLX4 has no BACK and no SOURCE button at
+           * all, and without a BACK the browse screen is a one-way door --
+           * every keycode that leaves it is one this surface does not have.
+           * Nothing is taken from the button by this: the call buttons' real
+           * rbp keycodes are unidentified, so it was dead. "<" reads as "back
+           * one level", which is what it now does. */
+          add_note(rch, N_CALL_PREV, K_BACK, CH_GLOBAL);
           add_note(rch, N_CALL_NEXT, 0, sch);
 
           /* The deck's own mixer strip: same four knobs and one fader rbp's
@@ -699,6 +707,24 @@ static void flx4_build(void)
      add_abs(CH_MIX, CC_HP_MIX, K_HPMIX, CH_GLOBAL);      /* -> g_cue_mix */
      add_abs(CH_MIX, CC_HP_LEVEL, K_HPLEVEL, CH_GLOBAL);  /* -> g_cue_gain */
      add_note(CH_MIX, N_BROWSE_PUSH, K_SELECTOR, CH_GLOBAL);
+     /* SHIFT + browse push -> rbp's SOURCE screen. This is the row the whole
+      * port needed: **the FLX4 has no SOURCE button and no BROWSE button**, and
+      * rbp has no on-screen SOURCE target on the deck screen, so without it
+      * there is no way to reach the USB stick from this surface at all -- the
+      * browse knob can navigate a list but cannot open one. The pointer path
+      * (fbshim.so) is what reaches rbp's other on-screen controls for them; it
+      * cannot reach a control that is not drawn.
+      *
+      * PROVENANCE: note 66 is the +SHIFT variant of the browse push in Pioneer's
+      * published list, and it is bound on that reading -- the same standing the
+      * rest of this file's unmeasured rows have (see the PROVENANCE block at the
+      * top). Two separate things have to be true for it to work, and they fail
+      * differently: the binding (this table -> rbp) and the note number (the unit
+      * -> this table). An injection of ch6 note66 through the shim's own
+      * sequencer port tests the first on the unit; a press on the real button
+      * with MIDI_DUMP on measures the second, and a wrong number there shows up
+      * as an unmapped note in the KNOB_VERBOSE log rather than as a mystery. */
+     add_note(CH_MIX, N_BROWSE_PUSH_SHIFT, K_SOURCE, CH_GLOBAL);
      /* LOAD streams on the global channel, as it does in map_jp21.c: rbp's
       * browse/Load keys are global, and the deck is in the send channel. */
      add_note(CH_MIX, N_LOAD1, K_LOAD, 1);
