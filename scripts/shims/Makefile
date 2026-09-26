@@ -7,8 +7,12 @@
 #   make RX3=/path/to/extracted/XDJRX3-rootfs
 #   make clean
 #
-# The RX3 rootfs is used as the sysroot for libc/libdl/librt/pthread so symbol
-# versioning matches the target (modern host glibc would pull in GLIBC_2.17+).
+# The RX3 rootfs supplies libc/libdl/librt/pthread so that symbol versioning
+# matches the target (modern host glibc would pull in GLIBC_2.17+).  What
+# actually achieves that is the -L$(RX3LIB) -L$(RX3ULIB) in LDFLAGS below, NOT
+# the --sysroot: GCC's built-in directories come after every -L, so a link with
+# only --sysroot still resolves libc against the build machine's glibc and
+# stamps references GLIBC_2.34.  See tools/build-directfb/README.md.
 
 CROSS   ?= arm-linux-gnueabi-
 CC      := $(CROSS)gcc
@@ -268,13 +272,24 @@ test: $(TESTS)
 	@for t in $(TESTS); do echo "-- $$t"; qemu-arm ./$$t || exit 1; done
 
 # Fail the build if any GLIBC version above 2.7 or a hard-float tag sneaks in.
+#
+# The exit status is the point.  This printed the version list and left the
+# reading to a human, which is how a GLIBC_2.34 reference (pthread/dlfcn, which
+# glibc folded into libc at 2.34) can sit in a shim that then refuses to load in
+# the chroot.  objdump -T is used rather than nm because nm -D prints a
+# versioned symbol as name@GLIBC_x.y, so a name-based grep matches only the
+# unversioned references and never sees a version at all.
 check: $(SHARED)
 	@echo "== GLIBC symbol versions =="
-	@for f in $(SHARED); do \
+	@rc=0; for f in $(SHARED); do \
 	  echo "-- $$f"; \
-	  $(CROSS)objdump -T $$f 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u; \
-	  $(CROSS)readelf -A $$f | grep -i 'Tag_ABI_VFP_args' && echo "  !! HARD-FLOAT" || true; \
-	done
+	  v=$$($(CROSS)objdump -T $$f 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV); \
+	  echo "$$v" | sed 's/^/   /'; \
+	  if echo "$$v" | grep -qE 'GLIBC_(2\.([89]|[1-9][0-9])|[3-9])'; then \
+	    echo "   !! FAIL: references a symbol version newer than the target's 2.13"; rc=1; \
+	  fi; \
+	  $(CROSS)readelf -A $$f | grep -i 'Tag_ABI_VFP_args' && { echo "  !! HARD-FLOAT"; rc=1; } || true; \
+	done; exit $$rc
 
 clean:
 	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) *.o

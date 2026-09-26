@@ -20,11 +20,12 @@
 #
 #   RX3       directory with the extracted firmware tree
 #               $RX3/XDJRX3-rootfs   soft-float userland (from rootfs.cramfs)
-#               $RX3/XDJRX3/gui      fontdata / imagedata / pset / system
-#               (the gui assets are also accepted as a sibling
-#                $RX3/XDJRX3-gui, which is how the ISO unpacks here)
+#               $RX3/XDJRX3/gui      the ISO's gui/ dir
+#               $RX3/XDJRX3-gui      gui.tar.gz unpacked (the gui partition)
 #   ROOTFS    explicit rootfs dir                (= $RX3/XDJRX3-rootfs)
-#   GUI       explicit gui dir                   (= first of the two above that exists)
+#   GUI       explicit gui root, holding the four asset dirs below
+#                                                (= searched for in both of the
+#                                                   two roots above)
 #   RBPAUDIO  patched player, from tools/patch-rbp (= $RX3/rbp-audio)
 #   DFB       DirectFB 1.4.16 staging, from tools/build-directfb
 #              $DFB/lib/...         core libs + directfb-1.4-6 modules
@@ -46,21 +47,81 @@ RBPAUDIO="${RBPAUDIO:-$RX3/rbp-audio}"
 DFB="${DFB:-$REPO/work/dfb}"
 DFBLIB="${DFBLIB:-$DFB/lib}"
 SHIMS="${SHIMS:-$HERE/shims}"
+# Where the loadable modules live *inside the chroot*, and the single source of
+# truth for it: it is used both to stage them (step 5) and to write the
+# `module-dir` line into directfbrc (step 6), so the two cannot drift apart.
+#
+# It has to be stated at all because the built tree's compile-time MODULEDIR is
+# /lib/directfb-1.4-6 (`--libdir=/lib` in the DirectFB build), while this rootfs's
+# own convention -- where step 5 puts them -- is $libdir/directfb-1.4-6 under
+# /usr/lib. DirectFB searches MODULEDIR whenever a module path is relative, which
+# is always ("systems", "inputdrivers", "wm"), so a mismatch means nothing loads
+# and the failure is a long way from its cause: dfbinfo reports "No system
+# found!", and rbp -- which sets DirectFBSetOption("quiet") and so never sees
+# DirectFB's own explanation -- segfaults in init_Resource() dereferencing the
+# NULL IDirectFB* that a failed DirectFBCreate() handed back.
+DFB_MODDIR="${DFB_MODDIR:-/usr/lib/directfb-1.4-6}"
 CONF="${CONF:-$HERE/device/rb.conf}"
 OUT="${OUT:-$REPO/work}"
 
-# The gui assets live in a sibling directory when the ISO is unpacked here
-# ($RX3/XDJRX3-gui) but nested under the firmware tree in some extractions.
-if [ -z "${GUI:-}" ]; then
-  for candidate in "$RX3/XDJRX3/gui" "$RX3/XDJRX3-gui"; do
-    if [ -d "$candidate" ]; then GUI="$candidate"; break; fi
+# The four gui asset directories are split across two roots, and neither root is
+# a gui tree on its own -- so they are resolved one directory at a time.
+#
+#   $RX3/XDJRX3/gui    fontdata + imagedata   the ISO's gui/ directory, which the
+#                                            firmware's own `update` binary reads
+#                                            (it opens gui/fontdata/decker.ttf and
+#                                            gui/imagedata/png/)
+#   $RX3/XDJRX3-gui    pset + system          gui.tar.gz unpacked.  This tarball
+#                                            IS the gui partition: the RX3 formats
+#                                            its gui UBIFS volume (mtd10) from it
+#                                            (see the ISO's pdj/ubifs_funcs.sh).
+#
+# rbp opens ten paths under /root/gui and every one of them is under pset/ or
+# system/ -- nine under pset/ (eight fontdata/*.bin, imagedata/imagedata.dat) and
+# system/fontdata/sazanami-gothic.ttf -- so pset/ and system/ are required and
+# fontdata/imagedata are staged when a root has them.
+#
+# An earlier version of this picked the first root that merely *existed* and then
+# broke inside `cp` at the first subdirectory it lacked, naming a path that read
+# like a corrupt tree rather than a split one.
+if [ -n "${GUI:-}" ]; then
+  GUI_ROOTS="$GUI"                       # explicit root: all four, or it fails below
+else
+  GUI_ROOTS="$RX3/XDJRX3/gui $RX3/XDJRX3-gui"
+fi
+
+GUI_DIRS=""
+GUI_MISSING=""
+for d in pset system fontdata imagedata; do
+  src=""
+  for root in $GUI_ROOTS; do
+    if [ -d "$root/$d" ]; then src="$root/$d"; break; fi
   done
-  GUI="${GUI:-$RX3/XDJRX3/gui}"   # keep the original default for the error message
+  if [ -n "$src" ]; then
+    GUI_DIRS="$GUI_DIRS $src"
+  else
+    case "$d" in
+      pset|system) GUI_MISSING="$GUI_MISSING $d" ;;
+      *) echo "[gui] $d: in neither $GUI_ROOTS -- optional, rbp does not open it" ;;
+    esac
+  fi
+done
+if [ -n "$GUI_MISSING" ]; then
+  echo "build-chroot: gui assets missing:$GUI_MISSING" >&2
+  echo "  rbp opens /root/gui/pset/fontdata/*.bin," >&2
+  echo "  /root/gui/pset/imagedata/imagedata.dat and" >&2
+  echo "  /root/gui/system/fontdata/sazanami-gothic.ttf, so pset/ and system/" >&2
+  echo "  are required.  Both come from the firmware's images/gui.tar.gz --" >&2
+  echo "  the tarball the RX3 formats its gui partition from.  Searched:" >&2
+  for root in $GUI_ROOTS; do echo "    $root" >&2; done
+  echo "  extract it:  mkdir -p $RX3/XDJRX3-gui &&" >&2
+  echo "               tar -C $RX3/XDJRX3-gui -xzf $RX3/XDJRX3/images/gui.tar.gz" >&2
+  exit 1
 fi
 
 # --- check inputs ----------------------------------------------------------
 missing=""
-for f in "$ROOTFS" "$GUI" "$RBPAUDIO" \
+for f in "$ROOTFS" "$RBPAUDIO" \
          "$DFBLIB/libdirectfb-1.4.so.0.0.0" \
          "$DFBLIB/libdirect-1.4.so.0.0.0" \
          "$DFBLIB/libfusion-1.4.so.0.0.0" \
@@ -104,18 +165,37 @@ mkdir -p "$CHROOT"
 echo "== staging to $STAGE =="
 
 # 1. base rootfs (preserve symlinks; exec bits are restored below).
-#    tar --ignore-failed-read skips odd files (e.g. var/log/wtmp) whose
-#    Windows/WSL ACL can deny even root; recreate those as empty files.
+#    The reader must not abort the pipeline (set -o pipefail is on) over a file
+#    whose permissions deny a read -- e.g. var/log/wtmp, which a Windows/WSL ACL
+#    can deny even to root; those two are recreated empty just below. GNU tar has
+#    --ignore-failed-read for exactly that. BSD tar has no such option and
+#    refuses to run at all ("Option --ignore-failed-read is not supported"),
+#    which is how this script failed on macOS, so probe for it rather than
+#    assume it: the Linux behaviour is then unchanged.
 echo "[1/7] copying RX3 rootfs..."
-tar -C "$ROOTFS" --ignore-failed-read -cf - . | tar -C "$CHROOT" -xf -
+if tar --version 2>/dev/null | head -1 | grep -q GNU; then
+  TAR_IGNORE="--ignore-failed-read"
+else
+  TAR_IGNORE=""
+fi
+tar -C "$ROOTFS" $TAR_IGNORE -cf - . | tar -C "$CHROOT" -xf -
 touch "$CHROOT/var/log/wtmp" "$CHROOT/var/log/lastlog" 2>/dev/null || true
 
-# 2. gui assets -> /root/gui  (rbp reads /root/gui/pset/... and /root/gui/system/...)
+# 2. gui assets -> /root/gui  (rbp reads /root/gui/pset/... and /root/gui/system/...;
+#    GUI_DIRS is the per-directory resolution done above, so a directory staged
+#    here may come from either root)
 echo "[2/7] copying gui assets..."
 mkdir -p "$CHROOT/root/gui"
-for d in fontdata imagedata pset system; do
-  cp -a "$GUI/$d" "$CHROOT/root/gui/"
+for d in $GUI_DIRS; do
+  cp -a "$d" "$CHROOT/root/gui/"
 done
+# Strip the build host's own metadata.  The extracted firmware on a macOS host
+# carries Finder's .DS_Store inside the asset directories, and these are asset
+# directories rbp reads -- copying a build host's bookkeeping into them is not
+# something the deploy root should depend on.  Deleting them here, after the
+# copy, keeps the staging independent of how the host unpacked the firmware.
+find "$CHROOT/root/gui" -name '.DS_Store' -type f -delete 2>/dev/null || true
+ls -d "$CHROOT/root/gui"/*/ | sed 's/^/    /'
 
 # 3. patched player -> /root/pdj/rbp  (shared patches + the SC Live 4
 #    getPcController() NULL-deref fix; see scripts/patch-rbp-nopc.py)
@@ -145,22 +225,22 @@ ln -sfn libdirectfb-1.4.so.0.0.0 "$CHROOT/usr/lib/libdirectfb-1.4.so.0"
 ln -sfn libdirect-1.4.so.0.0.0   "$CHROOT/usr/lib/libdirect-1.4.so.0"
 ln -sfn libfusion-1.4.so.0.0.0   "$CHROOT/usr/lib/libfusion-1.4.so.0"
 
-mkdir -p "$CHROOT/usr/lib/directfb-1.4-6/systems" \
-         "$CHROOT/usr/lib/directfb-1.4-6/inputdrivers" \
-         "$CHROOT/usr/lib/directfb-1.4-6/wm"
+mkdir -p "$CHROOT$DFB_MODDIR/systems" \
+         "$CHROOT$DFB_MODDIR/inputdrivers" \
+         "$CHROOT$DFB_MODDIR/wm"
 cp "$DFBLIB/directfb-1.4-6/systems/libdirectfb_fbdev.so" \
-   "$CHROOT/usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so"
+   "$CHROOT$DFB_MODDIR/systems/libdirectfb_fbdev.so"
 cp "$DFBLIB/directfb-1.4-6/inputdrivers/libdirectfb_linux_input.so" \
-   "$CHROOT/usr/lib/directfb-1.4-6/inputdrivers/libdirectfb_linux_input.so"
+   "$CHROOT$DFB_MODDIR/inputdrivers/libdirectfb_linux_input.so"
 cp "$DFBLIB/directfb-1.4-6/wm/libdirectfbwm_default.so" \
-   "$CHROOT/usr/lib/directfb-1.4-6/wm/libdirectfbwm_default.so"
+   "$CHROOT$DFB_MODDIR/wm/libdirectfbwm_default.so"
 # keyboard module: prefer the freshly built 1.4.16 one, fall back to the RX3 1.4.0 copy
 if [ -f "$DFBLIB/directfb-1.4-6/inputdrivers/libdirectfb_keyboard.so" ]; then
   cp "$DFBLIB/directfb-1.4-6/inputdrivers/libdirectfb_keyboard.so" \
-     "$CHROOT/usr/lib/directfb-1.4-6/inputdrivers/libdirectfb_keyboard.so"
+     "$CHROOT$DFB_MODDIR/inputdrivers/libdirectfb_keyboard.so"
 elif [ -f "$ROOTFS/usr/lib/directfb-1.4-0/inputdrivers/libdirectfb_keyboard.so" ]; then
   cp "$ROOTFS/usr/lib/directfb-1.4-0/inputdrivers/libdirectfb_keyboard.so" \
-     "$CHROOT/usr/lib/directfb-1.4-6/inputdrivers/libdirectfb_keyboard.so"
+     "$CHROOT$DFB_MODDIR/inputdrivers/libdirectfb_keyboard.so"
 fi
 
 # 6. exec bits + mtab + directfbrc + rb.conf (exec bits are lost in Windows
@@ -177,7 +257,13 @@ chmod 755 "$CHROOT/root/pdj/rbp"
 chmod 644 "$CHROOT/usr/lib/"*.so "$CHROOT/root/pdj/"*.so 2>/dev/null || true
 ln -sfn /proc/mounts "$CHROOT/etc/mtab"
 mkdir -p "$CHROOT/usr/etc"
-printf 'no-hardware\nno-cursor\nsystem=fbdev\nfbdev=/dev/fb0\n' > "$CHROOT/usr/etc/directfbrc"
+# module-dir is not optional here: the built tree's compile-time MODULEDIR
+# (/lib/directfb-1.4-6) is not where step 5 staged the modules, and a relative
+# module path is always searched in MODULEDIR. Written from $DFB_MODDIR so it
+# names exactly the directory step 5 used. See the definition above for what a
+# mismatch costs.
+printf 'no-hardware\nno-cursor\nsystem=fbdev\nfbdev=/dev/fb0\nmodule-dir=%s\n' \
+       "$DFB_MODDIR" > "$CHROOT/usr/etc/directfbrc"
 cp "$CHROOT/usr/etc/directfbrc" "$CHROOT/etc/directfbrc"
 
 # rb.conf travels with the tree, at the deploy root next to the chroot.
@@ -196,11 +282,47 @@ mkdir -p "$CHROOT/root/settings"
 printf '0\n0\n320\n200\n1280\n800\n' > "$CHROOT/root/settings/TouchCalib_User.dat"
 cp "$CHROOT/root/settings/TouchCalib_User.dat" "$CHROOT/root/settings/TouchCalib_Factory.dat"
 
+# 6b. Strip the build host's metadata from the whole staged tree, not just the
+#     gui dirs. A macOS extraction leaves an AppleDouble "._name" companion
+#     beside every file it unpacked, and these are not inert once deployed:
+#     DirectFB walks each module directory and tries to dlopen every entry, so
+#     every "._libdirectfb_*.so" yields an "Unable to dlopen" error at startup.
+#     They also survive a re-deploy -- install.sh untars over the existing tree
+#     and tar never deletes -- so a target that has ever received a tarball built
+#     on a host carrying them keeps them forever, and only a rebuild fixes it.
+#     Swept here, after everything is staged, so the count covers all seven steps.
+APPLE_FILES=$(find "$CHROOT" -name '._*' -type f 2>/dev/null | wc -l)
+find "$CHROOT" -name '._*' -type f -delete 2>/dev/null || true
+if [ "$APPLE_FILES" -gt 0 ]; then
+  echo "    stripped $APPLE_FILES AppleDouble file(s) from the staged tree"
+fi
+
 # 7. verification
 echo "[7/7] verifying..."
+# The one invariant that has already failed once, silently, with the symptom
+# three layers away from the cause: every module directfbrc can name must exist
+# where directfbrc says it does. Asserted rather than assumed, because a
+# mistyped or stale module-dir produces a perfectly good tarball.
+MOD_MISSING=0
+for m in systems/libdirectfb_fbdev.so \
+         inputdrivers/libdirectfb_linux_input.so \
+         wm/libdirectfbwm_default.so; do
+  if [ ! -f "$CHROOT$DFB_MODDIR/$m" ]; then
+    echo "  !! MISSING: $DFB_MODDIR/$m" >&2
+    MOD_MISSING=1
+  fi
+done
+echo "--- modules in $DFB_MODDIR (as directfbrc names it) ---"
+ls "$CHROOT$DFB_MODDIR"/systems "$CHROOT$DFB_MODDIR"/inputdrivers \
+   "$CHROOT$DFB_MODDIR"/wm 2>/dev/null | sed 's/^/    /'
+if [ "$MOD_MISSING" != 0 ]; then
+  echo "build-chroot: modules are not where directfbrc says they are --" >&2
+  echo "  every DirectFB module load would fail on the target." >&2
+  exit 1
+fi
 if command -v readelf >/dev/null 2>&1; then
   echo "--- fbdev module NEEDED ---"
-  readelf -d "$CHROOT/usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so" | grep -E "NEEDED|SONAME" || true
+  readelf -d "$CHROOT$DFB_MODDIR/systems/libdirectfb_fbdev.so" | grep -E "NEEDED|SONAME" || true
   echo "--- core sonames ---"
   for s in libdirectfb-1.4.so.0.0.0 libdirect-1.4.so.0.0.0 libfusion-1.4.so.0.0.0; do
     readelf -d "$CHROOT/usr/lib/$s" | grep SONAME || true

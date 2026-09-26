@@ -246,7 +246,7 @@ def steps(values):
     return centred, twos
 
 
-def report(cap, revs, want_source, stream):
+def report(cap, revs, want_source, stream, jog_cc=34):
     w = stream.write
     w("== capture: %d events\n" % cap.events)
     if cap.sources:
@@ -290,6 +290,17 @@ def report(cap, revs, want_source, stream):
         tmax = max(abs(d) for d in twos) if twos else 0
         if cmax == tmax:
             continue                        # nothing to choose between
+        is_jog = (num == jog_cc)
+        # An absolute control -- a fader, a knob -- is not relative at all and
+        # decodes to large steps under BOTH conventions, so it gets no verdict
+        # and no arithmetic. A control that IS relative takes steps of a count
+        # or two under the right convention and enormous ones under the wrong
+        # one; that gap is what makes the verdict a measurement rather than a
+        # preference. The named jog CC is always decoded, because "which
+        # convention is the platter" is a question worth answering even if its
+        # turn was too short to divide.
+        if not is_jog and not (min(cmax, tmax) <= 2 and max(cmax, tmax) >= 16):
+            continue
         w("  ch%d cc%d: %d events\n" % (ch, num, len(values)))
         for label, ds, mx in (("0x40-centred (v-64)", centred, cmax),
                               ("0x01/0x7F (two's complement)", twos, tmax)):
@@ -300,14 +311,14 @@ def report(cap, revs, want_source, stream):
         pick = "0x40-centred" if cmax < tmax else "0x01/0x7F"
         w("      -> the data supports %s: its largest step is %d, against %d.\n"
           % (pick, min(cmax, tmax), max(cmax, tmax)))
-        if revs and len(values) >= 16:
-            # Only a control that was actually turned can carry this figure. A
-            # knob nudged twice would otherwise print a "counts per revolution"
-            # of 0.1, which reads like a measurement and is not one.
+        if is_jog and revs:
             ds = centred if cmax < tmax else twos
             fwd = sum(d for d in ds if d > 0)
-            w("      if the forward run was exactly %g revolution(s): "
-              "counts/revolution = %g\n" % (revs, fwd / revs))
+            if len(values) < 16:
+                w("      too few events to divide into a turn -- turn more\n")
+            else:
+                w("      if the forward run was exactly %g revolution(s): "
+                  "counts/revolution = %g\n" % (revs, fwd / revs))
     w("\n")
 
 
@@ -325,6 +336,9 @@ def main() -> int:
                     help="synthetic seconds between events (default 0.002)")
     ap.add_argument("--revs", type=float, default=0.0,
                     help="for --stats: revolutions the forward run covered")
+    ap.add_argument("--jog-cc", type=int, default=34,
+                    help="the platter's CC, whose counts/revolution is the one "
+                         "that means anything (default 34, the DDJ-FLX4)")
     ap.add_argument("--source", default="",
                     help="only this CLIENT:PORT, e.g. 28:0")
     ap.add_argument("-v", "--verbose", action="store_true",
@@ -355,14 +369,14 @@ def main() -> int:
         # losing it to a traceback.
         if args.stats:
             sys.stderr.write("\n-- interrupted; reporting what arrived --\n")
-            report(cap, args.revs, args.source, sys.stderr)
+            report(cap, args.revs, args.source, sys.stderr, args.jog_cc)
         return 130
     finally:
         if out is not sys.stdout:
             out.close()
 
     if args.stats:
-        report(cap, args.revs, args.source, sys.stderr)
+        report(cap, args.revs, args.source, sys.stderr, args.jog_cc)
         if args.verbose and cap.unmapped:
             sys.stderr.write("-- lines not converted --\n")
             for line in cap.unmapped:

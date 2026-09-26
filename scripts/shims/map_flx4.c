@@ -190,10 +190,20 @@
 /* ---- the map's own calibration (read by value: empty means default) ------ */
 static int knob_scale = 1;      /* browse steps per detent */
 static int jog_scale = 1;
-static int jog_ppr = 128;       /* TODO: unverified -- 128 is map_jp21.c's value,
-                                 * which is the previous unit's jog, not this
-                                 * one's. Count the CC deltas for one turn of
-                                 * the platter and set RB_JOG_PPR. */
+static int jog_ppr = 720;       /* MEASURED on the unit (docs/15 S5.1). One
+                                 * counted turn of the platter is 7183 forward
+                                 * counts (6509 of +1, 337 of +2, 17 back), so
+                                 * a nominal 10 revolutions gives 718.3
+                                 * counts/revolution. 718 would be false
+                                 * precision: the plausible design value is 720
+                                 * and the 0.24% shortfall is 8.6 degrees of arc
+                                 * on a hand turn. This is the only number the
+                                 * jog's speed depends on -- JOG_SCALE cancels
+                                 * out of speed (it scales vpos only) -- so the
+                                 * old guess of 128 (map_jp21.c's jog, a
+                                 * different platter) made every turn 5.6x too
+                                 * fast and pinned it to the 8 rev/s clamp
+                                 * below. */
 static int jog_rev = 0;         /* invert jog direction */
 static int jog_idle_ms = 120;
 static int jog_verbose = 0;
@@ -602,7 +612,7 @@ static void flx4_build(void)
      if (knob_scale < 1) knob_scale = 1;
      jog_scale = env_num("JOG_SCALE", 1);
      if (jog_scale < 1) jog_scale = 1;
-     jog_ppr = env_num("JOG_PPR", 128);
+     jog_ppr = env_num("JOG_PPR", 720);
      if (jog_ppr < 1) jog_ppr = 1;
      jog_rev = env_on("JOG_REV", 0);
      jog_idle_ms = env_num("JOG_IDLE_MS", 120);

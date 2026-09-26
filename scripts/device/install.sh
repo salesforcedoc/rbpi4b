@@ -9,7 +9,8 @@
 #
 # Untars the deploy root to RB_DEPLOY_ROOT (default /opt/rblive4), copies the
 # device scripts in beside it, and runs fix-dev.sh. Idempotent: re-running
-# upgrades in place.
+# upgrades in place, and clears stale host metadata (see the AppleDouble sweep
+# below) that an upgrade alone would leave behind.
 #
 # RB_DEPLOY_ROOT overrides the destination:
 #   sudo RB_DEPLOY_ROOT=/srv/rblive4 sh install.sh /tmp/rblive4-pi4.tgz
@@ -31,16 +32,18 @@ die()  { echo "install: ERROR: $*" >&2; exit 1; }
 [ -f "$TARBALL" ] || die "tarball not found: $TARBALL
   build it on the workstation with scripts/build-chroot.sh, then scp it here."
 
-# A 64-bit kernel is not automatically fatal -- the chroot brings its own 32-bit
-# ld.so and the kernel only needs 32-bit emulation support -- but Pi OS Lite
-# 32-bit is the tested configuration, so say so rather than let it be a mystery.
-case "$(uname -m)" in
-  armv7l|armv6l) : ;;
-  aarch64) warn "kernel is aarch64 (64-bit). The 32-bit chroot can still run if
-  the kernel has 32-bit emulation enabled; the next step tests that for real.
-  Pi OS Lite 32-bit is the tested configuration (docs/13-raspberrypi4.md)." ;;
-  *) warn "unexpected architecture '$(uname -m)'; continuing, but this is untested" ;;
-esac
+# A 64-bit kernel is not a problem, and on current Pi OS images it is the norm:
+# the 32-bit image ships the arm64 kernel (-v8) with an armhf userland on it. What
+# the chroot needs is not a 32-bit kernel but 32-bit *emulation* in the kernel
+# (CONFIG_COMPAT), because rbp and the shims are 32-bit ARM ELF and bring their
+# own 32-bit ld.so -- the userland's own bitness never enters into it. The check
+# that matters is executing a 32-bit binary, which happens below; this line only
+# reports the arrangement, so that an aarch64 `uname -m` is not read as a fault.
+# (The measured unit is exactly this case: 6.18.50+rpt-rpi-v8, with
+# `32-bit EL0 Support` in its CPU features line.)
+say "kernel: $(uname -m) $(uname -r); userland: $(getconf LONG_BIT 2>/dev/null || echo '?')-bit
+  A 64-bit kernel with a 32-bit userland is the supported arrangement; the chroot
+  test below is what proves the kernel can run 32-bit ARM ELF (docs/13-raspberrypi4.md)."
 
 # --- unpack -----------------------------------------------------------------
 
@@ -76,6 +79,41 @@ CHROOT="${RB_CHROOT:-$DEPLOY/rbx3-run}"
 LOG_DIR="${RB_LOG_DIR:-$DEPLOY/log}"
 
 mkdir -p "$LOG_DIR" "${RB_MEDIA_MOUNT:-$DEPLOY/media/usb1}"
+
+# Untarring over an existing tree upgrades in place but never *removes*
+# anything, so a deploy root that has ever received a tarball built on a
+# metadata-carrying host keeps those leftovers forever -- the tarball being clean
+# on the next deploy does not clean the target. The ones that matter are macOS's
+# AppleDouble "._name" companions: DirectFB walks each module directory and tries
+# to dlopen every entry, so each "._libdirectfb_*.so" prints an "Unable to
+# dlopen" error at startup and the module dir looks broken.
+# build-chroot.sh now strips these from the tarball; this clears whatever an
+# earlier deploy already left on the device. No legitimate file in this tree is
+# named "._*", so the sweep cannot take anything real.
+#
+# -xdev, and deliberately not -prune: -delete implies -depth, and GNU find
+# refuses to combine -depth with -prune ("-prune does nothing when -depth is in
+# effect"), exits 1, and deletes nothing -- which is how the first version of
+# this sweep reported success while removing not a single file. -xdev gets the
+# "stay on this filesystem" behaviour the prune was for, and does it better: it
+# steps over fix-dev.sh's /proc, /sys and /dev bind mounts (whose contents are
+# the host's, and whose transient PID directories make the walk noisy) without
+# ever descending into them.
+STALE_META=$(find "$DEPLOY" -xdev -name '._*' -type f 2>/dev/null | wc -l)
+if [ "$STALE_META" -gt 0 ]; then
+  find "$DEPLOY" -xdev -name '._*' -type f -delete 2>/dev/null || true
+  # Verify rather than assume: a sweep that silently removes nothing is exactly
+  # the failure above, and it should not be able to happen twice.
+  STALE_LEFT=$(find "$DEPLOY" -xdev -name '._*' -type f 2>/dev/null | wc -l)
+  if [ "$STALE_LEFT" -gt 0 ]; then
+    warn "$STALE_LEFT AppleDouble file(s) could not be removed. DirectFB will
+  log 'Unable to dlopen' for each ._libdirectfb_*.so it walks past in the module
+  directories. Remove them by hand:
+    find $DEPLOY -xdev -name '._*' -type f -delete"
+  else
+    say "removed $STALE_META stale AppleDouble file(s) left by an earlier deploy"
+  fi
+fi
 
 # --- device scripts ---------------------------------------------------------
 
