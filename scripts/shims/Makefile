@@ -205,8 +205,8 @@ pcmprobe: ../../tools/pcmprobe.c
 
 # --- unit tests ---------------------------------------------------------------
 #
-# All three run on a real ARM binary under qemu-arm, with no device, no Pi and no
-# rootfs to load. Built STATIC, like the other ARM helpers.
+# All of them run as a real ARM binary under qemu-arm, with no device, no Pi and
+# no rootfs to load. Built STATIC, like the other ARM helpers.
 #
 #   make test            (needs qemu-arm in PATH)
 #
@@ -223,13 +223,24 @@ pcmprobe: ../../tools/pcmprobe.c
 # not that it matches the unit. See that file's header.
 # test_kbd.c drives synthetic evdev triples through the real keyboard map and
 # pins the rbp keycodes that come out. evdev_io.o is deliberately NOT linked
-# into it: opening /dev/input is the one thing in this port that cannot be
-# exercised without a device.
+# into it: test_kbd is about the MAP, so it hands the map the triples itself and
+# keeps the reader out of the picture.
+# test_evdev.c is what covers the reader, and it links the PRODUCTION evdev_io.o
+# the same way test_kbd links the production map. What is faked there is not the
+# module but the kernel: -Wl,--wrap=syscall (plus --wrap=usleep and
+# --wrap=clock_gettime, for a virtual clock) turns /dev/input, poll() and the
+# sleep into a script. That is possible only because evdev_io.c reaches the
+# kernel through syscalls.h's `static inline` real_* helpers, which all go
+# through the one public syscall() symbol -- and because glibc's own internal
+# syscalls do NOT, so the fake sees this module's calls and no one else's. See
+# the header of test_evdev.c; a --wrap against a static link is the sort of
+# thing that works by luck, and the spike that confirmed it is recorded there.
 # test_cursor.c links the PRODUCTION glyph and compositing rule, because the rule
 # it pins -- that a restore only puts back a pixel that is still ours -- is
 # exactly the kind of thing that would be rewritten in a copy. Its surface is a
 # local array: no framebuffer, no thread, no device.
-TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor
+TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
+         test_evdev
 
 test_point: test_point.c tscfake.c point_xform.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -299,6 +310,29 @@ test_kbd: $(KBD_TEST_OBJS)
 	    -Wall -Wextra -static -o $@ $(KBD_TEST_OBJS) -lpthread -lm -lc
 
 test_kbd.o: test_kbd.c ctrl_map.h rbp_abi.h rbp_bridge.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -c -o $@ $<
+
+# test_evdev links the PRODUCTION evdev_io.o (and shimutil.o, for klog/env_text),
+# with the syscall boundary wrapped. The three wraps are the whole seam:
+#
+#   syscall           /dev/input/event*, ioctl, read, poll, close and the log's
+#                     write all come through here (syscalls.h)
+#   usleep            the reader's only sleeps; wrapped so they cost no real time
+#   clock_gettime     a virtual clock, because the property under test is a
+#                     LATENCY (shim_now_ms is clock_gettime)
+#
+# The five scenarios fork, so each gets a virgin reader; see the file's header.
+# No device, no rootfs, no Pi: `qemu-arm ./test_evdev` is the whole invocation.
+EVD_TEST_OBJS := test_evdev.o evdev_io.o shimutil.o
+
+test_evdev: $(EVD_TEST_OBJS)
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ $(EVD_TEST_OBJS) \
+	    -Wl,--wrap=syscall -Wl,--wrap=usleep -Wl,--wrap=clock_gettime \
+	    -lpthread -lm -lc
+
+test_evdev.o: test_evdev.c evdev_io.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -c -o $@ $<
 
