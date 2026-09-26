@@ -499,6 +499,11 @@ int main(void)
      round_trip();
      parser_tolerance();
 
+     /* build() is ADDITIVE (ctrl_bindings_reset() belongs to the front end, which
+      * calls it once before building either surface), so the exact counts below
+      * and in the flx4 suite are only meaningful because this is the first and
+      * only build in a virgin process. Do not add a second surface's build above
+      * this line without resetting first. */
      map_jp21.build();
      CHECK(note_map_n > 0 && abs_map_n > 0,
            "the map built %d notes and %d absolute controls",

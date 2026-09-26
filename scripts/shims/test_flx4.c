@@ -674,6 +674,12 @@ int main(void)
      round_trip();
      parser_tolerance();
 
+     /* build() is ADDITIVE -- ctrl_bindings_reset() is the front end's, called
+      * once before either surface is built -- so every count asserted below is
+      * only the map's own rows because this is the first and only build in a
+      * virgin process. Building a second surface here without resetting first
+      * would fold its rows into these numbers and the failure would read as a
+      * wrong count rather than as a missing reset. */
      map_flx4.build();
 
      /* The tables' sizes, spelled out rather than merely "non-empty": a row that
