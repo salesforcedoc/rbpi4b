@@ -100,6 +100,7 @@ port.
 |---|---|---|
 | `space` / `z` / `x` | `0x4101` K_PLAY / `0x4102` K_CUE / `0x4112` K_SYNC | deck 1 |
 | `n` / `m` / `,` | the same three | deck 2 |
+| `w` / `s` | `0x4101` K_PLAY | deck 1 / 2 |
 | `1` / `2` | `0x4311` K_LOAD | deck 1 / 2 |
 | `5` / `6` / `7` | `0x0201` K_SOURCE / `0x0202` K_BROWSE / `0x0203` K_TAGLIST | global |
 | `0` | `0x0206` K_MENU | global |
@@ -178,16 +179,28 @@ knobshim2: kbd: evdev type=1 code=57 value=2 -> 0x4101 ignored   <-- autorepeat
 The node list is logged whether or not `KNOB_VERBOSE` is on, because "which
 device did it open" is the question that matters when nothing works.
 
-**Status: written, cross-compiled and fixture-tested — never run with real input
-devices.** The bindings above are asserted against synthetic evdev triples in
-`make -C scripts/shims test` (`test_kbd`, ~300 checks), which pins the deck
-channels, the wheel's direction, the right-button, the press/autorepeat/release
-edges and the rotation clamp. What that cannot check is the two things only a
-device can: that `evdev_io.c` opens and reads the right nodes, and whether rbp's
-list scrolls *up* for `↑` or for `↓`. The wheel and the arrows agree with each
-other and with the direction the JP21 map's knob sends for a clockwise turn; if
-the list turns out to be inverted on hardware, it is three sign flips in
-`map_kbd.c`'s table (`↑`, `↓` and the wheel) and nothing else.
+**Status: run on hardware** (2026-09-26). The bindings are asserted against
+synthetic evdev triples in `make -C scripts/shims test` (`test_kbd`, ~360
+checks), which pins the deck channels, the wheel's direction, the right-button,
+the press/autorepeat/release edges and the rotation clamp; the keys have since
+been driven on the unit through a virtual keyboard
+(`tools/pi-bringup/`), which is what measured the release defect below and the
+arrow sign.
+
+**The arrows are inverted relative to the wheel, on purpose.** With `↑` at `+1`
+and `↓` at `-1` the operator reported the pair working backwards, so `↑` is now
+`-1` and `↓` is `+1`, and the wheel stays at `+1` — "away from the user" and
+"down the list" are the same motion. That sign is the operator's observation and
+not a measurement: it cannot be read off the SOURCE panel, which has nothing to
+move between. Full account in [16](16-input-and-hotplug.md).
+
+**A release used to be lost, and that is fixed.** `evdev_io.c` ran its device
+discovery at the top of every loop iteration, so every poll round closed and
+reopened every node; a key release landing in that window was discarded, the
+map's held-key latch stayed set, and the next press of that key was ignored —
+every press/release key worked once per run. A 120 ms press now delivers its
+release, and a device hot-plugged into a running player is picked up within a
+second ([16](16-input-and-hotplug.md)).
 
 ## Finding the controller
 

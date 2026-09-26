@@ -60,7 +60,9 @@
 #define KEY_9         10
 #define KEY_0         11
 #define KEY_BACKSPACE 14
+#define KEY_W         17
 #define KEY_ENTER     28
+#define KEY_S         31
 #define KEY_Z         44
 #define KEY_X         45
 #define KEY_N         49
@@ -109,6 +111,12 @@ static struct kbd_bind binds[] = {
      { EV_KEY, KEY_M,     K_CUE,  2, 0, 0 },
      { EV_KEY, KEY_COMMA, K_SYNC, 2, 0, 0 },
 
+     /* ---- W and S: PLAY on deck 1 and deck 2, for the hand that is not on
+      * the bottom row. Requested by the operator on 2026-09-26 and additive --
+      * SPACE and N stay where they are. ---- */
+     { EV_KEY, KEY_W,     K_PLAY, 1, 0, 0 },
+     { EV_KEY, KEY_S,     K_PLAY, 2, 0, 0 },
+
      /* ---- LOAD: the keys the deck numbers are printed on. LOAD is rbp's
       * global keycode with the deck in the channel -- map_jp21.c sends it the
       * same way (its notes 1/2 on the global receive channel, send channel
@@ -149,11 +157,22 @@ static struct kbd_bind binds[] = {
      /* ---- the browse selector: one control, so one channel. The arrows rotate
       * it, Enter pushes it, and the wheel rotates it like the arrows do. The
       * step is the same +1/-1 map_jp21.c's handle_knob_pos() sends for a
-      * clockwise/counter-clockwise turn of the panel's knob; the WHEEL and the
-      * ARROWS agree with each other, and the sign against rbp's list has never
-      * been observed (see the note under the table). ---- */
-     { EV_KEY, KEY_UP,    K_SELECTOR, CH_GLOBAL, +1, 0 },
-     { EV_KEY, KEY_DOWN,  K_SELECTOR, CH_GLOBAL, -1, 0 },
+      * clockwise/counter-clockwise turn of the panel's knob.
+      *
+      * The signs were inverted on 2026-09-26: with UP at +1 and DOWN at -1 the
+      * operator reported the pair working backwards, which is the first
+      * observation of the sign either way. It could not be measured here --
+      * both keys provably arrive (`code=103/108 -> 0x420c rotate`) but the
+      * SOURCE panel's frame is byte-identical after each press, because with
+      * one USB attached there is nothing for the selector to move between. So
+      * the sign is the operator's result, taken on a screen with a list in it.
+      *
+      * The WHEEL is left at +1 deliberately rather than flipped with them. It
+      * was not reported as wrong, and +1 is what makes it agree with DOWN: a
+      * wheel rolled away from the user moves down the list, which is the
+      * natural correspondence. See docs/16-input-and-hotplug.md. ---- */
+     { EV_KEY, KEY_UP,    K_SELECTOR, CH_GLOBAL, -1, 0 },
+     { EV_KEY, KEY_DOWN,  K_SELECTOR, CH_GLOBAL, +1, 0 },
      { EV_KEY, KEY_ENTER, K_SELECTOR, CH_GLOBAL,  0, 0 },
      { EV_REL, REL_WHEEL, K_SELECTOR, CH_GLOBAL, +1, 0 },
 
@@ -276,7 +295,8 @@ static void kbd_build(void)
           binds[i].down = 0;
 
      klog("knobshim2: kbd: keyboard fallback: space/z/x and n/m/, = "
-          "PLAY/CUE/SYNC deck 1/2, 1/2 = LOAD, arrows/wheel + Enter = selector, "
+          "PLAY/CUE/SYNC deck 1/2 (w/s also PLAY 1/2), 1/2 = LOAD, "
+          "arrows/wheel + Enter = selector, "
           "Backspace/Esc/right-button = BACK/SOURCE\n");
      /* Said at build time and not only under KNOB_VERBOSE=1, because the two
       * pending keys are otherwise indistinguishable from working ones until

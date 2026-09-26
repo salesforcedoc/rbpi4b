@@ -31,8 +31,10 @@
  *     the other side of it: that this map knows what to do with a raw triple.
  *   - The sign of the selector rotation against rbp's list. map_kbd.c sends the
  *     same +1/-1 that map_jp21.c's knob sends for a clockwise turn, and that is
- *     asserted here; whether rbp's list scrolls up or down for it has never been
- *     observed. See the note under the binding table in map_kbd.c.
+ *     asserted here; whether rbp's list scrolls up or down for it had never been
+ *     observed, and the operator's correction of 2026-09-26 (the pair worked
+ *     backwards) is what the assertion now encodes. See the note under the
+ *     binding table in map_kbd.c and docs/16-input-and-hotplug.md.
  *
  * One side effect worth knowing about, the same one test_midi.c has: klog() is
  * unconditional, so running this appends a few lines to /tmp/knobshim.log.
@@ -76,7 +78,9 @@
 #define KEY_9         10
 #define KEY_0         11
 #define KEY_BACKSPACE 14
+#define KEY_W         17
 #define KEY_ENTER     28
+#define KEY_S         31
 #define KEY_Z         44
 #define KEY_X         45
 #define KEY_N         49
@@ -199,6 +203,12 @@ static const struct step steps[] = {
      { "deck 2 SYNC down",     EV_KEY, KEY_COMMA, 1, 1, { W(K_SYNC, OP_PRESS, 2, 0) } },
      { "deck 2 SYNC up",       EV_KEY, KEY_COMMA, 0, 1, { W(K_SYNC, OP_RELEASE, 2, 0) } },
 
+     /* ---- w / s: PLAY on deck 1 and deck 2, additive to space/n ---------- */
+     { "W deck 1 PLAY down",   EV_KEY, KEY_W, 1, 1, { W(K_PLAY, OP_PRESS, 1, 0) } },
+     { "W deck 1 PLAY up",     EV_KEY, KEY_W, 0, 1, { W(K_PLAY, OP_RELEASE, 1, 0) } },
+     { "S deck 2 PLAY down",   EV_KEY, KEY_S, 1, 1, { W(K_PLAY, OP_PRESS, 2, 0) } },
+     { "S deck 2 PLAY up",     EV_KEY, KEY_S, 0, 1, { W(K_PLAY, OP_RELEASE, 2, 0) } },
+
      /* The two decks are separate holds: deck 2's PLAY does not touch deck 1's
       * latch, and both may be down at once. */
      { "deck 1 PLAY down",     EV_KEY, KEY_SPACE, 1, 1, { W(K_PLAY, OP_PRESS, 1, 0) } },
@@ -233,13 +243,21 @@ static const struct step steps[] = {
      { "SEARCH down (no rbp keycode yet)",   EV_KEY, KEY_9, 1, 0, { {0,0,0,0} } },
      { "SEARCH up (no rbp keycode yet)",     EV_KEY, KEY_9, 0, 0, { {0,0,0,0} } },
 
-     /* ---- the selector: the arrows and the wheel rotate, Enter pushes ---- */
-     { "selector up",          EV_KEY, KEY_UP, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
-     { "selector up (autorepeat repeats the step)", EV_KEY, KEY_UP, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
+     /* ---- the selector: the arrows and the wheel rotate, Enter pushes ----
+      *
+      * The signs: UP is -1 and DOWN is +1 as of 2026-09-26. They were the other
+      * way round and the operator reported the pair working backwards, which is
+      * the only observation of the sign there has been -- it cannot be measured
+      * on the SOURCE panel, which has nothing to move between. The WHEEL is
+      * still +1, i.e. it now agrees with DOWN ("away from the user" = "down the
+      * list"), and this assertion is what will catch a later well-meaning flip
+      * of one and not the other. docs/16-input-and-hotplug.md. ---- */
+     { "selector up",          EV_KEY, KEY_UP, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
+     { "selector up (autorepeat repeats the step)", EV_KEY, KEY_UP, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
      { "selector up release (a step holds nothing)", EV_KEY, KEY_UP, 0, 0, { {0,0,0,0} } },
-     { "selector down",        EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
-     { "selector down (autorepeat)", EV_KEY, KEY_DOWN, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
-     { "selector down again",  EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
+     { "selector down",        EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
+     { "selector down (autorepeat)", EV_KEY, KEY_DOWN, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
+     { "selector down again",  EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
      { "selector down release", EV_KEY, KEY_DOWN, 0, 0, { {0,0,0,0} } },
 
      { "selector push down",   EV_KEY, KEY_ENTER, 1, 1, { W(K_SELECTOR, OP_PRESS, CH_GLOBAL, 0) } },

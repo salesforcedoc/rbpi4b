@@ -253,14 +253,26 @@ codec's power-up; here it would be USB audio settling. `audioshim.so` can hold
 every output channel at zero for `STARTUP_MUTE_MS` after the first write and
 then fade in over `STARTUP_FADE_MS`.
 
-**Both default to `0` on the Pi**, and `rb.conf` ships them that way. USB audio
-has no codec power-up transient to mask, so muting by default would trade a real
-silence for a hypothetical click. Turn them on if a particular interface turns
-out to need it:
+**Both default to 1500 ms and 300 ms on the Pi**, and `rb.conf` ships them that
+way. They were `0` on the theory that USB audio has no codec power-up transient
+to mask — but the FLX4 was found to thump on open, a loud pop/buzz the moment
+rbp first touches the card (2026-09-26), so the theory was wrong for the card
+this port is aimed at. The cost when a card does not need it is 1.5 s of
+silence at startup.
 
-```sh
-RB_STARTUP_MUTE_MS=1500 RB_STARTUP_FADE_MS=300
+A card that is *late* rather than noisy wants the opposite: set them back to 0
+in `rb.local.conf`, or lower `STARTUP_MUTE_MS`, so the port does not sit silent
+for longer than the audio takes to arrive. The log line to watch is the shim's
+own:
+
 ```
+audioshim: config ... mute=1500ms fade=300ms
+audioshim: startup mute released after 79424 frames
+```
+
+79424 frames at 44100 Hz is 1.8 s — the 1500 ms mute plus the 300 ms fade, so
+the arithmetic in that line is also a check that the values in force are the
+ones intended.
 
 ## VU meters
 

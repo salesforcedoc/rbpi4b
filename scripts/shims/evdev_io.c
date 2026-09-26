@@ -7,6 +7,19 @@
  * state and a replug needs no special case -- the same shape fbshim.so's
  * pointsrc.c uses for the pointer.
  *
+ * Two things about that loop are load-bearing, and both are fixes rather than
+ * design choices (docs/16-input-and-hotplug.md):
+ *
+ *  - Devices are opened ONCE and left open. The loop used to run its discovery
+ *    at the top of every iteration, so every poll round closed and reopened
+ *    every node; evdev queues events per open client, so a key release that
+ *    landed in that window was discarded, map_kbd.c's held-key latch stayed set
+ *    and the next press of that key was ignored. A human press is ~100 ms and
+ *    was reliably lost.
+ *  - poll() has a deadline (EVDEV_IDLE_MS), on which the device set is
+ *    re-checked. A hot-plugged device is otherwise never noticed: with no
+ *    events there is no iteration to notice it in.
+ *
  * Everything here is `static` except evdev_start(): the objects in this shim are
  * compiled -fvisibility=hidden, and nothing in this file belongs in the dynamic
  * symbol table (see the Makefile's note on knobshim.so's 17 exports).
@@ -68,6 +81,13 @@ _Static_assert(sizeof(struct evdev_event) == 16,
  * many events to take from one device before giving the others a turn. */
 #define EVDEV_RESCAN_MS 500
 #define EVDEV_DRAIN_MAX 64
+
+/* How long poll() waits before it reports "nothing happened". This is a tick and
+ * not a timeout in the usual sense: nothing is torn down when it expires, it is
+ * the moment the device set is re-checked (unseen_source below). Without it the
+ * thread parks in poll() for as long as the machine is idle -- which is exactly
+ * when someone plugs a keyboard back in. */
+#define EVDEV_IDLE_MS 1000
 
 struct evdev_src {
     int  fd;
@@ -199,8 +219,11 @@ static int drain_source(int idx)
 }
 
 /* One poll() round over every open device. Returns -1 when one of them has to
- * be re-discovered, 0 when they are all still fine. */
-static int poll_round(void)
+ * be re-discovered, 1 when the deadline passed with nothing to read, 0
+ * otherwise -- events handled, or the poll was interrupted by a signal, which
+ * is not a reason to tear anything down. The caller must not rescan on 0 or 1
+ * (see the top of this file): only -1 means the open set is wrong. */
+static int poll_round(int timeout_ms)
 {
     struct pollfd pfd[EVDEV_SCAN_MAX];
     int r;
@@ -211,13 +234,15 @@ static int poll_round(void)
         pfd[i].revents = 0;
     }
 
-    r = real_poll(pfd, (nfds_t)n_sources, -1);
+    r = real_poll(pfd, (nfds_t)n_sources, timeout_ms);
     if (r < 0) {
         if (errno == EINTR)
             return 0;
         klog("knobshim2: evdev: poll: %s; rescanning\n", strerror(errno));
         return -1;
     }
+    if (r == 0)
+        return 1;              /* the deadline: nothing to read */
 
     for (int i = 0; i < n_sources; i++) {
         if (pfd[i].revents & POLLNVAL) {
@@ -231,6 +256,46 @@ static int poll_round(void)
                      sources[i].path);
                 return -1;
             }
+        }
+    }
+    return 0;
+}
+
+/* Is there a device carrying EV_KEY that this reader does not have open?
+ *
+ * Called on the idle tick, and cheap because it only opens what we do NOT
+ * already hold: the nodes being read are left alone (closing one is what loses
+ * a queued release), and a node we keep rejecting -- the HDMI CEC interfaces
+ * have no EV_KEY -- costs an open and one ioctl each time.
+ *
+ * A pinned KBD_DEV has nothing to discover: the only change that matters is
+ * holding some other node, which the caller's scan already fails on. */
+static int unseen_source(const char *pin)
+{
+    if (pin)
+        return n_sources != 1 || strcmp(sources[0].path, pin) != 0;
+
+    for (int i = 0; i < EVDEV_SCAN_MAX; i++) {
+        char path[EVDEV_PATH_MAX];
+        char name[EVDEV_NAME_MAX];
+        int fd, have = 0;
+
+        snprintf(path, sizeof path, "/dev/input/event%d", i);
+        for (int s = 0; s < n_sources; s++)
+            if (strcmp(sources[s].path, path) == 0) {
+                have = 1;
+                break;
+            }
+        if (have)
+            continue;
+
+        /* Opening it is the test: open_source() rejects anything without
+         * EV_KEY, which is the same filter discovery uses. */
+        fd = open_source(path, name, sizeof name);
+        if (fd >= 0) {
+            real_close(fd);
+            klog("knobshim2: evdev: %s '%s' appeared; rescanning\n", path, name);
+            return 1;
         }
     }
     return 0;
@@ -260,8 +325,19 @@ static void *evdev_thread(void *arg)
         }
         had_sources = 1;
 
-        if (poll_round() < 0)
-            usleep(EVDEV_RESCAN_MS * 1000);
+        /* Read until something goes wrong. A round that read events, or that
+         * found nothing to read, leaves the devices open: the only rescan is
+         * the idle tick's answer to "has a device appeared?", and the failure
+         * path. */
+        for (;;) {
+            int r = poll_round(EVDEV_IDLE_MS);
+
+            if (r < 0)
+                break;                       /* rescan */
+            if (r == 1 && unseen_source(pin))
+                break;                       /* a device appeared: rescan */
+        }
+        usleep(EVDEV_RESCAN_MS * 1000);
     }
     return NULL;
 }
