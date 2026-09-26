@@ -24,7 +24,7 @@ tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 
 | Subsystem | Detail | Doc |
 |---|---|---|
-| Display | HDMI, forced to 1280×800 (the monitor's native mode with letterboxed bars is the fallback), rekordbox UI full-screen | [docs/06](docs/06-display.md), [docs/13](docs/13-raspberrypi4.md) |
+| Display | HDMI at 1280×800 — the mode is forced via `video=` and the measured panel takes it, so the fb matches `rbp`'s 1280×800×16 RGB565 surface exactly: no scaling, no bars, no crop | [docs/06](docs/06-display.md), [docs/13](docs/13-raspberrypi4.md) |
 | Pointing | No touchscreen on a monitor: an evdev pointer (touch panel or mouse) is discovered by capability and transformed into the tsc2007 protocol `rbp` reads | [docs/07](docs/07-touch.md) |
 | Controls | transport, decks, mixer, jog and pads mapped from the DDJ-FLX4 MIDI surface — the tables are written from Pioneer's published MIDI message list and are unverified until a dump from the hardware, see [docs/15](docs/15-flx4-midi.md) | [docs/08](docs/08-controls.md), [docs/15](docs/15-flx4-midi.md) |
 | Panel LEDs | PLAY / CUE / SYNC / FX LEDs mirror rbp's own LED state (blink included) | [docs/08](docs/08-controls.md) |
@@ -55,8 +55,16 @@ unit.** Read it with [docs/13](docs/13-raspberrypi4.md)'s bring-up table
   nothing more. The LED bridge is a step further behind — `RB_LED_DISABLE=1` is
   this target's interim setting, because `rbp_led.c` still carries the previous
   target's notes.
-* **Not yet written:** the generalized DirectFB present path, gated on two
-  measurements nobody has taken yet.
+* **The generalized DirectFB present path is in the patch and the stack builds
+  from it** — and the measurements that were gating it say the Pi needs
+  **no** present mode at all: the fb is `rbp`'s surface exactly, so `off` is the
+  destination rather than a rung. What did need fixing was buffering: the fb has
+  one page while the stock driver forced three buffers, and the buffer mode now
+  comes from the **page count** instead of `ypanstep`
+  ([docs/06](docs/06-display.md#the-present-path)). S2.2 in
+  [docs/13](docs/13-raspberrypi4.md#bring-up-order) is the on-device test.
+* **Never yet run on the Pi:** nothing in this tree has been launched on the
+  hardware. The tarball itself is waiting on the DirectFB build.
 
 Where a number in these documents is an expectation rather than a measurement,
 it says so; [docs/README](docs/README.md) explains the convention.
@@ -107,14 +115,19 @@ expects.
 
 ## Why it works
 
-Pi OS 32-bit is `armv7l`/armhf — a **hard-float kernel**, exactly the same
-arrangement as the previous target — so the soft-float chroot runs untouched.
+Pi OS 32-bit is `armhf` on a **hard-float kernel**, so the soft-float chroot runs
+untouched — the same arrangement as the previous target. (The measured Pi's
+kernel is `aarch64`; what the chroot needs is 32-bit emulation in the kernel, not
+a 32-bit kernel.)
+
 Three things carry over nearly intact, and they are the expensive parts:
 
 * **The chroot recipe.** Every 32-bit-ARM-only constraint in the shims is
   *satisfied*, not violated: 32-bit `smem_start`/`time_t` in the fb structs,
-  `SYS_mmap2`, `uc_mcontext.arm_*`, ARM32 machine-code patching. A 64-bit image
-  would break all of them.
+  `SYS_mmap2`, `uc_mcontext.arm_*`, ARM32 machine-code patching. They are
+  constraints on the chroot's own 32-bit binaries — there is no 64-bit `rbp` — so
+  the kernel only has to execute 32-bit ARM ELF, which current Pi OS kernels do
+  even though their kernel is 64-bit.
 * **The `rbp` patch table.** All 68 words plus the 2-word `getPcController()`
   fix. Every patch's justification is a property of the *binary and the absent
   Pioneer hardware*, not of the machine underneath: there is no Pioneer panel
@@ -127,11 +140,12 @@ Three things carry over nearly intact, and they are the expensive parts:
 
 What does have to change is everything that named a device:
 
-* **Display** — `/dev/fb0` is now `vc4drmfb`, DRM fbdev emulation over HDMI,
-  expected to be 16 bpp RGB565 at 1280×800 rather than a portrait 32 bpp panel
-  (the expectation is `drm_fb_helper`'s, and `tools/fbdump` settles it on the
-  day). The present path has to cope with a monitor that may not accept the mode
-  we ask for.
+* **Display** — `/dev/fb0` is now `vc4drmfb`, DRM fbdev emulation over HDMI, and
+  `tools/fbdump` measured it as 16 bpp RGB565 at 1280×800: the same format and
+  the same geometry as `rbp`'s logical surface, rather than a portrait 32 bpp
+  panel. So there is no transform to do — but the fb holds **one page** while
+  the stock driver asked for three buffers, and that is what the patch's
+  page-count buffer mode fixes.
 * **Pointing** — there is no touchscreen. The tsc2007 protocol `rbp` reads is
   kept byte-for-byte, but what feeds it is now a discovered evdev pointer.
 * **Controls** — the FLX4 sends different messages than any earlier surface,

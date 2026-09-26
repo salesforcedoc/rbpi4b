@@ -10,10 +10,12 @@ monitor and a DDJ-FLX4.
 ## 0. Prerequisites
 
 * **Workstation (Linux, or WSL):** `arm-linux-gnueabi-gcc`,
-  `libc6-dev-armel-cross`, `python3`, `tar`, plus the DirectFB build tools (see
+  `libc6-dev-armel-cross`, `python3`, `tar`, plus the DirectFB build tools —
+  which include the **`flux` IDL compiler**, a separate package because
+  DirectFB fetched from git does not ship the source files it generates (see
   [tools/build-directfb](tools/build-directfb/README.md)). The shim build can
   be run in the repo's Docker image if the float-ABI toolchain is awkward to
-  install; the DirectFB build needs a native or emulated ARM toolchain.
+  install; the DirectFB build needs a native compiler *and* a cross one.
 * **Extracted assets:** an `XDJRX3-rootfs/`, the GUI assets and `rbp-audio`
   (stock `rbp` + the shared patches). See
   [docs/04](docs/04-firmware-assets.md).
@@ -21,11 +23,17 @@ monitor and a DDJ-FLX4.
   ```sh
   ssh pi@<host>
   ```
-  Confirm the image before anything else — a 64-bit install breaks every shim:
+  Confirm the image before anything else. What matters is that the kernel can
+  execute 32-bit ARM ELF — **not** that its name says `armv7l`, because current
+  Pi OS 32-bit images ship a 64-bit `-v8` kernel:
   ```sh
-  uname -m                     # armv7l
-  dpkg --print-architecture    # armhf
+  getconf LONG_BIT                     # 32   (userland)
+  dpkg --print-architecture            # armhf
+  dmesg | grep -c '32-bit EL0 Support' # 1    (the kernel can run it)
   ```
+  `install.sh` prints the same two facts and then tests the chroot for real, so
+  if this looks different from the above, read what it says rather than the
+  `uname` line.
   Then follow [docs/13](docs/13-raspberrypi4.md) for the `cmdline.txt` recipe
   (it is what makes the HDMI mode, and therefore the display, deterministic) and
   reboot before continuing.
@@ -107,7 +115,7 @@ else.
 
 | Check | Expectation |
 |---|---|
-| `tools/fbdump` (after the `cmdline.txt` recipe + reboot) | the geometry you asked for, or the monitor's native mode — which is a letterbox trigger, not a failure |
+| `tools/fbdump` (after the `cmdline.txt` recipe + reboot) | **measured: 1280×800, 16 bpp RGB565, `line_length` 2560, `smem_len` 2048000 (one page)** — the panel takes a `video=` mode its EDID never advertised, so the fb matches `rbp`'s surface exactly and the verdict line reads `geometry MATCHES`. `110 x 60 mm` means the EDID is still unread, i.e. the mode is forced, not negotiated. If a sink does refuse the timings you get 1280×720 back instead — then read [docs/06](docs/06-display.md) before assuming the display path is broken |
 | UI on the monitor | rekordbox UI, full-screen ([docs/06](docs/06-display.md)) |
 | `tools/evdevdump --list`, then point at the screen | rb reacts; see the four-corner procedure in [docs/07](docs/07-touch.md) |
 | `speaker-test` on the FLX4, then load + play | master out on the RCA, cue on the headphone jack ([docs/09](docs/09-audio.md)) |

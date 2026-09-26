@@ -1,9 +1,12 @@
 # 05 — Soft-float chroot on the Pi
 
 `rbp` runs from `/opt/rblive4/rbx3-run`, a soft-float glibc-2.13 RX3 userland.
-The Pi's kernel is `armv7l`/armhf (hard-float) and executes soft-float EABI ELF
-natively, which is the whole reason this works — **a 64-bit image would break
-every shim** in the port. An 8 GB card holds the tree with room to spare.
+The kernel executes soft-float EABI ELF natively — it needs 32-bit EL0 support,
+not a 32-bit kernel — which is the whole reason this works: the chroot carries
+its own 32-bit `ld.so` and its own 32-bit binaries, so **nothing in the port
+depends on the host's own bitness**, and the measured unit runs an arm64 kernel
+on a 32-bit image ([13](13-raspberrypi4.md)). An 8 GB card holds the tree with
+room to spare.
 
 The chroot is **~150–250 MB** extracted — an estimate from the tree, not a
 measurement, and not a typo for the ~60 MB the previous target's copy of this
@@ -19,7 +22,9 @@ deploy root and tars it to `work/rblive4-pi4.tgz`:
 1. **RX3 rootfs** (`extracted/XDJRX3-rootfs`) — soft-float glibc 2.13,
    libstdc++, DirectFB, freetype, ALSA, `edb_streamd`, busybox.
 2. **GUI assets** → `rbx3-run/root/gui/{fontdata,imagedata,pset,system}` (rbp
-   reads `/root/gui/pset/...` and `/root/gui/system/...`).
+   reads `/root/gui/pset/...` and `/root/gui/system/...`). The four directories
+   are split across two source roots and are resolved one at a time; see
+   [04](04-firmware-assets.md#what-you-need).
 3. **Patched player** → `rbx3-run/root/pdj/rbp` (shared rbp patches + the
    `getPcController` fix — see
    [`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py)). The patch is
@@ -27,7 +32,10 @@ deploy root and tars it to `work/rblive4-pi4.tgz`:
    no-op, and the Pi fails the same board check the previous target did.
 4. **Shims** → `rbx3-run/usr/lib/{fbshim,knobshim,audioshim,crashcatch}.so`.
 5. **DirectFB 1.4.16 stack** — core libs + the patched fbdev module +
-   inputdrivers/wm, in `rbx3-run/usr/lib/directfb-1.4-6/`.
+   inputdrivers/wm, in `rbx3-run/usr/lib/directfb-1.4-6/`. The fbdev module is
+   the one that carries the page-count buffer mode and the present path
+   ([06](06-display.md#the-present-path)); its sha256 in the chroot should match
+   `work/dfb/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so`.
 6. **`rbx3-run/usr/etc/directfbrc`** (`no-hardware`/`no-cursor`/`system=fbdev`/
    `fbdev=/dev/fb0`) and **`rbx3-run/root/settings/TouchCalib_{User,Factory}.dat`**.
 7. **`rb.conf`** at the deploy root — the single place machine-specific values

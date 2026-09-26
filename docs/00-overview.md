@@ -2,10 +2,11 @@
 
 rblive4 runs the **Pioneer DJ XDJ-RX3 standalone rekordbox player** (`rbp`,
 called `rb` internally) on a **Raspberry Pi 4B**. The XDJ-RX3 firmware builds
-its player as **soft-float ARM32**; Pi OS 32-bit is armv7l with a hard-float
-kernel, which executes soft-float EABI ELF natively — the same arrangement the
-Prime GO and SC Live 4 ports relied on, and the reason a 64-bit image is not an
-option.
+its player as **soft-float ARM32**; a Pi executes soft-float EABI ELF natively —
+the same arrangement the Prime GO and SC Live 4 ports relied on. What that needs
+is 32-bit *emulation* in the kernel (`32-bit EL0`/`CONFIG_COMPAT`), not a 32-bit
+kernel, and Pi OS provides it: the measured unit runs an arm64 kernel on a 32-bit
+image and reports `32-bit EL0 Support` ([13](13-raspberrypi4.md)).
 
 There is no emulation. The real `rbp` binary from the XDJ-RX3 firmware runs
 directly, with a set of thin shims translating the Pi's hardware — HDMI
@@ -44,8 +45,8 @@ of the whole thing.
 
 | Mismatch | XDJ-RX3 has | Pi 4 has | Solution |
 |---|---|---|---|
-| CPU float ABI | soft-float ARM32 | hard-float armv7l kernel | soft-float chroot; the kernel runs soft-float ELF natively |
-| Display | 1280×800 landscape, RGB565 | `vc4drmfb` over HDMI, 16 bpp RGB565 expected | rebuilt DirectFB fbdev driver; the present path bridges any geometry/format difference |
+| CPU float ABI | soft-float ARM32 | hard-float kernel, armhf userland | soft-float chroot; the kernel runs soft-float ELF natively, and only needs 32-bit emulation to do it (its own bitness does not matter) |
+| Display | 1280×800 landscape, RGB565 | `vc4drmfb` over HDMI, measured 1280×800 at 16 bpp RGB565 — `rbp`'s own surface | rebuilt DirectFB fbdev driver: the present path bridges any geometry/format difference, and on this target the difference is **none** — what needed fixing was the buffer mode, decided from the fb's page count |
 | Pointing | tsc2007 resistive via `/dev/tsc2007_2-0048` | **no touchscreen** — an evdev pointer | `fbshim.so` synthesises the tsc2007 protocol from a discovered evdev device |
 | Controls | Pioneer front-panel MCUs (EUP/SUB) | DDJ-FLX4 over USB MIDI | `knobshim.so` maps MIDI → `sendKey()` |
 | Audio | 3× discrete CS4344 DACs | the FLX4's 4-channel USB audio | `audioshim.so` maps rbp's streams onto the FLX4's output pairs |
@@ -111,10 +112,14 @@ four machines in [02 — Hardware](02-hardware.md), and the reuse/change plan in
   measurement, the document says so; [docs/README](README.md) explains the
   convention, and [13](13-raspberrypi4.md)'s bring-up table is the honest
   current state.
-* **Use the 32-bit image.** 64-bit Pi OS breaks every constraint the shims
-  depend on (32-bit `smem_start`/`time_t`, `SYS_mmap2`, `uc_mcontext.arm_*`,
-  ARM32 machine-code patching). The chroot may still run under a 64-bit kernel
-  with 32-bit emulation, but that is untested and not supported.
+* **Use the 32-bit image — and do not be alarmed if the kernel is 64-bit.** The
+  shims' 32-bit-ARM-only constraints (32-bit `smem_start`/`time_t`, `SYS_mmap2`,
+  `uc_mcontext.arm_*`, ARM32 machine-code patching) are properties of the
+  *chroot's* binaries, which are 32-bit whatever the host runs — there is no
+  64-bit `rbp`. So what the kernel must provide is 32-bit emulation, not a 32-bit
+  kernel, and current Pi OS 32-bit images already ship the arm64 kernel.
+  `install.sh` prints both and then tests it for real by executing a 32-bit
+  binary in the chroot.
 * **The HDMI mode comes from the kernel command line**, not `config.txt`, and
   the kernel console must be moved off the framebuffer
   ([13](13-raspberrypi4.md#the-hdmi-mode)). Getting this wrong looks like a

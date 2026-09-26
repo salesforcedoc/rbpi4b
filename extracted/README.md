@@ -11,9 +11,13 @@ it should look like:
 extracted/
 ├── XDJRX3.iso              decrypted firmware ISO
 ├── XDJRX3/                 ISO contents (images/, pdj/, gui/, lib/, usr/, …)
-├── XDJRX3-gui/             gui.tar.gz contents (fonts! required by rbp)
+│                           XDJRX3/gui = fontdata, imagedata (read by `update`)
+├── XDJRX3-gui/             images/gui.tar.gz unpacked: pset, system
+│                           -- this tarball IS the gui partition; rbp opens its
+│                           fonts from pset/fontdata and system/fontdata, so
+│                           the two gui trees are both needed (docs/04)
 ├── XDJRX3-rootfs/          rootfs.cramfs contents (glibc 2.13, edb_streamd, …)
-└── stock-rbp               pdj/rbp, md5 4f2efcfc0c9e3f539289f863acfddcc6
+└── stock-rbp/              pdj/rbp, md5 4f2efcfc0c9e3f539289f863acfddcc6
 ```
 
 The patched player and the built shims are produced from these files:

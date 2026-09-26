@@ -4,6 +4,9 @@ Local scratch space, **gitignored** except for this file.
 
 Put anything here that is generated locally and must never be committed:
 
+* `dfb-src/` — the pristine DirectFB 1.4.16 git tree the diff is applied to
+* `flux-src/` — the `flux` package, whose `fluxcomp` IDL compiler a git build of
+  DirectFB needs (see [`tools/build-directfb`](../tools/build-directfb/README.md))
 * `dfb/` — the DirectFB 1.4.16 install staged by
   [`tools/build-directfb`](../tools/build-directfb/README.md)
 * `rbx3-run.tgz` — the chroot built by

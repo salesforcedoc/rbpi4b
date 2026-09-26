@@ -40,10 +40,13 @@ install to `work/dfb` (see the [README](build-directfb/README.md)).
 
 The patched fbdev driver makes its decisions from fields that differ per SoC and
 per kernel: `bits_per_pixel` and the channel bitfields decide whether a pixel
-conversion is needed at all, `yres_virtual`/`ypanstep` decide whether the fb can
-be double-buffered, `line_length` is the physical stride and `smem_len` bounds
-the mmap. Guessing any of these wastes a build cycle; measuring them takes one
-command.
+conversion is needed at all, `smem_len` against `line_length × yres` is the
+**page count** — how many whole frames the fb holds, which is what the buffer
+mode is decided from — `line_length` is the physical stride, and `smem_len`
+bounds the mmap. `ypanstep` is reported but no longer trusted for the buffer
+mode: `vc4` reports `1/1` on a fb with one page, and believing it is what asked
+for three buffers where one fits ([06](../docs/06-display.md#the-present-path)).
+Guessing any of these wastes a build cycle; measuring them takes one command.
 
 ```bash
 gcc -O2 -static -o fbdump fbdump.c     # on the Pi
@@ -103,8 +106,15 @@ the conventions controllers use (**0x40-centred** and **`0x01`/`0x7F` two's
 complement**) and reports which one the data supports. That verdict is the
 useful part: under the wrong convention a steady turn decodes as alternating
 steps near half the range, so the correct convention is the one whose largest
-step is small. With `--revs N` it prints the counts-per-revolution arithmetic
-for a platter turn.
+step is small.
+
+Only a control that is genuinely relative gets a verdict. A fader or a knob is
+not relative at all and decodes to large steps under *both* conventions, so it is
+skipped rather than reported as a relative control that failed — and so is the
+counts-per-revolution arithmetic, which `--revs N` prints for the platter's own
+CC and nothing else (`--jog-cc`, default 34, the DDJ-FLX4's). A "counts per
+revolution" for a crossfader is a number about nothing, and printing one makes a
+report read as measured where it is not.
 
 Two limits, both because `aseqdump` does not print them: it has **no
 timestamps**, so the converted dump's times are synthetic (evenly spaced at

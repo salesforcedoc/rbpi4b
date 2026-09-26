@@ -32,13 +32,30 @@ a rewrite; they are also the expensive parts. See
 The SC Live 4's panel was a fixed 800×1280 portrait 32 bpp fb, so the patch
 could commit to one transform. A Pi drives whatever monitor is attached, so the
 driver has to *decide* what to do from the geometry and format it finds:
-`off` (no conversion), `convert` (565→8888), `letterbox` (1:1, centred, bars) and
-the old `rotate`, selected by `RB_DFB_PRESENT`.
+`off` (no conversion), `convert` (565→8888), `letterbox` (1:1, centred, bars),
+`crop` (1:1, truncated) and the old `rotate`, selected by `RB_DFB_PRESENT`.
 
-**As of this tree, only the rotation path is installed.** The generalization is
-written up in [06 — Display](06-display.md) and deliberately gated on two
-measurements nobody has taken yet (`tools/fbdump` after the `cmdline.txt`
-recipe) — because at 1280×800×16 the Pi may need none of it.
+**As of this tree the generalization is installed**, not just written up. The
+measurements it was gated on have been taken, and they close the geometry
+question outright. The format needs no work (16 bpp RGB565 is `rbp`'s native
+format), and after the `cmdline.txt` recipe the fb is **1280×800 with a stride
+of 2560** — the same width, height and stride as `rbp`'s surface. The connector's
+mode list offered nothing above 1280×720, but a `video=` mode is programmed
+whether or not the list names it, and the panel took it: so `crop`, `scale`,
+`letterbox` and `convert` are all dead on this target, and `RB_DFB_PRESENT` never
+needs to leave `off`.
+
+What the target did need was **not** a transform but a page decision. The fb has
+a **single page** (`yres_virtual == yres`, `smem_len == 2560 × 800`) while the
+driver forced `DLBM_TRIPLE`, and the guard that would normally catch that keys on
+`ypanstep == 0` — which this fb does not report. So `yres_virtual` tripled to
+2400, `dfb_fbdev_test_mode()`'s `need_mem` came out at 6,144,000 against a
+`smem_len` of 2,048,000, `DFB_LIMITEXCEEDED` was returned, and the primary region
+test failed: no UI, with a framebuffer-memory shortfall in the log. The patch now
+decides the buffer mode from the **page count**, giving a single `FRONTONLY`
+buffer whose `need_mem` equals `smem_len` exactly.
+[13 — Raspberry Pi 4](13-raspberrypi4.md) carries the diagnosis and the bring-up
+step (**S2.2**) that confirms it on the unit.
 
 What is *not* optional: the per-flip `fopen`/`fwrite` of the whole triple buffer
 to `/tmp/rot_surface.dump`, and the per-pointer-event `/tmp/dfbdig*.log`

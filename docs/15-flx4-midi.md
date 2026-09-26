@@ -103,7 +103,16 @@ because the fixture was written from the same reading of the list the map was.
 
 ### Deck 1 and deck 2 (list ch 1/2 → rch 0/1 → rbp players 1/2)
 
-Source: the list's channel-1/2 pages. All channels `TODO: unverified`.
+Source: the list's channel-1/2 pages, plus a capture from the unit (S5.1), which
+**settled the conversion above**: deck 2's PLAY arrived on list channel 1 and
+MASTER CUE on list channel 6, exactly as the minus-one rule predicts.
+
+The same capture **confirmed** these rows as the map already had them: PLAY note
+11 (both decks), CUE note 12, platter touch note 54, channel CUE note 84 (the
+mixer engine, no keycode), SHIFT note 63, BEAT SYNC note 88, LOAD notes 70/71 on
+list channel 6, MASTER CUE note 99 on channel 6, and pad 1 as note 0 on list
+channel 8 (HOT CUE base 0, rch 7). The rows still marked `TODO: unverified` are
+the ones the capture did not exercise.
 
 | Control | Message | rbp keycode | op |
 |---|---|---|---|
@@ -126,8 +135,12 @@ Source: the list's channel-1/2 pages. All channels `TODO: unverified`.
 Footnote *3 of the list says the BEAT SYNC button sends its message **when the
 finger is released**, not when it is pressed. The map therefore treats whichever
 edge arrives first as the whole gesture and swallows the other, so one press can
-never send SYNC twice. `TODO: unverified` — the list does not say whether the
-release carries the ON edge, the OFF edge, or both.
+never send SYNC twice. The S5.1 capture shows one press producing **both** a
+note-on and a note-off on note 88 (the inventory counts it `1/1`), so there is no
+edge to wait for and the first-edge rule is what keeps that single press from
+being sent to rbp twice. Which edge came first is recorded in the dump itself —
+`grep 'note=88' flx4.dump` prints them in order — and does not change what the map
+does with them.
 
 Every one of these controls has a **+SHIFT variant on the same channel** (a
 different note: PLAY 14, CUE 72, platter touch 103, loop IN/OUT 76/78, 4 BEAT
@@ -141,8 +154,8 @@ control logs as unmapped, which is the honest outcome.
 | Control | Message | rbp | note |
 |---|---|---|---|
 | TEMPO (pitch fader) | CC 0 (MSB) + CC 32 (LSB), 14-bit | `0x4109` K_TEMPO_SLIDER, op `OP_VALUE`, float −1.0…+1.0 | sent once per pair, on the LSB |
-| platter | CC 34 (vinyl on) / 35 (vinyl off) / 41 (+SHIFT) | `0x4305` K_JOG_ROT, op `OP_ROTATE` | relative, **0x40-centred** |
-| jog ring | CC 33 | ditto | the outer ring, same convention |
+| platter | CC 34 (vinyl on) / 35 (vinyl off) / 41 (+SHIFT) | `0x4305` K_JOG_ROT, op `OP_ROTATE` | relative, **0x40-centred**, measured (S5.1): values of 63/65/66 only, and under the two's-complement reading a steady turn decodes as alternating ±63 steps |
+| jog ring | CC 33 | ditto | the outer ring, same convention — measured the same way, largest step 1 |
 | TRIM | CC 4 | `0x5019` K_TRIM | one 128-step row |
 | EQ HI | CC 7 | `0x501a` K_EQH | ditto |
 | EQ MID | CC 11 | `0x501b` K_EQM | ditto |
@@ -152,8 +165,15 @@ control logs as unmapped, which is the honest outcome.
 Only the MSB of each 14-bit pair is bound, giving one 128-step row per knob —
 the same resolution the JP21 map had. The LSB then arrives as an unmapped CC and
 is **dropped**, which is deliberate: it is the resolution the previous target's
-knobs had too, and the dump will show whether that is enough. The pitch fader is
-the exception, because rbp's `K_TEMPO_SLIDER` genuinely wants all 14 bits.
+knobs had too. The pitch fader is the exception, because rbp's
+`K_TEMPO_SLIDER` genuinely wants all 14 bits.
+
+The S5.1 capture **measures the pairing rule** this paragraph assumed. Each LSB
+arrived with exactly as many events as its MSB: CC 51 with CC 19 (171 events
+each), CC 63 with CC 31 (310 each), CC 32 with CC 0 (44 each) — the `n + 0x20`
+rule, counted rather than quoted. So the LSB is not stray traffic that happens to
+arrive alongside; it is the low 7 bits of the same control, and it is available
+if a 128-step row ever proves too coarse for a fader.
 
 The pitch fader's *polarity* `TODO: unverified`: the list gives the two ends
 (min "−" side = `0x00/0x00`, max "+" side = `0x7F/0x7F`) but not which way the
@@ -195,7 +215,7 @@ quietly, because a wrong base lights nothing and sends nothing.
 | headphone MIX | CC 12 | `0x4405` K_HPMIX, global | also feeds `g_cue_mix` for the audio shim |
 | headphone LEVEL | CC 13 | `0x4406` K_HPLEVEL, global | also feeds `g_cue_gain` |
 | browse push | note 65 | `0x420c` K_SELECTOR, global | press / release |
-| browse rotate | CC 64 (+SHIFT CC 100) | `0x420c` K_SELECTOR, global | relative, **0x01/0x7F** two's complement — *not* the jog's convention |
+| browse rotate | CC 64 (+SHIFT CC 100) | `0x420c` K_SELECTOR, global | relative, **0x01/0x7F** two's complement — *not* the jog's convention. Measured (S5.1): values 1 and 127 only, and the two conventions are what tell it apart from the platter, so this is the row that could most easily have been mapped backwards |
 | LOAD, deck 1 / 2 | notes 70 / 71 | `0x4311` K_LOAD, global key with rbp ch 1 / 2 | |
 | MASTER CUE | note 99 | *(none — the mixer engine)* | toggles `me_set_master_cue()` from `me_get_master_cue()` |
 | SMART CFX / SMART FADER | notes 0 / 1 | *(none)* | log-only — rekordbox features |
@@ -340,10 +360,17 @@ they first appeared**, which is what makes it readable against the press order.
 For a relative control the report decodes the values under both conventions —
 the **0x40-centred** one this unit's jog uses and the **`0x01`/`0x7F`** one its
 browse knob uses — and says which the data supports, which is a measurement of
-the convention rather than a quotation of it. For `JOG_PPR`, turn the platter a
-counted number of revolutions in one direction and pass that count as `--revs`:
-the report prints counts per revolution, and that is the number `RB_JOG_PPR`
-wants.
+the convention rather than a quotation of it. A verdict is only printed for a
+control that actually behaves relatively — a fader decodes to large steps under
+*both* conventions and gets no arithmetic, because "counts per revolution" for a
+crossfader is a number about nothing.
+
+For `JOG_PPR`, turn the platter a counted number of revolutions in one direction
+and pass that count as `--revs`; the counts-per-revolution arithmetic is printed
+for the platter's own CC (`--jog-cc`, default 34). Turn **ten** revolutions
+rather than one: a single hand turn is too coarse to divide, and the answer this
+procedure gives is only as good as the count you turn. S5.1's answer was 720
+(7183 counts over ten turns — see [Step 3](#step-3--calibrate-the-continuous-controls)).
 
 Then dump through the shim itself, which is what the map actually has to
 consume — it sees the same events, after the shim's own filtering. This is the
@@ -390,19 +417,25 @@ Jog and pitch reuse the existing unwind into `sendKey(0x4305, OP_ROTATE)` and
 
 | Value | Meaning | How |
 |---|---|---|
-| `RB_JOG_PPR` | jog pulses per revolution | count the CC deltas for exactly one physical turn, then set the value |
+| `RB_JOG_PPR` | jog pulses per revolution | **measured: 720** (S5.1). `tools/aseqdump2dump.py --stats --revs 10` over a counted ten-revolution turn gives counts/revolution directly; one hand-turned revolution is too coarse to divide |
 | `RB_JOG_REV` | which way the platter's counts run | turn it clockwise; the tempo must go up |
 | `RB_JOG_IDLE_MS` | how long a pause means "stopped" | lower it if the deck bends on after your hand leaves, raise it if it stutters |
 | pitch polarity | whether increasing CC means faster or slower | push the fader down and watch `TEMPO_VERBOSE=1` output: the tempo must *decrease*; if it rises, `RB_TEMPO_REV=1` |
 | pitch resolution | steps across the fader's travel | move it end to end and count |
 
-`RB_JOG_PPR` is the one that is certainly not right yet: it ships as **128**,
-which is the *previous unit's* value, not this one's. There is no reason for the
-two to agree. Get these wrong and everything still "works" — the deck just
-responds backwards or at the wrong rate, which is much harder to diagnose than a
-control that does nothing. `TEMPO_VERBOSE=1` and `JOG_VERBOSE=1`
-(`RB_VERBOSE=1` sets both) log the raw value and the resulting normalised one
-side by side.
+`RB_JOG_PPR` used to ship as **128** — the *previous unit's* value. Get a rate
+like that wrong and everything still "works": the deck just responds at the wrong
+rate, which is much harder to diagnose than a control that does nothing. The measured
+value is 720: a ten-revolution turn produced 7183 forward counts (6509 of +1, 337
+of +2, 17 back), or 718.3 per revolution. 718 would be false precision — 720 is
+the plausible design value and the 0.24% shortfall is under 9° of arc at the end
+of a hand turn. With 128 in place every turn was 5.6× too fast and pinned to the
+8 rev/s clamp in `flx4_jog()`, which is what "the platter only ever spins at one
+speed" would have looked like on the device.
+
+The remaining calibration unknowns are the ones the S5.1 capture could not settle
+by itself: `TEMPO_VERBOSE=1` and `JOG_VERBOSE=1` (`RB_VERBOSE=1` sets both) log
+the raw value and the resulting normalised one side by side.
 
 ## What the FLX4 does not have
 
@@ -455,23 +488,25 @@ with a real keyboard or mouse on the Pi**.
 
 ## Open questions
 
-Every item here is unmeasured. They are collected because each one changes the
-map, and none of them can block the port — the keyboard map and the fixture
-tests keep everything else moving. The first two are the ones to settle before
-anything else, because their failure mode is a whole section doing nothing.
+None of these can block the port — the keyboard map and the fixture tests keep
+everything else moving — but each one changes the map, so they are collected
+here. The first two are the ones to settle before anything else, because their
+failure mode is a whole section doing nothing, and each row now says whether it
+is still open or has been answered (with S5.1, the `aseqdump` capture).
 
 | # | Question | How it gets answered |
 |---|---|---|
 | 1 | **The MIDI channel of each section** — the single conversion the whole map rests on. The list is 1-based, the map is 0-based. | **Answered in S5.1.** Deck-2 PLAY arrived on ch 1, and MASTER CUE — list ch 7 — on ch 6: the list is 1-based and the map's conversion is right. The same capture confirmed PLAY note 11 on both decks, CH CUE note 84, MASTER CUE note 99, the jog touch note 54, and that CC 34 is 0x40-centred rather than `0x01`/`0x7F`. |
-| 2 | **The pad base+pad encoding** — whether `base + pad` and the eight bases are what the unit sends, and whether the four +SHIFT modes pair with the four shift notes the way the list's ordering implies. | press one pad in each pad mode with `aseqdump` running; `LED_VERBOSE=1` shows what rbp then does with it |
+| 2 | **The pad base+pad encoding** — whether `base + pad` and the eight bases are what the unit sends, and whether the four +SHIFT modes pair with the four shift notes the way the list's ordering implies. | **Partly answered in S5.1**: pad 1 in HOT CUE arrived as note 0 on list ch 8 (rch 7), so HOT CUE's base is 0 and pad 1 is +0. The other seven bases are unmoved — press one pad in each pad mode with `aseqdump` running; `LED_VERBOSE=1` shows what rbp then does with it |
 | 3 | The pad-LED **velocity → colour** table. The encoder assumes the Engine OS Prime convention (bits 4-5 red, 2-3 green, 0-1 blue, 2 bits each); `PAD_BRIGHT=1` sets bit 6 for the bright range. | `LED_VERBOSE=1` and read the pads: wrong colour means the bit layout differs, wrong brightness means the bit-6 question |
 | 4 | The **transport/pad/loop LED note numbers**, which the list does not give at all beyond LOADED and VINYL MODE. | watch the unit's own LEDs while it is driven from rekordbox, or send candidate notes and watch. This is what `RB_LED_DISABLE=1` waits on |
-| 5 | Jog `RB_JOG_PPR` (shipped as the previous unit's 128), `RB_JOG_REV` and pitch polarity/resolution. | S5.1 with a counted platter turn: `aseqdump2dump.py --stats --revs <N>` prints counts per revolution. The first capture already shows one turn is **hundreds** of counts, so 128 is far too small — and the failure mode is specific: `speed` is `counts / (PPR × scale) / dt`, so a PPR that low **pegs speed at its 8 rev/s clamp** and the platter scrubs at full speed instead of following the hand. |
+| 5 | Jog `RB_JOG_PPR` (shipped as the previous unit's 128), `RB_JOG_REV` and pitch polarity/resolution. | **`RB_JOG_PPR` answered in S5.1: 720** (ten revolutions → 7183 forward counts → 718.3/rev; see [Step 3](#step-3--calibrate-the-continuous-controls)). `RB_JOG_REV`, polarity and pitch resolution are still open: the capture's jog turn direction and pitch push direction were not recorded, so neither sign can be read out of it. `TEMPO_VERBOSE=1`/`JOG_VERBOSE=1` on the device settle all three. |
 | 6 | The **Level/Depth knob's channel**, where the list's Channel column (6) disagrees with its own status byte (`B4`). Both are bound, so the knob works either way — but one of the two rows is dead weight and should go. | the dump: the CC appears on one channel only |
 | 7 | **Which position the FX CH SELECT lever rests in**, and rbp's default Beat FX target. The map deliberately does not force a target, so it does nothing until the lever moves. | move the lever through all three positions and watch `KNOB_VERBOSE=1`; then note what rbp had selected before the first move |
-| 8 | Whether the BEAT SYNC release (footnote *3) carries the ON edge, the OFF edge or both. The map handles all three without double-sending, so this is for the record. | `aseqdump` with `KNOB_VERBOSE=1`, one press |
+| 8 | Whether the BEAT SYNC release (footnote *3) carries the ON edge, the OFF edge or both. | **Answered in S5.1**: one press produced both edges (`on/off x1/1` on note 88), so the map's first-edge rule is load-bearing rather than merely defensive. The map would handle either order without double-sending, so which came first is for the record — the dump has it in order (`grep 'note=88' flx4.dump`). |
 | 9 | rbp's **keycode for CUE/LOOP CALL** ◁/▷, which would turn two log-only rows into bindings. | rbp's own key table, or a keyboard/pointer session against the RX3 UI |
 | 10 | Whether the FLX4's USB audio is `S24_3LE`, `S16_LE` or `S32_LE`, and its native rate. | `aplay --dump-hw-params -D plughw:CARD=DDJFLX4,DEV=0` — but this one does **not** change the shim: `plughw:` makes ALSA's plug chain do the conversion, so the answer is for the record |
+| 11 | The **units of the jog's `l` field** (the 16-bit `pos` in the `OP_ROTATE` message). The map fills it with raw platter counts, so the measured 720 counts/revolution now goes into a field rbp may *compare* rather than difference — and the map inherited 128 from the JP21. `RB_JOG_SCALE` cannot express that conversion: it scales `vpos` but cancels out of the speed, and it is clamped to ≥ 1, so it can only make the units larger. | if the platter misbehaves in a way the speed cannot explain (a deck that jumps when touched), log `JOG_VERBOSE=1`'s `pos=` against a known turn and compare it with what rbp does |
 
 ## Testing without the hardware
 
