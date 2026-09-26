@@ -52,9 +52,11 @@ rbp-facing half — see [08 — Controls](../../docs/08-controls.md).
 
 `s24pack.c` is a separate object from `audioshim.c` for one reason: it is pure —
 no ALSA, no allocation, no globals — so the part of the audio path that is
-checkable without a card can be checked without a card. `audioshim` only calls it
-when `AUDIO_FMT` names a format other than the `S24_LE` container rbp already
-writes.
+checkable without a card can be checked without a card. On this target it is
+always in play: `AUDIO_DEV` is a `hw:` device, so nothing between the shim and the
+card converts, and `AUDIO_FMT` (default `s24_3le`, which is what the FLX4 accepts)
+is the format `s24pack()` produces. It is only bypassed when `AUDIO_DEV` names a
+plug device, where the plug chain does the packing instead.
 
 See [08 — Controls](../../docs/08-controls.md) and
 [09 — Audio](../../docs/09-audio.md).

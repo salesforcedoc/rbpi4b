@@ -46,6 +46,13 @@ static int checks, failures;
  * pointsrc at all: the test is about what rbp receives, not where it came from. */
 int pointsrc_start(void) { return 0; }
 
+/* And the same for the visible pointer, which tscfake_open() also starts. It is
+ * stubbed rather than linked for the same reason as the line above: this test is
+ * about the bytes rbp reads, and the compositor would drag a framebuffer, a
+ * thread and pthread into a fixture that is deliberately none of those things.
+ * Its own rule is pinned in test_cursor.c. */
+int fb_cursor_start(void) { return 0; }
+
 /* --- 1. the record layout --------------------------------------------------- */
 
 static void test_record_layout(void)

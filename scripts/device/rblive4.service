@@ -1,0 +1,53 @@
+[Unit]
+Description=rblive4 - XDJ-RX3 rekordbox player (rbp)
+Documentation=https://github.com/andrewsim/rbpi4b/blob/main/docs/11-runtime-launcher.md
+After=multi-user.target
+# The kiosk idiom, and the documented way to get the console back: `systemctl
+# start getty@tty1` stops the player and hands the local console over, which is
+# what docs/11 asks for ("make it easy to disable"). The launcher does the same
+# thing by hand (it disables getty@tty1 itself), so this is the declaration of
+# that intent rather than a new mechanism.
+Conflicts=getty@tty1.service display-manager.service
+# Retry forever. The launcher's normal exit path returns 0 even when rbp died
+# (it reports the failure and exits), so Restart=on-failure would never fire and
+# a brownout would leave a dead screen with the unit "succeeded". StartLimit* are
+# [Unit] directives since systemd v230 -- in [Service] they are silently ignored,
+# which is the mistake this comment exists to prevent.
+StartLimitIntervalSec=0
+
+[Service]
+# start-rb.sh blocks until rbp exits (its own `while kill -0 "$RBP"` loop), so
+# simple is exactly right: systemd's idea of "running" is rbp's lifetime for
+# free, with no PID file and no forking.
+Type=simple
+# Must be the deployed absolute path, not a wrapper or a symlink: the launcher
+# finds lib.sh (and fix-dev.sh, usb-watch.sh) through `dirname "$0"`.
+ExecStart=/opt/rblive4/start-rb.sh
+# The launcher calls chroot, modprobe and blkid, all of which live in /usr/sbin.
+# systemd's default PATH for a system unit does include it, but this unit is
+# started by hand during bring-up too, so it does not rely on that.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Restart=always
+RestartSec=10
+# Generous: the launcher's cleanup stops the watcher, kills rbp and releases the
+# media mounts, and a stuck unmount must not be cut short mid-write.
+TimeoutStopSec=30
+# mixed, not the default control-group: SIGTERM goes to the launcher ALONE, so
+# its trap can run that cleanup, and only then does SIGKILL take the group (rbp,
+# edb_streamd, the watcher) after TimeoutStopSec. Under the default control-group
+# policy every process gets SIGTERM at once and the cleanup fights its own
+# children.
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rblive4
+# Deliberately NOT set:
+#   PrivateTmp= -- /tmp is the rendezvous between the host and the chroot
+#     (udev_usb1, usbwatch.pid, guard_LocalDBServer). A private /tmp would give
+#     the launcher an empty one and rbp would never hear about the media.
+#   ConditionPathExists=/dev/fb0 -- an appliance powered on before its monitor
+#     would then never start. If you want that behaviour it belongs in a drop-in,
+#     not in the shipped unit.
+
+[Install]
+WantedBy=multi-user.target

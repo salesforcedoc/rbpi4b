@@ -46,7 +46,7 @@ the expensive parts:
 | OS | **Raspberry Pi OS Lite 32-bit** — `armhf` userland, no desktop. The measured unit is the Debian 13 (trixie) generation |
 | Kernel | the stock Pi kernel — **64-bit** `6.18.50+rpt-rpi-v8` on the measured unit, with `32-bit EL0 Support`; `vc4` / `vc4-kms-v3d` |
 | Display | HDMI monitor or TV |
-| Audio | DDJ-FLX4 over USB (class-compliant, 4 output channels) |
+| Audio | DDJ-FLX4 over USB (class-compliant, 4 output channels: master 1-2, headphones 3-4; `S16_LE`/`S24_3LE` at 44100 or 48000, measured — see S1.4) |
 | Controls | DDJ-FLX4 over USB MIDI; keyboard fallback |
 | Pointer | USB mouse, trackball or touchscreen (see [pointing](#pointing)) |
 
@@ -544,10 +544,41 @@ to see it — without it, fast clicks get swallowed.
 generations disagree about whether logical x is `py` or `1279-py`, so the
 procedure is fixed: set `RB_POINT_DEBUG=1`, click the four corners of the UI,
 read the emitted `(down, raw_x, raw_y, lx, ly)` lines in
-`/tmp/knobshim.log`, and correct with `RB_POINT_SWAP_XY` /
+`/tmp/pointsrc.log`, and correct with `RB_POINT_SWAP_XY` /
 `RB_POINT_INVERT_X` / `RB_POINT_INVERT_Y`. Between those flags and
 `root/settings/TouchCalib_*.dat` — a six-line file whose `offX`/`scaleX` can
 express any affine transform — every 2D case is reachable without a rebuild.
+
+### S3.2 pointing
+
+The arrow `fbshim.so` composites is the answer to "the pointer is invisible", and
+both halves of that were measured on the unit rather than reasoned about. The
+first version drew the arrow once and then asked each tick whether its tip pixel
+was still intact — a question with no trustworthy answer (the tip is a black
+outline cell and much of rbp's UI is black) — and it redrew at 16 ms, matching
+rbp's own frame rate, which is the rate that guarantees an arrow gets erased. The
+damage measurements behind the corrected `RB_POINT_CURSOR_MS=0.5` default are in
+[07 — Touch / pointing](07-touch.md#the-arrow-on-the-screen-point_cursor).
+
+Verification, and the reason it is stated as a measurement:
+
+```bash
+# while rbp is up, with a mouse plugged in
+/tmp/fbfind 20 100000        # scans /dev/fb0 for the exact 12x19 glyph
+```
+
+`arrow present in 20/20 samples (100%)`, at `(640,400)` — the pointer's initial
+centre, matching the shim's `cursor: first paint at (640,400)`. With
+`RB_POINT_CURSOR=0` the same scan reports `0/5 samples` and exit 2, which is what
+makes the 20/20 a measurement of the arrow rather than of something in rbp's UI.
+
+**What it costs**, measured as an A/B on an idle UI: rbp's own CPU is 48.4% of one
+core with `RB_POINT_CURSOR=0` and 56.3% with the default 0.5 ms period — about
+**8% of one core** for ~2000 wakeups a second. On a four-core Pi 4 with rbp's
+render thread already burning half a core this is affordable, and raising
+`RB_POINT_CURSOR_MS` to `1` halves it at the cost of a few percent of visibility.
+The alternative that removes the cost *and* the flicker is a DRM cursor plane,
+which is not attempted — see [07](07-touch.md#the-arrow-on-the-screen-point_cursor).
 
 ## Audio
 
@@ -555,26 +586,44 @@ The DDJ-FLX4 is USB class-compliant with **4 output channels: master on 1-2,
 headphones on 3-4.** `rb.conf`'s defaults describe exactly that:
 
 ```
-RB_AUDIO_DEV=plughw:CARD=DDJFLX4,DEV=0
+RB_AUDIO_DEV=hw:CARD=DDJFLX4,DEV=0
 RB_AUDIO_CHANNELS=auto
 RB_AUDIO_MAP=master=0,1;headphones=2,3;booth=-
+RB_AUDIO_FMT=s24_3le
 ```
 
 `rbp`'s side of the contract does not change: it believes it has three
 2-channel S24_LE 44.1 kHz outputs (master, phones, booth) opened in a fixed
 order, plus a dummy capture. The shim presents them on the real device.
 
-**`plughw:`, not `hw:`.** ALSA's `plug` chain does S24_LE ↔ S24_3LE packing and
-44.1 → 48 kHz conversion for free, and `rbp` only ever speaks S24_LE at 44.1.
-The `hw` plugin accepts `CARD=`/`DEV=`, so the device string goes straight to
-real `snd_pcm_open` on the **host's** ALSA — no card-enumeration code is needed.
-Verify the card id with `aplay -L` / `cat /proc/asound/cards`; if it differs,
-change `RB_AUDIO_DEV`, not the shim.
+**`hw:`, not `plughw:` — and that is a measurement, not a preference.** The map
+`AUDIO_MAP` names *hardware* channel indices, so the shim has to learn the card's
+real channel count, and a plug device cannot tell it:
 
-**Request exactly as many logical channels as the hardware has.** The route
-plugin is 1:1 only while logical ≤ hw. An 8→4 downmix would fold FL/FR into the
-second pair and put garbage on the headphone output. `AUDIO_CHANNELS=auto`
-reads the real maximum and clamps to `rbp`'s 8.
+| device | `snd_pcm_hw_params_get_channels_max()` |
+|---|---|
+| `hw:CARD=DDJFLX4,DEV=0` | **4** |
+| `plughw:CARD=DDJFLX4,DEV=0` | **10000** |
+
+With `plughw` the shim negotiated 8 logical channels — its own ceiling — onto a
+4-channel card, and every write failed `-EINVAL`, which the log could only show as
+`written=-22`. `hw:` is also why `AUDIO_FMT` is set: with no plug chain nothing
+converts for us, so the shim's own `s24pack()` does the packing and the format must
+be one the card accepts. The card takes **44100 natively** — no resampling is
+needed either. The measured hw params are in S1.4 below.
+
+The `hw` plugin accepts `CARD=`/`DEV=`, so the device string goes straight to real
+`snd_pcm_open` on the **host's** ALSA — no card-enumeration code is needed. Verify
+the card id with `aplay -L` / `cat /proc/asound/cards`; if it differs, change
+`RB_AUDIO_DEV`, not the shim.
+
+**Request exactly as many logical channels as the hardware has.** On a `hw:` device
+there is no plugin in between, so the shim's frame is the card's frame and the
+map's indices mean what they say; asking for more is a bare `-EINVAL` at
+`hw_params`. (On the previous target, where a `route` plugin *was* in between, the
+same mistake instead made it downmix and put garbage on the second pair — a failure
+that sounded like a working card and a broken mix.) `AUDIO_CHANNELS=auto` reads the
+real maximum and clamps to `rbp`'s 8.
 
 The headphones stream is routed **straight through** — `rbp`'s `HeadPhone`
 already mixes cue and master time-aligned, so summing the separate ALSA devices
@@ -591,13 +640,14 @@ target's map.
 
 **The FLX4 map is written and fixture-tested, and it is this target's default**
 (`flx4` in `rb.conf`, and the fallback in source). Its tables are the one place
-this port is still *unverified* rather than *unrun*: every number in them comes
-from Pioneer's published DDJ-FLX4 MIDI message list, because **nothing in this
-repository has ever been run with an FLX4 attached**, and the fixture test can
-only prove the map matches its own tables. Expect the first session to correct
-some of them — the channel conversion and the pad base+pad encoding are the two
-whose failure mode is a whole section doing nothing. The dump procedure, the
-tables and the explicitly-unverified parts are in
+this port is *unverified* rather than *unrun*: the shim subscribes to the unit's
+own port and an `aseqdump` capture has been taken from it (S5.1), but **no control
+has yet been pressed and watched through to rbp**, so every note and CC number
+still comes from Pioneer's published DDJ-FLX4 MIDI message list, and the fixture
+test can only prove the map matches its own tables. Expect the first session to
+correct some of them — the channel conversion and the pad base+pad encoding are
+the two whose failure mode is a whole section doing nothing. The dump procedure,
+the tables and the explicitly-unverified parts are in
 [15 — DDJ-FLX4 MIDI](15-flx4-midi.md). The LED bridge is a further step behind:
 `RB_LED_DISABLE=1` is set for this target because `rbp_led.c` still carries the
 previous target's notes.
@@ -605,11 +655,17 @@ previous target's notes.
 **The keyboard fallback is written** — a map with a key table, plus the evdev
 reader that feeds it, with the keycodes it produces pinned by ~300 fixture
 checks in `make -C scripts/shims test`. It has been cross-compiled and run
-against synthetic events only; **it has never been run with a real keyboard or
-mouse on the Pi**, and its list direction for `↑`/`↓` is the one thing about it
-that cannot be settled off hardware. Select it with `RB_MIDI_MAP=kbd` (the
-`kbd` entry in `rb.conf`); the key list is in
+against synthetic events only; the reader has not opened a node on the Pi, since
+it only starts under `RB_MIDI_MAP=kbd` and this target's default map is `flx4`.
+Its list direction for `↑`/`↓` is the one thing about it that cannot be settled
+off hardware. Select it with `RB_MIDI_MAP=kbd` (the `kbd` entry in `rb.conf`);
+the key list is in
 [08 — Controls](08-controls.md#the-keyboard-map-rb_midi_mapkbd).
+
+The **pointer** reader is a different story, and it has run: it is always active,
+and `/tmp/pointsrc.log` records it opening `/dev/input/event7` as
+`'Logitech G203 Prodigy Gaming Mouse'`. Discovery and the open are therefore
+verified on hardware; what is not is the visible behaviour.
 
 Two things about the Pi are worth knowing here:
 
@@ -671,24 +727,24 @@ before most code**, because they convert the biggest unknowns into facts.
 | S1.1 | Pi OS Lite 32-bit boots | **measured:** the userland is 32-bit — `getconf LONG_BIT` = **32**, `dpkg --print-architecture` = **`armhf`** — and the kernel can run it: `32-bit EL0 Support` in the CPU features line, then S1.5's chroot `echo ok` proves it end to end. `uname -m` is **not** the check: the measured unit's kernel is aarch64, and it reports `aarch64` *inside* the 32-bit chroot too. (`file /bin/sh` is not part of this either — `/bin/sh` is a symlink to `dash`, so it prints `symbolic link to dash` and stops; `file -L` would follow it) | a kernel with no 32-bit emulation — the chroot's own binaries then cannot run, and **that** is what the S1.5 exec test catches |
 | S1.2 | device nodes | `/dev/fb0`, `/dev/snd/seq`, `/dev/input/event*` all present | missing `seq` → `modprobe snd-seq`; symptom is "sequencer setup failed" + zero controls |
 | S1.3 | `tools/fbdump` | **recorded, pre-recipe: 1280×720, 16 bpp RGB565, `line_length` 2560, one page** — the unedited output is below. Superseded by S2.1's re-run at 1280×800, and the two together are what settles the present path | format is a `memcpy` (`565 == 565`); a 1280×720 fb cannot hold a 1280×800 image 1:1 |
-| S1.4 | `kmsprint -m`; `aplay -L`, `/proc/asound/cards`; `aseqdump -l` | active connector; card id `DDJFLX4`; port name `DDJ-FLX4 MIDI 1`; playback formats/rates/channels. The MIDI half is already known: the unit enumerates as `2b73:0045` (AlphaTheta DDJ-FLX4) and `snd-usb-audio` probes it — `usb 1-1.2: Quirk or no altset; falling back to MIDI 1.0` | card id differs → fix `rb.conf` |
+| S1.4 | `kmsprint -m`; `aplay -L`, `/proc/asound/cards`; `aseqdump -l`; `aplay --dump-hw-params -D hw:CARD=DDJFLX4,DEV=0` | **measured.** Connector `HDMI-A-1`. Card id `DDJFLX4`; port name `DDJ-FLX4 MIDI 1`; the unit enumerates as `2b73:0045` (AlphaTheta DDJ-FLX4) and `snd-usb-audio` probes it (`usb 1-1.2: Quirk or no altset; falling back to MIDI 1.0`). The card's own hw params, which settle the audio design: `FORMAT S16_LE S24_3LE`, `SAMPLE_BITS [16 24]`, `FRAME_BITS [64 96]`, `CHANNELS 4`, `RATE [44100 48000]`, `PERIOD_SIZE [45 48000]`, `BUFFER_SIZE [90 96000]` — **no `S32_LE`**, which is why the shim's hand-rolled `SND_PCM_FORMAT_S24_3LE` being wrong (10 = `S32_LE`) could never have worked. Use `hw:` for this query: a plug device answers with what the plug layer will accept, not with what the card has | card id differs → fix `rb.conf`. Both formats it offers are accepted by `RB_AUDIO_FMT`; the default `s24_3le` is the one that needs no conversion |
 | S1.5 | chroot sanity: `chroot … /bin/sh -c 'echo ok'`; run `edb_streamd` | `ok`; daemon stays alive | exec bits, missing binds |
 | S2.1 | the connector query (`/proc/cmdline`, the `modes` files, `dmesg`), then the `cmdline.txt` recipe + reboot | **answered, and in the best way.** First half: the sink is on `HDMI-A-1` (`connected`/`enabled`, `HDMI-A-2` `disconnected`) and its mode list tops out at `1280x720` (four times) plus `960x600`, `960x540`, `800x600`, `480x320` — no mode ≥ 1280×800, **so `letterbox` is unreachable on this display.** Second half: the mode was forced anyway and **the panel took it** — `fbdump` after the reboot reads **1280×800, 16 bpp RGB565, `line_length` 2560, `smem_len` 2048000, one page**, i.e. `rbp`'s logical surface exactly. `letterbox`/`crop`/`scale`/`convert` are all moot here | it did not reject it, so the old "fall back to crop/scale" branch is dead on this unit; it stays in the present path's table for a sink that caps at 720p |
 | S2.2 | launch with `crashcatch.so`, then verify against the **generated** `usr/etc/directfbrc` — no hand-added lines. `debug=FBDev/Mode` is only needed to see the arithmetic, and is *not* in the shipped file | **PASSED.** The `PRESENT:` line reads `mode=off angle=0 real_fb=1280x800 pitch=2560 bpp=16 pages=1 pan=0 (logical 1280x800)` — `pages=1 pan=0` is the page-count decision having been taken from the real geometry, and `mode=off` says the layer surface *is* the fb page, so no blit happens at all. The UI was then confirmed by capturing `/dev/fb0` and decoding it as RGB565: both decks, HOT CUE A–H on each, BEAT FX/DELAY at 120.0 BPM, QUANTIZE, TRACK/REMAIN/TEMPO and the waveform lanes all render. Before the page fix, the fb's one page against a forced `DLBM_TRIPLE` gave `need_mem` `2560×2400` = 6,144,000 > `smem_len` 2,048,000 and no UI. See [the present path](#the-present-path) | no UI with the `PRESENT:` line reading `pages=3 pan=1` → the page arithmetic is still reading `ypanstep`, not the fb; no UI with `pages=1` → the page decision is right and the blocker is downstream of it, and the `FBDev_Mode` line names what it is. **Two deploy-level blockers sat in front of this milestone and neither is Pi-specific** — both are now fixed in the tree, and both are worth knowing because each mimics a code bug: (1) `module-dir` missing from `directfbrc`, so *no DirectFB module loaded* and rbp segfaulted on a NULL `IDirectFB*` ([06](06-display.md#required-directfbrc), [12](12-troubleshooting.md)); (2) AppleDouble `._*` files from a macOS build host in the module directories, which DirectFB tries to dlopen ([12](12-troubleshooting.md)) |
 | S2.3 | watch the running image for tearing, then re-launch with `RB_DFB_PRESENT=convert` | same image, no tearing, and the pacer holding the render thread to ~60 fps. `convert` on a 565 fb is a 1:1 whole-frame `memcpy` into a system-memory back buffer, which is the double-buffering `off` cannot have | tearing that survives `convert` → the blit is not reaching the visible page; the pacer's absence shows as a pinned core instead, at 100% on the render thread |
 | S2.4 | idle 10 min, then type on the console | no text or cursor ever over the UI | `fbcon=map:1` not applied (`cat /proc/cmdline`) |
-| S3.1 | `tools/evdevdump --list` | names, caps and absinfo for the mouse and keyboard. The measured unit has a **keyboard only** (`Dell KB216 Wired Keyboard`, with its Consumer/System Control interfaces) — no mouse has been attached, so the relative-pointer path is unmeasured *and* unexercised, and a mouse (or trackball/touchscreen) has to be plugged in before this step means anything | set `RB_POINT_DEV`; if no pointer is found, `evdevdump --list` says so and only the keyboard map is available |
+| S3.1 | `tools/evdevdump --list` | **run, and a pointer is present.** `Logitech G203 Prodigy Gaming Mouse` on `/dev/input/event7` — a mouse, so `RB_POINT_KIND=rel`, which lives in `rb.local.conf` because a value measured here would be reverted to `auto` by the next deploy (see [scripts/device/README.md](../scripts/device/README.md)). `auto` would also find it; pinning it is what stops the shim hunting for a touchscreen that is not there | set `RB_POINT_DEV` only to override discovery; if no pointer is found, `evdevdump --list` says so and only the keyboard map is available |
 | S3.2 | `POINT_DEBUG=1`, click the four corners | emitted logical coords match the UI's reaction | mirrored/transposed → `RB_POINT_INVERT_X` / `RB_POINT_SWAP_XY`, else the `TouchCalib` affine |
-| S3.3 | drag-scroll the browser, tap PLAY, tap a playlist row | all react | fast clicks swallowed → raise `RB_POINT_MIN_DWELL_MS` |
-| S4.1 | `speaker-test -D plughw:CARD=DDJFLX4,DEV=0 -c 4 -r 48000` | sound, and channel identification pair by pair | channels not 1:1 → logical count ≠ hw count |
-| S4.2 | launch `rbp`, `/tmp/audioshim.log`, load and play | negotiated channels/format and the pair map logged; master audible on the FLX4's RCA out, cue on its headphone jack | **silence with a healthy log ⇒ the `0x3C665C` audio patch is missing**; distortion ⇒ sign-extension |
+| S3.3 | drag-scroll the browser, tap PLAY, tap a playlist row | **the code path is verified; the physical mouse has never been moved.** Discovery, the `rel` accumulation and the emitted `(down, raw, logical)` triples are all exercised, but no human has watched the on-screen cursor follow the G203, so "clicks land where you aimed" is still unmeasured | fast clicks swallowed → raise `RB_POINT_MIN_DWELL_MS`; a cursor that does not move at all → check `/tmp/pointsrc.log` and the `subscribed to` line that names the node it opened |
+| S4.1 | `speaker-test -D hw:CARD=DDJFLX4,DEV=0 -c 4 -r 44100 --format S24_3LE -t sine` with the FLX4's MASTER level up | **still needs ears** — this is the one step no log can answer. It plays each of the 4 hardware channels in turn, which both proves the card makes sound and identifies which pair is the RCA out versus the headphone jack, validating `AUDIO_MAP=master=0,1;headphones=2,3` | silence → the card's own mixer/level, not the shim (nothing of ours is loaded here); channels not 1:1 → logical count ≠ hw count, see below |
+| S4.2 | launch `rbp`, `/tmp/audioshim.log`, load and play | **the write path is verified; audibility is not.** The log reads `format constants verified: S16_LE=2 S24_LE=6 S24_3LE=32`, `real set_format(32) res=0`, `negotiating 4 channel(s)`, `real set_channels(4) res=0`, `real hw_params res=0`, `resolved 4 channel(s): master=0,1 headphones=2,3 booth=-1,-1`, and then `writei frames=64 bytes=768 written=64` at ≈realtime with **zero** negative returns over 41,001 writes — and 768 bytes ÷ 64 frames = 96 bits/frame is exactly the card's `FRAME_BITS` ceiling, so the packing is byte-correct. What no log can say is whether the RCA outs are *audible*: that needs a track on a USB stick (S6.1) and someone listening | `written=-22` in a loop ⇒ the format constant or the device string, see [12](12-troubleshooting.md); **silence with a healthy log ⇒ the `0x3C665C` audio patch is missing**; distortion ⇒ sign-extension |
 | S4.3 | PFL/cue buttons, cue mix and level | cue bus changes, no combing | summing master+cue instead of routing the phone stream |
 | S5.1 | `aseqdump -p <client>:0` while pressing everything, piped into `tools/aseqdump2dump.py --stats --revs <N> -o flx4.dump` | **run — and it converted the map's biggest guess into a measurement.** The inventory is in [15](15-flx4-midi.md); the relative controls use the 0x40-centred convention (platter CC 34 vinyl-on / 35 vinyl-off / 41 `+SHIFT`, jog ring CC 33), and one counted turn gives **720 counts/revolution**. `map_flx4.c`'s `jog_ppr` is now 720: the inherited 128 was the *JP21's* platter, which made every turn 5.6× too fast and pinned it to the 8 rev/s clamp. Still `TODO: unverified`, and a smaller set than before: the pitch fader's polarity, the pad base+pad encoding and its SHIFT pairing, the FX knob targets, BEAT SYNC long-press and 4 BEAT/EXIT | nothing → `snd-seq` / USB |
 | S5.2 | `MIDI_DUMP=… RB_MIDI_MAP=flx4`, press each control | dump and `/tmp/knobshim.log` show the expected keycodes | wrong channel/note assumptions — that is the dump's purpose |
 | S5.3 | `make -C scripts/shims test` under `qemu-arm` | both fixtures → expected keycodes (`test_midi`, `test_kbd`) | off-by-one on a CC pair or threshold |
 | S5.4 | `RB_MIDI_MAP=kbd`, then `1` to load and `space` to play; `↑`/`↓`, `Esc`, right-click | keys drive rbp, and the wheel/right-button do too | wrong keycodes; **the selector's direction is the one thing only hardware settles** (see 08) |
 | S5.5 | pad LEDs (`LED_VERBOSE=1`) | pads mirror | the colour table is a known TODO |
-| S6.1 | plug a stick; `usb-watch.sh status` | sd found, mounted, chroot-bound, rbp shows the drive | wrong ancestor match, or `udisks2` grabbed it; or missing PM NULL guards → crash on insert |
+| S6.1 | plug a stick; `usb-watch.sh status` | **every step up to the import ran on hardware, and the blocker is the medium.** A stick was attached and `usbwatch.log` reads `detected sda (candidates: sda )` → `mounted /dev/sda1 (vfat) -> /opt/rblive4/media/usb1/sda1` → `chroot bind ok` → the umount/mount notification into `/tmp/udev_usb1`, retried every ~9 s → `attach: rbp never opened export.pdb after retries`. That last line is **correct, not a defect**: the stick carries only WAV files and an *empty* `PIONEER/USBANLZ`, and there is no `PIONEER/rekordbox/export.pdb` anywhere on it, so it is not a rekordbox-exported device and there is no DeviceSQL database for rbp to import. Playback therefore needs a stick produced by rekordbox's own *Export to USB Device*, which is the only thing that writes `export.pdb` | a stick that *has* `export.pdb` and still fails to import ⇒ then the row's original causes apply: wrong ancestor match, `udisks2` grabbing it, or missing PM NULL guards → crash on insert |
 | S7 | review these docs against the bring-up log | — | — |
 
 ## Risks specific to this target
@@ -720,8 +776,10 @@ before most code**, because they convert the biggest unknowns into facts.
    unit; the first evidence to read is the `PRESENT:` line. See
    [the present path](#the-present-path).
 4. **The pointer's axis algebra on a non-rotated display** — measured, not
-   derived, and currently blocked on there being a pointer to measure: the unit
-   has a keyboard and no mouse. See above.
+   derived. A mouse is now attached (`Logitech G203 Prodigy`, `event7`) and
+   discovered, so the one measurement left is a human click: S3.2's four corners
+   decide whether any of `POINT_SWAP_XY`/`POINT_INVERT_X`/`POINT_INVERT_Y` is
+   needed. See above.
 5. **Every DDJ-FLX4 MIDI detail** — see [15 — DDJ-FLX4 MIDI](15-flx4-midi.md).
    None of it can block the port: the keyboard map plus the fixture tests keep
    everything else moving.

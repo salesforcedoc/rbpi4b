@@ -41,40 +41,110 @@ code:
 ## Choosing the device: `AUDIO_DEV`
 
 ```
-RB_AUDIO_DEV=plughw:CARD=DDJFLX4,DEV=0
+RB_AUDIO_DEV=hw:CARD=DDJFLX4,DEV=0
 ```
 
-`plughw` on purpose. `rbp` speaks only S24_LE at 44.1 kHz, while the FLX4's USB
-audio is whatever it is — `S24_3LE`, `S16_LE`, `S32_LE`, 44.1 or 48 kHz, all
-`TODO: unverified` ([15](15-flx4-midi.md) records the question, and the answer
-does not change the shim). ALSA's plug chain does that packing and rate
-conversion for free, so none of it has to be written here.
+`hw:`, **not** `plughw:` — and this is a measurement, not a preference. The reason
+is the section after next: `AUDIO_MAP` names *hardware* channel indices, so the
+shim has to learn the card's real channel count, and a `plughw` device cannot tell
+it. The plug layer's whole job is to make the logical channel count arbitrary, and
+it reports what it can accept, not what the card has. Measured on this unit:
+
+| device | `snd_pcm_hw_params_get_channels_max()` |
+|---|---|
+| `hw:CARD=DDJFLX4,DEV=0` | **4** |
+| `plughw:CARD=DDJFLX4,DEV=0` | **10000** |
+
+With `plughw` the shim negotiated 8 logical channels — its own ceiling — onto a
+4-channel card, and the map then indexed channels of a stream the plug layer was
+free to remix. Every write failed with `-EINVAL` for reasons the log could only
+show as `written=-22`.
+
+The FLX4 accepts **44100 natively**, so nothing needs resampling either:
+
+```
+$ aplay -D hw:CARD=DDJFLX4,DEV=0 --dump-hw-params /dev/zero
+FORMAT:      S16_LE S24_3LE
+SUBFORMAT:   STD MSBITS_MAX
+SAMPLE_BITS: [16 24]
+FRAME_BITS:  [64 96]
+CHANNELS:    4
+RATE:        [44100 48000]
+PERIOD_SIZE: [45 48000]
+BUFFER_SIZE: [90 96000]
+```
+
+That set is the whole story: two formats, both 16- or 24-bit; 44.1 or 48 kHz; four
+channels. `FRAME_BITS`'s maximum of 96 is worth a second look — 4 channels × 24
+bits — because it is an independent check on what the shim writes: 64 frames in
+768 bytes is 96 bits per frame, exactly the card's ceiling.
 
 The candidate list, tried in order, is built once at startup rather than
 assembled on the failure path — a fallback chain whose last step only runs when
 something is already wrong is a step nobody has tested:
 
 1. `AUDIO_DEV`;
-2. if it starts with `hw:`, the same string as `plughw:` (a `hw:` device that
-   will not take rbp's format almost always will through `plug`);
+2. if it starts with `hw:`, the same string as `plughw:` — the plug layer's
+   conversion is a genuine fallback for a card that will not take our format
+   directly;
 3. `default`;
 4. nothing — silent, sleep-paced, one loud log line.
 
-`RB_AUDIO_FMT` is the escape hatch in the other direction: `s24_le` (default),
-`s24_3le`, or `s16_le` makes the **shim** do the packing, which is what you need
-for a `hw:` device that refuses the plug chain.
+`RB_AUDIO_FMT` names the format the **shim** packs into, and on this target it is
+the normal path rather than an escape hatch: with a `hw:` device nothing converts
+for us, so it must name a format the card actually accepts. The shipped default is
+`s24_3le` — what the FLX4 wants, and what `s24pack()` produces; `s24_le` (rbp's
+own 4-byte container) and `s16_le` are also accepted. An *unset* value is not the
+same as the shipped default: it parses to `S24_LE` and hands rbp's words over
+untouched, which is correct in exactly one case — the `plughw` fallback above,
+where the plug chain is doing the packing.
+
+### The format constants are hand-rolled, and one of them was wrong
+
+`audioshim.so` deliberately does not link the target's ALSA headers — it links only
+`libdl` and `libc`, so it can be built from the armel toolchain without a sysroot
+for the chroot's libasound — so it carries its own copy of `snd_pcm_format_t`.
+That copy had a wrong value in it for a long time:
+
+| constant | was written as | actually is |
+|---|---|---|
+| `SND_PCM_FORMAT_S16_LE` | 2 | 2 |
+| `SND_PCM_FORMAT_S24_LE` | 6 | 6 |
+| `SND_PCM_FORMAT_S24_3LE` | **10** | **32** |
+
+10 is `S32_LE`. This is the trap in the enum: the *packed* 24-bit formats are not
+next to the padded ones, they start at 32 — so the guess does not merely miss, it
+lands on a format that exists, and the card answers with a bare `-EINVAL` that
+names nothing.
+
+Nothing had caught it because the value only ever reaches libasound on a `hw:`
+device, and `AUDIO_DEV` was `plughw:` until this port — the old `set_format()`
+answered for itself and the number was never used. Two things keep it fixed now:
+
+* `tools/pcmprobe.c` prints the whole mapping, measured from libasound rather than
+  transcribed from it;
+* `check_format_constants()` in the shim has libasound *name* each value at
+  startup and logs what it resolved — including when it resolves them correctly,
+  since a check that is silent both when it passes and when it has been quietly
+  disabled is not a check. A wrong number is now one loud line instead of silent
+  no-audio.
 
 ## Channels: `AUDIO_CHANNELS=auto`, and the 1:1 rule
 
 `auto` reads `snd_pcm_hw_params_get_channels_max()` from the real handle and
 clamps it to the 8 the output buffer holds. A number forces that count.
 
-**The rule: ask for exactly as many logical channels as the card has.** The
-route plugin is 1:1 only while logical ≤ hw; ask for more and it *downmixes*,
-which folds front-left/front-right into the surround pair and puts garbage on
-the second output. This is the failure that sounds like a working card and a
-broken mix, and it is why the count is negotiated instead of forced to 8 the way
-the previous target's code did.
+**The rule: ask for exactly as many logical channels as the card has** — on the
+FLX4, 4. On a `hw:` device there is no plugin between the shim and the card, so the
+shim's frame *is* the card's frame and the map's indices mean what they say. The
+rule is inherited from the previous target, where it had different teeth: there a
+`route` plugin stayed 1:1 only while logical ≤ hw, and asking for more made it
+*downmix*, folding front-left/front-right into the surround pair and putting
+garbage on the second output. That failure sounds like a working card and a broken
+mix. With `hw:` the equivalent mistake is a bare `-EINVAL` at `hw_params` instead —
+which is at least honest. Either way the count is negotiated rather than forced to
+8 the way the previous target's code did, and `AUDIO_CHANNELS` should only ever be
+set to a number the card actually reports.
 
 ## The stream→pair map: `AUDIO_MAP`
 
@@ -226,8 +296,11 @@ speakers, so `g_speaker_gain`/`g_speaker_on` have no consumer here.
   more natural.
 * Check what the card actually offers before changing anything:
   `aplay -L | grep -i flx4`, `cat /proc/asound/cards`, and
-  `aplay --dump-hw-params -D plughw:CARD=DDJFLX4,DEV=0` for the negotiated
-  format, rate and channel count.
+  `aplay --dump-hw-params -D hw:CARD=DDJFLX4,DEV=0`. Use `hw:` for this, not
+  `plughw:` — the question is what the *card* offers, and a plug device answers
+  with what the plug layer will accept on its behalf, which is not the same list.
+  `tools/pcmprobe` prints the same thing plus ALSA's own names for the format
+  constants.
 * `/tmp/audioshim.log` records the device candidates tried, the result of each,
   the negotiated parameters and the stream→pair map. It is the first place to
   look when there is no sound.

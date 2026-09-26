@@ -8,7 +8,9 @@ Two kinds of tool live here:
 | [`build-directfb/`](build-directfb/) | workstation | C / patch | patched DirectFB 1.4.16 (core + fbdev + modules) |
 | [`fbdump.c`](fbdump.c) | **the Pi** | C | dump `/dev/fb0` geometry/format + say what it means for the present path |
 | [`evdevdump.c`](evdevdump.c) | **the Pi** | C | enumerate input devices; find the pointer and its axis algebra |
+| [`pcmprobe.c`](pcmprobe.c) | **inside the chroot on the Pi**, or a workstation under `qemu-arm` | C | name ALSA's `snd_pcm_format_t` values, and list a card's accepted formats by name |
 | [`aseqdump2dump.py`](aseqdump2dump.py) | the Pi or a workstation | Python | turn an `aseqdump` capture into a replayable MIDI dump, and print the inventory and arithmetic a controller map is written from |
+| [`pi-bringup/`](pi-bringup/) | **the Pi** | Python / shell | drive the input path on the unit: a virtual keyboard with a chosen hold time, a raw evdev reader, a state probe, a key-and-capture harness |
 
 Firmware acquisition, decryption and key handling are out of scope for rblive4;
 start from the extracted assets described in
@@ -85,6 +87,38 @@ or `1279-py` — so the procedure is: `POINT_DEBUG=1`, click the four corners of
 the UI, read the emitted logical coordinates, and correct with
 `POINT_SWAP_XY`/`POINT_INVERT_X`/`POINT_INVERT_Y` (or the `TouchCalib_*.dat`
 affine) before touching any code.
+
+## `pcmprobe` — asking libasound what its constants mean
+
+`audioshim.so` deliberately does not link the target's ALSA headers — it links
+only `libdl` and `libc`, so it can be built from the armel toolchain without a
+sysroot for the chroot's libasound — so it spells out `snd_pcm_format_t` itself.
+That hand-rolled copy had `SND_PCM_FORMAT_S24_3LE` as **10**, which is `S32_LE`:
+the card answered with a bare `-EINVAL` that named nothing, and the symptom was
+silence. The packed 24-bit formats are not adjacent to the padded ones — they
+start at 32 — so the wrong value lands on a format that *exists*, which is what
+makes it a silent failure rather than a compile error.
+
+It links libasound, so it links the **chroot's** copy — the same one the shim
+dlopens. Build it cross, then run it under `qemu-arm` at the workstation, or copy
+it into the chroot on the Pi where `/dev/snd` is bound in:
+
+```bash
+make -C scripts/shims pcmprobe                                  # cross-build, not shipped
+qemu-arm -L extracted/XDJRX3-rootfs scripts/shims/pcmprobe      # names every value
+```
+
+Run with no arguments it calls `snd_pcm_format_name()` for every candidate and
+prints the mapping **as measured from libasound rather than transcribed**, with
+each format's `width` and `physical` bytes — that difference is what `AUDIO_FMT`
+actually names. Give it a device (`pcmprobe hw:CARD=DDJFLX4,DEV=0`) and it lists
+that card's accepted formats by name, which is the same question
+`aplay --dump-hw-params` answers, in the shim's own vocabulary.
+
+It is built on demand and never installed: it is an instrument, not part of the
+deploy. `check_format_constants()` in the shim does the same check at every
+startup and logs the values it resolved, so this tool is for finding out what the
+numbers are — the shim's own line is what catches them later.
 
 ## `aseqdump2dump` — turning a capture into a fixture and a table
 

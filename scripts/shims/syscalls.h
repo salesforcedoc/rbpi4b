@@ -61,4 +61,24 @@ static inline int real_dup(int fd)
     return (int)syscall(SYS_dup, fd);
 }
 
+/* mmap, for the framebuffer. ARM has no SYS_mmap in the 32-bit ABI — only
+ * SYS_mmap2, whose offset is in *pages* — so the byte offset is shifted here
+ * rather than at every call site. The error test is the kernel's own convention
+ * (−1..−4095 in the return register) and not `r < 0`: a successful mmap on ARM
+ * routinely lands in the 0xb6xxxxxx range, which is negative as a signed long.
+ * MAP_FAILED is (void *)-1, which is what this returns on failure. */
+static inline void *real_mmap(void *addr, size_t len, int prot, int flags,
+                              int fd, long off)
+{
+    long r;
+#if defined(SYS_mmap2)
+    r = syscall(SYS_mmap2, addr, len, prot, flags, fd, off >> 12);
+#else
+    r = syscall(SYS_mmap, addr, len, prot, flags, fd, off);
+#endif
+    if ((unsigned long)r >= (unsigned long)-4095)
+        return (void *)-1;
+    return (void *)r;
+}
+
 #endif /* RBLIVE4_SYSCALLS_H */

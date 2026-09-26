@@ -108,16 +108,21 @@ static char st_name[POINT_NAME_MAX];
  *
  * One FILE* opened on first use and never closed, rather than an fopen/fclose
  * per line: the log is written from the pointer path, and a per-event open is
- * exactly the mistake Milestone 1 is removing from the DirectFB driver. Only the
- * reader thread ever calls this, so there is no lock — and it is worth keeping it
- * that way. */
+ * exactly the mistake Milestone 1 is removing from the DirectFB driver. */
 static FILE *log_fp = NULL;
 static int  log_tried = 0;
 static int  log_debug = 0;
 
 #define POINT_LOG "/tmp/pointsrc.log"
 
-static void plog(const char *fmt, ...)
+/* Also called by fb_cursor.c, so the pointer's two halves land in one file in
+ * the order the events happened. That makes this the one place in the pointer
+ * path that takes a lock — the file's whole design keeps locks out of the reader
+ * loop, and a vfprintf racing another thread's is undefined rather than merely
+ * interleaved. It is only reached when POINT_DEBUG is on. */
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void pointsrc_log(const char *fmt, ...)
 {
     va_list ap;
     if (!log_tried) {
@@ -126,11 +131,13 @@ static void plog(const char *fmt, ...)
     }
     if (log_fp == NULL)
         return;
+    pthread_mutex_lock(&log_lock);
     va_start(ap, fmt);
     vfprintf(log_fp, fmt, ap);
     va_end(ap);
     fputc('\n', log_fp);
     fflush(log_fp);
+    pthread_mutex_unlock(&log_lock);
 }
 
 /* --- capability/name helpers ---------------------------------------------- */
@@ -147,7 +154,7 @@ static int want_kind(void)
     if (strcmp(k, "abs") == 0)  return POINT_KIND_ABS;
     if (strcmp(k, "rel") == 0)  return POINT_KIND_REL;
     if (strcmp(k, "auto") == 0) return POINT_KIND_AUTO;
-    plog("pointsrc: unknown POINT_KIND '%s'; treating as auto", k);
+    pointsrc_log("pointsrc: unknown POINT_KIND '%s'; treating as auto", k);
     return POINT_KIND_AUTO;
 }
 
@@ -276,7 +283,7 @@ static int open_matching_device(int kind, const char *match, char *path_out,
 
 static void log_attach(int kind, const char *path, const char *name)
 {
-    plog("pointsrc: %s device %s name='%s'",
+    pointsrc_log("pointsrc: %s device %s name='%s'",
          kind == POINT_KIND_ABS ? "absolute" : "relative", path, name);
 }
 
@@ -289,7 +296,7 @@ static void absorb_into_xform(struct point_xform *x, int fd, int kind)
          * at these fields. */
         read_abs_range(fd, ABS_X, &x->raw_min_x, &x->raw_max_x);
         read_abs_range(fd, ABS_Y, &x->raw_min_y, &x->raw_max_y);
-        plog("pointsrc: raw range x=[%d..%d] y=[%d..%d] swap=%d inv_x=%d inv_y=%d",
+        pointsrc_log("pointsrc: raw range x=[%d..%d] y=[%d..%d] swap=%d inv_x=%d inv_y=%d",
              x->raw_min_x, x->raw_max_x, x->raw_min_y, x->raw_max_y,
              x->swap_xy, x->invert_x, x->invert_y);
     }
@@ -327,7 +334,7 @@ static void read_loop_abs(int fd, const struct point_xform *x)
                 st_cursor_y = ly;
                 tscfake_emit(down, lx, ly);
                 if (log_debug)
-                    plog("pointsrc: abs raw=(%d,%d) logical=(%d,%d) down=%d",
+                    pointsrc_log("pointsrc: abs raw=(%d,%d) logical=(%d,%d) down=%d",
                          rx, ry, lx, ly, down);
             }
             break;
@@ -370,7 +377,7 @@ static void read_loop_rel(int fd, const struct point_xform *x)
                     st_down = 1;
                     tscfake_emit(1, cx, cy);
                     if (log_debug)
-                        plog("pointsrc: rel press at (%d,%d)", cx, cy);
+                        pointsrc_log("pointsrc: rel press at (%d,%d)", cx, cy);
                 } else if (!nd && down) {
                     /* Release. A click shorter than the dwell is held open: rbp's
                      * TouchAdValueHysteresis needs a few frames of "down" to
@@ -384,7 +391,7 @@ static void read_loop_rel(int fd, const struct point_xform *x)
                     if (dwell_ms > 0 && elapsed_ms < dwell_ms) {
                         usleep((useconds_t)(dwell_ms - elapsed_ms) * 1000);
                         if (log_debug)
-                            plog("pointsrc: rel release held %ldms (dwell %d)",
+                            pointsrc_log("pointsrc: rel release held %ldms (dwell %d)",
                                  (long)dwell_ms - elapsed_ms, dwell_ms);
                     }
                     down = 0;
@@ -406,7 +413,7 @@ static void read_loop_rel(int fd, const struct point_xform *x)
                 if (down) {
                     tscfake_emit(1, cx, cy);
                     if (log_debug)
-                        plog("pointsrc: rel drag to (%d,%d)", cx, cy);
+                        pointsrc_log("pointsrc: rel drag to (%d,%d)", cx, cy);
                 }
             }
             break;
@@ -475,7 +482,7 @@ static void *reader_thread(void *arg)
         st_kind = POINT_KIND_NONE;
         st_down = 0;
         if (log_debug)
-            plog("pointsrc: %s went away; rescanning", path);
+            pointsrc_log("pointsrc: %s went away; rescanning", path);
     }
     return NULL;
 }
@@ -514,4 +521,22 @@ void pointsrc_status(char *buf, unsigned long buflen)
     }
     snprintf(buf, buflen, "kind=%s dev=%s name='%s' at=(%d,%d) down=%d",
              kindstr, st_path, st_name, st_cursor_x, st_cursor_y, st_down);
+}
+
+int pointsrc_cursor(int *logical_x, int *logical_y, int *down)
+{
+    /* A relative device is the only case that needs an arrow: an absolute one
+     * reports where it is being touched, so a cursor would be a second, lagging
+     * mark on the screen saying the same thing. Returning 0 here is also how the
+     * compositor learns that the mouse was unplugged and the arrow it drew has
+     * to come back off. */
+    if (st_kind != POINT_KIND_REL)
+        return 0;
+    if (logical_x)
+        *logical_x = st_cursor_x;
+    if (logical_y)
+        *logical_y = st_cursor_y;
+    if (down)
+        *down = st_down;
+    return 1;
 }

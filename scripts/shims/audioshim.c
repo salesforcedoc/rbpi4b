@@ -19,15 +19,19 @@
  *
  * ---- What changed for the Pi (the SC Live 4's version is in git history) ----
  *
- *  - The device is AUDIO_DEV, default plughw:CARD=DDJFLX4,DEV=0, instead of a
- *    hardcoded "hw:1,0". plughw on purpose: ALSA's plug chain does S24_LE <->
- *    S24_3LE packing and 44.1 -> 48 kHz for free, and rbp only ever speaks S24_LE
- *    at 44.1. AUDIO_FMT is the escape hatch for a hw: device that will not.
+ *  - The device is AUDIO_DEV, default hw:CARD=DDJFLX4,DEV=0, instead of a
+ *    hardcoded "hw:1,0". hw: and not plughw:, and the reason is the next bullet:
+ *    AUDIO_MAP indexes *hardware* channels, so this shim has to learn the card's
+ *    real channel count, and a plughw device will not tell it. The plug layer
+ *    exists to make the logical channel count arbitrary and reports what it can
+ *    accept — 10000 on this unit — against the card's actual 4. Since there is
+ *    then no plug chain to convert anything, AUDIO_FMT (default s24_3le) names
+ *    the format the card really wants and s24pack.c packs it. The FLX4 takes
+ *    44100 natively, so nothing needs resampling.
  *  - The channel count is negotiated from the real card (AUDIO_CHANNELS=auto) and
  *    clamped to the 8 the output buffer holds, instead of being forced to 8. The
- *    rule is to ask for exactly as many channels as the card has, because the
- *    route plugin is 1:1 only while logical <= hw; ask for more and it downmixes,
- *    which folds the master into the second pair.
+ *    rule is to ask for exactly as many channels as the card has, so that this
+ *    shim's frame *is* the card's frame and the map's indices mean what they say.
  *  - Stream->pair routing is a table (AUDIO_MAP) rather than index arithmetic on
  *    a fixed 8-channel frame.
  *  - The built-in-speaker pair is gone — a Pi has no internal speakers — so
@@ -132,10 +136,22 @@ typedef void snd_pcm_info_t;
 /* ALSA's own snd_pcm_format_t values. Spelled out rather than included, because
  * this shim deliberately does not link against the target's ALSA headers — only
  * against libdl and libc — so that it can be built from the armel toolchain
- * without a sysroot for the chroot's libasound. */
-#define SND_PCM_FORMAT_S16_LE   2
-#define SND_PCM_FORMAT_S24_LE   6
-#define SND_PCM_FORMAT_S24_3LE  10
+ * without a sysroot for the chroot's libasound.
+ *
+ * The packed 24-bit formats are the trap: they are NOT next to the padded ones,
+ * they start at 32. S24_3LE read as 10 here for a long time, and 10 is S32_LE —
+ * so the shim asked a 16/24-bit card for 32-bit samples and got a bare -EINVAL
+ * that named nothing. Nothing caught it because the value only ever reaches
+ * libasound on an `hw:` device, and AUDIO_DEV was `plughw:` until the Pi port,
+ * where the old set_format() answered for itself and the number was never used.
+ *
+ * check_format_constants() below asks libasound to name each of these at startup,
+ * so a wrong number is now one loud log line instead of silent no-audio.
+ * tools/pcmprobe.c prints the whole map, measured from libasound rather than
+ * transcribed. */
+#define SND_PCM_FORMAT_S16_LE    2   /* width=16 physical=16 */
+#define SND_PCM_FORMAT_S24_LE    6   /* width=24 physical=32 — 4-byte container */
+#define SND_PCM_FORMAT_S24_3LE  32   /* width=24 physical=24 — 3 bytes packed */
 
 /* ---- geometry ------------------------------------------------------------- */
 
@@ -184,8 +200,13 @@ static struct {
 static const char *g_dev_candidates[4];
 
 /* AUDIO_DEV's default. The card id must match what /proc/asound/cards reports;
- * see docs/13-raspberrypi4.md for how to check it. */
-#define AUDIO_DEV_DEFAULT "plughw:CARD=DDJFLX4,DEV=0"
+ * see docs/13-raspberrypi4.md for how to check it.
+ *
+ * hw: rather than plughw:, see the header: a plug device answers for its own
+ * logical channel space (10000 on this unit) instead of the card's 4, so the map's
+ * hardware channel indices cannot be resolved through one. rb.conf sets the same
+ * string; this is the fallback for when the variable is unset entirely. */
+#define AUDIO_DEV_DEFAULT "hw:CARD=DDJFLX4,DEV=0"
 
 /* ---- virtual handles ------------------------------------------------------ */
 
@@ -226,12 +247,59 @@ static int (*real_snd_pcm_prepare)(snd_pcm_t *) = NULL;
 static snd_pcm_sframes_t (*real_snd_pcm_writei)(snd_pcm_t *, const void *, snd_pcm_uframes_t) = NULL;
 static int (*real_snd_ctl_open)(snd_ctl_t **, const char *, int) = NULL;
 static int (*real_snd_ctl_close)(snd_ctl_t *) = NULL;
+static const char *(*real_snd_pcm_format_name)(int) = NULL;
+
+/* Confirm that the hand-rolled SND_PCM_FORMAT_* values above name the formats this
+ * shim believes they name, by asking libasound to name them. A mismatch is not
+ * cosmetic: set_format() passes the value straight to the card on a hw: device
+ * and the card rejects it with -EINVAL, which says nothing about which number was
+ * wrong. See the comment on the constants.
+ *
+ * It reports the values it *did* resolve, not just the ones it caught, because a
+ * check that is silent both when it passes and when it has been quietly disabled
+ * — an unresolved dlsym returns early — is not a check anyone can trust. One
+ * line, once per process that touches ALSA. */
+static void check_format_constants(void)
+{
+    static const struct { int val; const char *want; } t[] = {
+        { SND_PCM_FORMAT_S16_LE,  "S16_LE"  },
+        { SND_PCM_FORMAT_S24_LE,  "S24_LE"  },
+        { SND_PCM_FORMAT_S24_3LE, "S24_3LE" },
+    };
+    size_t i;
+    int bad = 0;
+
+    if (!real_snd_pcm_format_name) {
+        alog("audioshim: cannot verify the format constants: libasound has no "
+             "snd_pcm_format_name\n");
+        return;
+    }
+    for (i = 0; i < sizeof t / sizeof t[0]; i++) {
+        const char *got = real_snd_pcm_format_name(t[i].val);
+        if (!got || strcmp(got, t[i].want) != 0) {
+            bad = 1;
+            alog("audioshim: FORMAT CONSTANT WRONG: %d names '%s', not '%s' — "
+                 "fix the #define above; a wrong value reaches the card as a bare "
+                 "-EINVAL with no name attached\n",
+                 t[i].val, got ? got : "(null)", t[i].want);
+        }
+    }
+    if (!bad)
+        alog("audioshim: format constants verified: S16_LE=%d S24_LE=%d S24_3LE=%d\n",
+             SND_PCM_FORMAT_S16_LE, SND_PCM_FORMAT_S24_LE, SND_PCM_FORMAT_S24_3LE);
+}
 
 static void init_real_alsa(void)
 {
+    /* The latch goes up *last*, after every pointer is assigned. Raising it first
+     * — which this used to do — lets a second thread return early and go on to
+     * call a real_snd_* that is still NULL, and the failure mode is silent:
+     * snd_pcm_open() then hands out the fake master and rbp runs with no device
+     * while the log looks perfectly healthy. Two threads racing the dlopen is
+     * harmless, because the writes are idempotent and all of them are the same
+     * addresses; a half-populated table is not. */
     static int initialized = 0;
     if (initialized) return;
-    initialized = 1;
 
     void *lib = dlopen("libasound.so.2", RTLD_LAZY | RTLD_GLOBAL);
     if (!lib) {
@@ -262,8 +330,12 @@ static void init_real_alsa(void)
     real_snd_pcm_writei = dlsym(lib, "snd_pcm_writei");
     real_snd_ctl_open = dlsym(lib, "snd_ctl_open");
     real_snd_ctl_close = dlsym(lib, "snd_ctl_close");
+    real_snd_pcm_format_name = dlsym(lib, "snd_pcm_format_name");
+
+    check_format_constants();
 
     alog("audioshim: real ALSA initialized\n");
+    initialized = 1;
 }
 
 /* ---- buffers -------------------------------------------------------------- */
@@ -635,6 +707,53 @@ static inline int is_real(snd_pcm_t *pcm)
     return pcm != NULL && pcm == g_real_playback;
 }
 
+/* One of the five handles this shim invented, rather than one libasound made.
+ * They are the addresses of static ints, so they are distinct from every heap
+ * snd_pcm_t and stable for the process's life. */
+static inline int is_fake(snd_pcm_t *pcm)
+{
+    return pcm == (snd_pcm_t *)&g_h_master ||
+           pcm == (snd_pcm_t *)&g_h_phone  ||
+           pcm == (snd_pcm_t *)&g_h_booth  ||
+           pcm == (snd_pcm_t *)&g_h_dummy  ||
+           pcm == (snd_pcm_t *)&g_h_cap;
+}
+
+/* The rule for the whole parameter plumbing: answer the handles *this shim
+ * invented* with a local success, and forward everything else to the real
+ * function — passing the caller's own pointer, never g_real_playback.
+ *
+ * "Everything else" is not just our master. A plugin device (plughw and friends)
+ * configures and drives its slave by calling the public snd_pcm_* functions, so
+ * this shim is re-entered with a libasound-internal handle: measured on the FLX4,
+ * snd_pcm_prepare() and snd_pcm_sw_params() both arrive for pointers
+ * snd_pcm_open() never handed out. Gating on is_real() alone made those a silent
+ * no-op, which left the hw slave unconfigured and unprepared — every write then
+ * failed with -EINVAL, showing up as `written=-22` with nothing in the log to say
+ * why. It is the same defect snd_pcm_close() had, and snd_ctl_close() never did.
+ *
+ * On a hw: device this is inert: no plugin sits below us, so only the fakes and
+ * g_real_playback ever reach these functions, and for those it means exactly what
+ * is_real() meant. */
+static inline int is_forwardable(snd_pcm_t *pcm)
+{
+    return pcm != NULL && !is_fake(pcm);
+}
+
+/* Forget everything a negotiation established, so the next open renegotiates
+ * from scratch: the next card may not be the same card. */
+static void reset_stream_state(void)
+{
+    g_playback_open_count = 0;
+    g_out_channels = 0;
+    g_pairs_resolved = 0;
+    g_phone_stage.frames = 0;
+    g_phone_stage.warn_size = 0;
+    g_booth_stage.frames = 0;
+    g_booth_stage.warn_size = 0;
+    memset(g_out, 0, sizeof g_out);
+}
+
 static void open_real_device(int mode)
 {
     /* rbp asks for nonblocking and then relies on the device to pace it. Masking
@@ -701,22 +820,47 @@ int snd_pcm_open(snd_pcm_t **pcm, const char *name, int stream, int mode)
 
 int snd_pcm_close(snd_pcm_t *pcm)
 {
+    int ours;
+
     init_real_alsa();
     alog("audioshim: snd_pcm_close(handle=%p)\n", pcm);
 
-    if (is_master(pcm)) {
-        if (g_real_playback && real_snd_pcm_close)
-            real_snd_pcm_close(g_real_playback);
+    if (is_fake(pcm)) {
+        /* Nothing real was ever opened under these, so there is no device to
+         * release — but closing the master still ends the negotiation, and the
+         * next open must start a fresh one. */
+        if (pcm == (snd_pcm_t *)&g_h_master)
+            reset_stream_state();
+        return 0;
+    }
+
+    /* Anything else is a genuine snd_pcm_t, and there are two kinds of those.
+     *
+     * Ours, from open_real_device() — and libasound's own. The PLT calls a plugin
+     * makes are interposed as well, which is not obvious and is the whole point of
+     * this branch: plughw's plug layer tears itself down by calling
+     * snd_pcm_close() on its slave hw: handle, so this function is re-entered with
+     * a pointer that is neither g_real_playback nor one of the fakes. Swallowing
+     * that — as returning 0 here used to — leaves the slave's
+     * /dev/snd/pcmC*D*p fd open for the life of the process, so the card stays
+     * busy: the next open returns -EBUSY, rbp is handed the fake master instead,
+     * and every stream then runs silent. Forward it.
+     *
+     * snd_ctl_close() below has always done exactly this; this side did not. */
+    ours = is_real(pcm);
+    if (ours) {
+        /* Clear the global *before* the call: the close re-enters this function
+         * for the slave, and that inner call must not mistake itself for the
+         * master's close. */
         g_real_playback = NULL;
-        /* A reopen has to renegotiate: the next card may not be the same card. */
-        g_playback_open_count = 0;
-        g_out_channels = 0;
-        g_pairs_resolved = 0;
-        g_phone_stage.frames = 0;
-        g_phone_stage.warn_size = 0;
-        g_booth_stage.frames = 0;
-        g_booth_stage.warn_size = 0;
-        memset(g_out, 0, sizeof g_out);
+        reset_stream_state();
+    }
+
+    if (real_snd_pcm_close) {
+        int err = real_snd_pcm_close(pcm);
+        alog("audioshim: closed %s handle %p res=%d\n",
+             ours ? "the master's" : "a libasound-internal", pcm, err);
+        return err;
     }
     return 0;
 }
@@ -726,8 +870,8 @@ int snd_pcm_close(snd_pcm_t *pcm)
 int snd_pcm_hw_params_any(snd_pcm_t *pcm, snd_pcm_hw_params_t *params)
 {
     init_real_alsa();
-    if (is_real(pcm) && real_snd_pcm_hw_params_any)
-        return real_snd_pcm_hw_params_any(g_real_playback, params);
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params_any)
+        return real_snd_pcm_hw_params_any(pcm, params);
     return 0;
 }
 
@@ -735,8 +879,8 @@ int snd_pcm_hw_params_set_access(snd_pcm_t *pcm, snd_pcm_hw_params_t *params, in
 {
     init_real_alsa();
     alog("audioshim: set_access req=%d\n", access);
-    if (is_real(pcm) && real_snd_pcm_hw_params_set_access)
-        return real_snd_pcm_hw_params_set_access(g_real_playback, params, access);
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_access)
+        return real_snd_pcm_hw_params_set_access(pcm, params, access);
     return 0;
 }
 
@@ -744,15 +888,17 @@ int snd_pcm_hw_params_set_format(snd_pcm_t *pcm, snd_pcm_hw_params_t *params, in
 {
     init_real_alsa();
     alog("audioshim: set_format req=%d\n", format);
-    if (is_real(pcm) && real_snd_pcm_hw_params_set_format) {
-        /* S24_LE by default, whatever rbp asked for: that is the only thing rbp
-         * can produce, and a plughw device converts it onward. When AUDIO_FMT
-         * names a real format we ask for *that* instead, so the card receives
-         * exactly the bytes s24pack() built and nothing converts behind us. */
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_format) {
+        /* Whatever rbp asked for, the device is configured with AUDIO_FMT's
+         * format — the one s24pack() actually produces. On the default hw:
+         * device that is s24_3le, which is the format the FLX4 accepts and the
+         * only reason the bytes we hand over are the bytes the card sees. With an
+         * unset AUDIO_FMT this is S24_LE, rbp's own container, which is right for
+         * a device that converts for us (the plughw fallback candidate). */
         int want = SND_PCM_FORMAT_S24_LE;
         if (g_cfg.fmt == AUDIO_FMT_S24_3LE) want = SND_PCM_FORMAT_S24_3LE;
         else if (g_cfg.fmt == AUDIO_FMT_S16_LE) want = SND_PCM_FORMAT_S16_LE;
-        int err = real_snd_pcm_hw_params_set_format(g_real_playback, params, want);
+        int err = real_snd_pcm_hw_params_set_format(pcm, params, want);
         alog("audioshim: real set_format(%d) res=%d\n", want, err);
         return err;
     }
@@ -763,12 +909,16 @@ int snd_pcm_hw_params_set_channels(snd_pcm_t *pcm, snd_pcm_hw_params_t *params, 
 {
     init_real_alsa();
     alog("audioshim: set_channels req=%u\n", val);
-    if (is_real(pcm) && real_snd_pcm_hw_params_set_channels) {
-        if (g_out_channels == 0)
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_channels) {
+        /* rbp's own request is the one that decides the frame width. A plugin
+         * chain re-entering this function for its own slave is asking about that
+         * slave and must not be allowed to set g_out_channels from its params. */
+        if (is_real(pcm) && g_out_channels == 0)
             g_out_channels = negotiate_channels(params);
-        int err = real_snd_pcm_hw_params_set_channels(g_real_playback, params,
-                                                      g_out_channels);
-        alog("audioshim: real set_channels(%u) res=%d\n", g_out_channels, err);
+        int err = real_snd_pcm_hw_params_set_channels(pcm, params,
+                                                      is_real(pcm) ? g_out_channels : val);
+        alog("audioshim: real set_channels(%u) res=%d\n",
+             is_real(pcm) ? g_out_channels : val, err);
         return err;
     }
     return 0;
@@ -778,11 +928,14 @@ int snd_pcm_hw_params_set_rate_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *params,
 {
     init_real_alsa();
     alog("audioshim: set_rate_near req=%u\n", val ? *val : 0);
-    if (is_real(pcm) && real_snd_pcm_hw_params_set_rate_near) {
-        /* rbp asks for 44100 and means it; the plug chain resamples to whatever
-         * the card actually runs at, which is the FLX4's business, not rbp's. */
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_rate_near) {
+        /* rbp asks for 44100 and means it, and the FLX4 runs at 44100 natively, so
+         * this is the rate the card is configured with. It is not a conversion
+         * point: nothing resamples for us on a hw: device, which is one reason the
+         * default is hw: rather than plughw — see the header. The value is forced
+         * because rbp asks for it as a *near* request and reads back what it gets. */
         if (val) *val = 44100;
-        int err = real_snd_pcm_hw_params_set_rate_near(g_real_playback, params, val, dir);
+        int err = real_snd_pcm_hw_params_set_rate_near(pcm, params, val, dir);
         alog("audioshim: real set_rate_near res=%d rate=%u\n", err, val ? *val : 0);
         return err;
     }
@@ -794,8 +947,8 @@ int snd_pcm_hw_params_set_period_size_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *
 {
     init_real_alsa();
     alog("audioshim: set_period_size_near req=%lu\n", val ? *val : 0);
-    if (is_real(pcm) && real_snd_pcm_hw_params_set_period_size_near) {
-        int err = real_snd_pcm_hw_params_set_period_size_near(g_real_playback, params, val, dir);
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_period_size_near) {
+        int err = real_snd_pcm_hw_params_set_period_size_near(pcm, params, val, dir);
         alog("audioshim: real set_period_size_near res=%d period=%lu\n", err, val ? *val : 0);
         return err;
     }
@@ -806,8 +959,8 @@ int snd_pcm_hw_params_set_periods_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *para
 {
     init_real_alsa();
     alog("audioshim: set_periods_near req=%u\n", val ? *val : 0);
-    if (is_real(pcm) && real_snd_pcm_hw_params_set_periods_near) {
-        int err = real_snd_pcm_hw_params_set_periods_near(g_real_playback, params, val, dir);
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_periods_near) {
+        int err = real_snd_pcm_hw_params_set_periods_near(pcm, params, val, dir);
         alog("audioshim: real set_periods_near res=%d periods=%u\n", err, val ? *val : 0);
         return err;
     }
@@ -843,8 +996,8 @@ int snd_pcm_hw_params(snd_pcm_t *pcm, snd_pcm_hw_params_t *params)
 {
     init_real_alsa();
     alog("audioshim: snd_pcm_hw_params(pcm=%p)\n", pcm);
-    if (is_real(pcm) && real_snd_pcm_hw_params) {
-        int err = real_snd_pcm_hw_params(g_real_playback, params);
+    if (is_forwardable(pcm) && real_snd_pcm_hw_params) {
+        int err = real_snd_pcm_hw_params(pcm, params);
         alog("audioshim: real hw_params res=%d\n", err);
         return err;
     }
@@ -859,8 +1012,8 @@ int snd_pcm_sw_params_current(snd_pcm_t *pcm, snd_pcm_sw_params_t *params)
 {
     init_real_alsa();
     int err = 0;
-    if (is_real(pcm) && real_snd_pcm_sw_params_current)
-        err = real_snd_pcm_sw_params_current(g_real_playback, params);
+    if (is_forwardable(pcm) && real_snd_pcm_sw_params_current)
+        err = real_snd_pcm_sw_params_current(pcm, params);
     alog("audioshim: snd_pcm_sw_params_current(pcm=%p) res=%d\n", pcm, err);
     return err;
 }
@@ -882,8 +1035,8 @@ int snd_pcm_sw_params_get_boundary(const snd_pcm_sw_params_t *params, snd_pcm_uf
 int snd_pcm_sw_params_set_silence_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
-    if (is_real(pcm) && real_snd_pcm_sw_params_set_silence_threshold)
-        real_snd_pcm_sw_params_set_silence_threshold(g_real_playback, params, val);
+    if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_silence_threshold)
+        real_snd_pcm_sw_params_set_silence_threshold(pcm, params, val);
     alog("audioshim: set_silence_threshold(%lu) -> ok\n", val);
     return 0;
 }
@@ -891,8 +1044,8 @@ int snd_pcm_sw_params_set_silence_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t 
 int snd_pcm_sw_params_set_silence_size(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
-    if (is_real(pcm) && real_snd_pcm_sw_params_set_silence_size)
-        real_snd_pcm_sw_params_set_silence_size(g_real_playback, params, val);
+    if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_silence_size)
+        real_snd_pcm_sw_params_set_silence_size(pcm, params, val);
     alog("audioshim: set_silence_size(%lu) -> ok\n", val);
     return 0;
 }
@@ -900,8 +1053,8 @@ int snd_pcm_sw_params_set_silence_size(snd_pcm_t *pcm, snd_pcm_sw_params_t *para
 int snd_pcm_sw_params_set_start_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
-    if (is_real(pcm) && real_snd_pcm_sw_params_set_start_threshold)
-        real_snd_pcm_sw_params_set_start_threshold(g_real_playback, params, val);
+    if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_start_threshold)
+        real_snd_pcm_sw_params_set_start_threshold(pcm, params, val);
     alog("audioshim: set_start_threshold(%lu) -> ok\n", val);
     return 0;
 }
@@ -909,8 +1062,8 @@ int snd_pcm_sw_params_set_start_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *p
 int snd_pcm_sw_params_set_stop_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *params, snd_pcm_uframes_t val)
 {
     init_real_alsa();
-    if (is_real(pcm) && real_snd_pcm_sw_params_set_stop_threshold)
-        real_snd_pcm_sw_params_set_stop_threshold(g_real_playback, params, val);
+    if (is_forwardable(pcm) && real_snd_pcm_sw_params_set_stop_threshold)
+        real_snd_pcm_sw_params_set_stop_threshold(pcm, params, val);
     alog("audioshim: set_stop_threshold(%lu) -> ok\n", val);
     return 0;
 }
@@ -1192,12 +1345,23 @@ snd_pcm_sframes_t snd_pcm_writei(snd_pcm_t *pcm, const void *buffer, snd_pcm_ufr
     if (is_master(pcm))
         return flush_master((const int32_t *)buffer, size);
 
-    /* A handle we did not hand out: the capture, the dummy, or something rbp
-     * invented. The old code treated any unrecognised handle as the master, which
-     * would put an unknown stream onto the master pair; discarding it is the
-     * honest answer. */
-    if (!g_real_playback)
-        pace_without_device(size);
+    if (is_fake(pcm)) {
+        /* The capture and the dummy: there is nowhere for this to go. The old code
+         * treated any unrecognised handle as the master, which would put an
+         * unknown stream onto the master pair; discarding it is the honest answer.
+         * Pace it, though, or rbp spins. */
+        if (!g_real_playback)
+            pace_without_device(size);
+        return (snd_pcm_sframes_t)size;
+    }
+
+    /* A real handle that is not ours: libasound's own, because a plugin layer
+     * writes to its slave with the public snd_pcm_writei(). Pass it through. This
+     * is not a nicety — swallowing it would discard every frame the plug layer had
+     * just converted, so the card would get silence while the log read healthy,
+     * which is the exact failure this port is trying to stop chasing. */
+    if (real_snd_pcm_writei)
+        return real_snd_pcm_writei(pcm, buffer, size);
     return (snd_pcm_sframes_t)size;
 }
 

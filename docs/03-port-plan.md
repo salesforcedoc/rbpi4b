@@ -97,23 +97,34 @@ that entry kind and `ctrl_map.h` is unchanged. The other device fact did hold,
 and it removed the shim's hardcoded sequencer client id and `/dev/snd/midiC0D0`:
 the controller is found by name — `QUERY_NEXT_CLIENT` / `QUERY_NEXT_PORT` with
 `MIDI_IN_MATCH` / `MIDI_OUT_MATCH` — with rawmidi kept only as a runtime
-fallback. That part is **in the tree but unexercised**: nothing in this repo has
-been run with an FLX4 attached. The FLX4 tables are written from that published
-list and are `flx4`'s own map, which is now `RB_MIDI_MAP`'s default; the
-unverified parts are marked as such in the map and listed in
-[15](15-flx4-midi.md). Details:
+fallback. **That discovery now runs against the unit**: the shim logs
+`subscribed to 28:0 'DDJ-FLX4 MIDI 1' (match 'FLX4')`, and an `aseqdump` capture
+taken alongside it (S5.1) is what turned the map's largest guess — the jog's
+counts per revolution — into a measurement. What is still not verified against
+the hardware is the map's *tables*: nothing has yet pressed a control and watched
+rbp react, so every keycode in `map_flx4.c` rests on Pioneer's published list.
+Those parts are marked in the map and listed in [15](15-flx4-midi.md). Details:
 [08 — Controls](08-controls.md) and the FLX4 runbook
 [15 — DDJ-FLX4 MIDI](15-flx4-midi.md).
 
 ### 2.4 Audio — negotiated instead of hardcoded
 
-`hw:1,0` with 8 JP21 channels becomes `plughw:CARD=DDJFLX4,DEV=0`, with the
-channel count read from the real handle and the stream→pair assignment in
+`hw:1,0` with 8 JP21 channels becomes `hw:CARD=DDJFLX4,DEV=0`, with the channel
+count negotiated from the real card and the stream→pair assignment in
 `RB_AUDIO_MAP`. `rbp`'s side of the contract is untouched: three 2-channel
 S24_LE 44.1 kHz playback streams plus a dummy capture, opened in a fixed order.
-`plughw` is what lets ALSA's plug chain do the sample-format packing and the
-44.1→48 kHz conversion, which is why the FLX4's actual native format does not
-matter to the shim. Details: [09 — Audio](09-audio.md).
+
+The plan was `plughw:` here, on the reasoning that ALSA's plug chain would do the
+S24_LE ↔ S24_3LE packing and the 44.1 → 48 kHz conversion for free. **That was
+wrong, and it is worth keeping the reason:** the map names *hardware* channel
+indices, so the shim has to learn the card's real channel count, and a plug device
+reports what the plug layer will accept instead — 10000 channels against the card's
+4. The shim therefore negotiated 8 logical channels onto a 4-channel card and every
+write failed `-EINVAL`. Measured afterwards: the FLX4 takes **44100 natively** and
+accepts `S24_3LE` directly, so the plug chain was not needed for either. The shim's
+own `s24pack()` does the packing, `RB_AUDIO_FMT` selects it, and `plughw:` survives
+only as the fallback candidate for a card that refuses our format.
+Details: [09 — Audio](09-audio.md).
 
 ### 2.5 Launcher — no vendor OS to get out of the way
 

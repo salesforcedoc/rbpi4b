@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include "tscfake.h"
 #include "pointsrc.h"
+#include "fb_cursor.h"
 #include "syscalls.h"
 
 #include <errno.h>
@@ -93,6 +94,14 @@ int tscfake_open(void)
      * is not. pointsrc keeps re-scanning in the background if this finds
      * nothing, so a mouse plugged in after rbp started still works. */
     pointsrc_start();
+
+    /* Same trigger, same "start once" property, one difference: this is the
+     * process that owns the screen. rbp's UI is written for a touchscreen and
+     * draws no pointer of its own — measured on the unit, the operator aiming at
+     * INFO clicked (1279,0) because the accumulating position was invisible — so
+     * the arrow has to be composited by the process that knows where the pointer
+     * is and can map the page it is drawn on. */
+    fb_cursor_start();
 
     rd_end = real_dup(out_pipe[0]);
     if (rd_end < 0)

@@ -149,9 +149,10 @@ again by the line above.
 * The way to drive `rbp` without one is the **keyboard fallback**,
   `RB_MIDI_MAP=kbd` ([docs/08](docs/08-controls.md#the-keyboard-map-rb_midi_mapkbd)):
   keyboard and mouse, no MIDI and no controller. It is written, cross-compiled
-  and fixture-tested, but it has **never been run with real input devices** on
-  the Pi, and the direction its selector turns for `↑`/`↓` is the one thing
-  about it that only hardware can settle.
+  and fixture-tested, but its reader has **not been run on the Pi** — it starts
+  only under `RB_MIDI_MAP=kbd`, and this target default is `flx4`. The direction
+  its selector turns for `↑`/`↓` is the one thing about it that only hardware can
+  settle.
 * Booth output is dropped: the FLX4 has two output pairs ([docs/09](docs/09-audio.md)).
 * DJ FX parameter/layer encoders, TrackSkip, BeatJump and some SHIFT-actions are
   not mapped ([docs/08](docs/08-controls.md)).

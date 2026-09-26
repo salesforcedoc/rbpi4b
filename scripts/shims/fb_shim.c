@@ -32,6 +32,7 @@
  */
 #define _GNU_SOURCE
 #include "tscfake.h"
+#include "fbdev.h"
 #include "syscalls.h"
 #include "envutil.h"
 
@@ -42,47 +43,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-#ifndef FBIOGET_VSCREENINFO
-#define FBIOGET_VSCREENINFO 0x4600
-#define FBIOPUT_VSCREENINFO 0x4601
-#define FBIOGET_FSCREENINFO 0x4602
-#define FBIOPAN_DISPLAY     0x4606
-#endif
-
-/* Hand-rolled rather than taken from <linux/fb.h>: these are the layout rbp was
- * compiled against (32-bit `unsigned long smem_start`), and the build host's
- * headers are not guaranteed to agree. */
-struct fb_var_screeninfo {
-    unsigned int xres, yres, xres_virtual, yres_virtual, xoffset, yoffset;
-    unsigned int bits_per_pixel, grayscale;
-    struct { unsigned int offset, length, msb_right; } red, green, blue, transp;
-    unsigned int nonstd;
-    unsigned int activate;
-    unsigned int height, width;
-    unsigned int accel_flags;
-    unsigned int pixclock, left_margin, right_margin, upper_margin, lower_margin;
-    unsigned int hsync_len, vsync_len, sync, vmode;
-    unsigned int rotate;
-    unsigned int colorspace;
-    unsigned int reserved[4];
-};
-
-struct fb_fix_screeninfo {
-    char id[16];
-    unsigned long smem_start;
-    unsigned int smem_len;
-    unsigned int type;
-    unsigned int type_aux;
-    unsigned int visual;
-    unsigned short xpanstep, ypanstep, ywrapstep;
-    unsigned int line_length;
-    unsigned long mmio_start;
-    unsigned int mmio_len;
-    unsigned int accel;
-    unsigned short capabilities;
-    unsigned short reserved[2];
-};
 
 #define MAX_GPIO_FDS 256
 static char is_gpio_fd[MAX_GPIO_FDS];

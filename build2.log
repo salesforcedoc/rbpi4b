@@ -1,0 +1,27 @@
+make: Entering directory '/w/scripts/shims'
+make: Nothing to be done for 'all'.
+arm-linux-gnueabi-gcc -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+    -Wall -Wextra -static -o test_cursor test_cursor.c cursor_paint.c
+-- test_point
+test_point: 45 checks, 0 failures
+-- test_audio
+test_audio: 50 checks, 0 failures
+-- test_midi
+test_midi: 159 checks, 0 failures
+-- test_flx4
+test_flx4: 477 checks, 0 failures
+-- test_kbd
+test_kbd: 297 checks, 0 failures
+-- test_cursor
+ok: 920 checks, 0 failures
+== GLIBC symbol versions ==
+-- knobshim.so
+   GLIBC_2.4
+   GLIBC_2.7
+-- audioshim.so
+   GLIBC_2.4
+-- fbshim.so
+   GLIBC_2.4
+-- crashcatch.so
+   GLIBC_2.4
+make: Leaving directory '/w/scripts/shims'

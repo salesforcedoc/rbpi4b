@@ -7,6 +7,7 @@ deploy tarball and land at the deploy root (`/opt/rblive4` by default) beside th
 ```
 /opt/rblive4/
 ├── rb.conf          every machine-specific constant, for the scripts AND the shims
+├── rb.local.conf    machine-LOCAL overrides, sourced last; never overwritten
 ├── lib.sh           shared: rb.conf loading, the /proc process lookup
 ├── install.sh       one-time (and idempotent) deploy: untar, verify, fix-dev
 ├── fix-dev.sh       bind mounts + device stubs; run again after every reboot
@@ -32,6 +33,17 @@ deploy tarball and land at the deploy root (`/opt/rblive4` by default) beside th
   `scripts/build-chroot.sh`, so a deploy cannot end up with a config that
   disagrees with its tree. Each variable's comment names the component that
   reads it, which tells you whether a change needs a rebuild.
+* **A value measured on the unit goes in `rb.local.conf`, not `rb.conf`.** Every
+  line of `rb.conf` is a *shipped default* and every one of them is rewritten on
+  the next install — twice over, because `rb.conf` also travels inside the
+  tarball, so the `tar -xzf` in `install.sh` replaces it before the script's own
+  `cp` runs. `RB_POINT_KIND=rel`, set by hand after the four-corner procedure,
+  reverted to `auto` on the next deploy, and the symptom was a pointer that worked
+  only on the bench it was calibrated on. `rb.local.conf` is not in the tarball and
+  `install.sh` creates it once and never writes it again; `rb.conf` sources it
+  last, so **assign plainly in it** (`RB_POINT_KIND=rel`) rather than with `:=`,
+  which would leave the default in place. It is not a second schema: a stray
+  `RB_CONF_VERSION` in it is ignored on purpose.
 * **`RB_<NAME>` becomes `<NAME>`** in the launched environment — that mapping is
   in one list in `start-rb.sh`, and it is the only translation point. The shims
   never parse `rb.conf`. **Empty means unset** for every one of those variables.

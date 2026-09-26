@@ -90,9 +90,77 @@ Two readers of one evdev node both get every event, so this costs the pointer
 path nothing. See [08 — Controls](08-controls.md#the-keyboard-map-rb_midi_mapkbd)
 and [15 — FLX4 MIDI](15-flx4-midi.md).
 
-As with the rest of the port, that binding is written, cross-compiled and
-fixture-tested against synthetic events — it has **never been run with a real
-mouse or keyboard on the Pi**.
+### The arrow on the screen (`POINT_CURSOR`)
+
+Accumulating a position is not enough on this target, because **rbp's UI is the
+XDJ-RX3's, and that panel is a touchscreen: rbp draws no cursor of its own.**
+There is nothing in the binary to reuse. Measured before the shim drew one: aiming
+at the INFO button, the click landed at `(1279,0)` — the screen corner — because
+the edge clamp had pinned an invisible pointer there. A mouse with no cursor is
+not a usability nuisance, it is unusable.
+
+So the shim composites a 12×19 arrow itself, from `fb_cursor.c`, at the live
+pointer position. Two properties of this target define how it has to work:
+
+- With `DFB_PRESENT=off` the DirectFB layer surface *is* the fb page, so rbp
+  paints its UI directly into the buffer the cursor thread writes to. Nothing can
+  be composited *under* rbp's painting — only written between its frames.
+- rbp repaints the whole frame at about **60 Hz** (measured). Each repaint erases
+  the arrow, and there is no way to tell an erased arrow from an intact one: its
+  outline is black, and much of rbp's UI is black too.
+
+Measured on the unit, by drawing a 12×19 block at (640,400) and counting the
+redraw intervals that found it damaged:
+
+| redraw period | found damaged | block on screen |
+|---|---|---|
+| 16 ms (rbp's own rate — the first guess, and wrong) | 91% | 9% |
+| 1 ms | 6% | 94% |
+| 0.5 ms (**the default**) | — | ~97% |
+| 0.2 ms | 1.7% | 98% |
+
+At 16 ms the arrow was on screen about 1.5 ms in every 16, and no framebuffer
+capture ever contained one — which is exactly what "the pointer is still
+invisible" looks like from the outside. `RB_POINT_CURSOR_MS` is therefore
+fractional, and defaults to `0.5`. It is not the mouse's polling rate: the
+position is read every tick whatever it says. Raise it toward 1 ms if CPU matters
+more than the last few percent of visibility (the cost is in
+[13](13-raspberrypi4.md#s32-pointing)).
+
+The cost is bounded because painting is idempotent — a cell already holding the
+pixel we would write is not written again — so a tick that finds the arrow intact
+is a read pass over 228 cells and nothing else. The restore is conditional for the
+same reason: a pixel is only put back where the buffer still holds exactly what
+`paint()` wrote there, so rbp's fresh repaints are never pasted over with stale
+pixels. Both rules are pinned by `test_cursor.c` under `qemu-arm`.
+
+`RB_POINT_CURSOR=0` turns the arrow off. That is the control for any "is the arrow
+what I am seeing?" question — with it off, a scan of `/dev/fb0` finds no arrow at
+all, which is how the feature was verified rather than merely eyeballed.
+
+**The real fix for the flicker, not attempted:** a hardware cursor plane
+(`drmModeSetCursor` on `/dev/dri/card0`), which the display controller composites
+independently of anything rbp paints. It would make the redraw rate irrelevant.
+It is out of scope because it means taking DRM master from the mode DirectFB set
+up, which is a good way to lose the display.
+
+### What is verified on the Pi, and what is not
+
+`/tmp/pointsrc.log` reads `relative device /dev/input/event7 name='Logitech G203
+Prodigy Gaming Mouse'`, and a `12×19`-glyph scan of `/dev/fb0` finds the arrow in
+**20 of 20 samples**, at `(640,400)` — the pointer's initial centre, which is where
+the shim logs its first paint. With `RB_POINT_CURSOR=0` the same scan finds
+nothing, so the scan is measuring the arrow and not the UI.
+
+That the arrow *moves* with the mouse is established from the other side: the
+`(1279,0)` click is only reachable by accumulating events from the real device
+into the corner, so the event path and the accumulation were already measured
+before the arrow existed. What is still the operator's to confirm (S3.2/S3.3 in
+[13](13-raspberrypi4.md#s32-pointing)) is the *aim* — that the pixel a click lands
+on is the pixel the arrow points at, which is the axis algebra above.
+
+The keyboard half of the reader has not run on the Pi at all: it only starts under
+`RB_MIDI_MAP=kbd`, which is not this target's default.
 
 ## Required files
 

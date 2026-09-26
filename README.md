@@ -36,35 +36,66 @@ tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 
 ## State of the port
 
-**The tree is mid-port, and this README describes the target, not a finished
-unit.** Read it with [docs/13](docs/13-raspberrypi4.md)'s bring-up table
-(S0–S7) open, which is where each step's check and likely failure is recorded.
+**It runs on the hardware.** `rbp` has been launched on the measured Pi 4 and
+paints its UI; the audio stream reaches the FLX4's USB card with every write
+accepted. Read this with [docs/13](docs/13-raspberrypi4.md)'s bring-up table
+(S0–S7) open, which is where each step's check and likely failure is recorded —
+each row there says whether it has been run, and what it measured.
 
-* **Landed and verified off-hardware:** the chroot recipe, the `rbp` patch
-  table, the shim ABI addresses, the audio stream model, the pointing split, the
-  controls-shim decomposition, and the DirectFB build with its debug
-  instrumentation removed.
-* **Written but not yet run on a Pi:** the `cmdline.txt` recipe, the pointer
-  discovery and transform, the audio device/map/format negotiation, the MIDI
-  device discovery, the keyboard fallback (its map and its evdev reader, fixture-
-  tested but never fed a real keyboard or mouse), and every device script.
-* **Written and fixture-tested, but unverified against the unit:** the FLX4 map
-  (`map_flx4.c`), now `RB_MIDI_MAP`'s default. Nothing in this tree has been run
-  with an FLX4 attached, so its note and CC numbers come from Pioneer's
-  published MIDI list; the fixture test proves the map matches its own tables and
-  nothing more. The LED bridge is a step further behind — `RB_LED_DISABLE=1` is
-  this target's interim setting, because `rbp_led.c` still carries the previous
-  target's notes.
-* **The generalized DirectFB present path is in the patch and the stack builds
-  from it** — and the measurements that were gating it say the Pi needs
-  **no** present mode at all: the fb is `rbp`'s surface exactly, so `off` is the
-  destination rather than a rung. What did need fixing was buffering: the fb has
-  one page while the stock driver forced three buffers, and the buffer mode now
-  comes from the **page count** instead of `ypanstep`
-  ([docs/06](docs/06-display.md#the-present-path)). S2.2 in
-  [docs/13](docs/13-raspberrypi4.md#bring-up-order) is the on-device test.
-* **Never yet run on the Pi:** nothing in this tree has been launched on the
-  hardware. The tarball itself is waiting on the DirectFB build.
+**Verified on the unit:**
+
+* **Display.** The forced `video=HDMI-A-1:1280x800@60` mode was accepted by a
+  sink whose own EDID lists nothing above 720p, and the fb it produced is
+  `rbp`'s logical surface exactly — 1280×800, 16 bpp RGB565, stride 2560, **one
+  page**. The driver logs `PRESENT: mode=off angle=0 … pages=1 pan=0`, i.e. the
+  layer surface *is* the fb page and no blit happens at all. The UI was then
+  confirmed by capturing `/dev/fb0` and decoding it. This needed one real fix:
+  the stock driver forced three buffers while the fb holds one, so the buffer
+  mode now comes from the page count rather than `ypanstep`
+  ([docs/06](docs/06-display.md#the-present-path)).
+* **Audio.** `audioshim.so` opens `hw:CARD=DDJFLX4,DEV=0`, negotiates the card's
+  4 channels and `S24_3LE`, and writes 64-frame/768-byte blocks at ≈realtime with
+  **zero** negative returns over 41,001 writes. Getting there fixed three
+  defects, all documented in [docs/09](docs/09-audio.md) — the last of them a
+  hand-rolled `SND_PCM_FORMAT_S24_3LE` that had been wrong for the life of the
+  shim and whose only symptom was silence.
+* **Controls.** The shim subscribes to the unit's own port
+  (`subscribed to 28:0 'DDJ-FLX4 MIDI 1'`), and an `aseqdump` capture taken from
+  it turned the FLX4 map's largest guess — the jog's counts per revolution — into
+  a measurement (720, where the inherited value was 128).
+* **Pointing.** A real mouse is discovered and opened
+  (`/tmp/pointsrc.log`: `relative device /dev/input/event7 name='Logitech G203
+  Prodigy Gaming Mouse'`).
+* **Deploy.** `install.sh` places the tree, proves the chroot can execute a
+  32-bit binary, and no longer clobbers values measured on the unit — those live
+  in `rb.local.conf`, which the deploy cannot reach
+  ([scripts/device/README.md](scripts/device/README.md)).
+
+**Not yet verified, and each needs something only hardware or a person can give:**
+
+* **Whether it is *audible*.** The write path is confirmed; nobody has yet
+  listened to the FLX4's RCA outs. Requires a track on a USB stick (S6) as well.
+* **Whether the FLX4 map's tables are right.** Nothing has pressed a control and
+  watched `rbp` react, so every note and CC number still rests on Pioneer's
+  published list — the fixture test proves the map matches its own tables and
+  nothing more. This is S5.2 and it is the largest remaining unknown
+  ([docs/15](docs/15-flx4-midi.md)).
+* **Whether the cursor follows the mouse, and clicks land where you aimed.** The
+  discovery and the open are verified; the visible behaviour needs a hand on the
+  mouse (S3.2/S3.3).
+* **USB media has run, but only against a stick it cannot use.** Detection,
+  vfat mount, chroot bind and the notification into `/tmp/udev_usb1` all
+  succeeded; the watcher then reported `rbp never opened export.pdb` — correctly,
+  because the stick holds only WAVs and an empty `PIONEER/USBANLZ` and has no
+  rekordbox database. A stick from rekordbox's *Export to USB Device* is what
+  settles the rest of S6, and it is also the precondition for playing a track and
+  therefore for hearing anything.
+* **Tearing, and the console over the UI** (S2.3/S2.4).
+* **The LED bridge**, still off at `RB_LED_DISABLE=1` and blocked on the FLX4's
+  illumination notes; `rbp_led.c` carries the previous target's.
+* **The keyboard fallback's reader**, which starts only under `RB_MIDI_MAP=kbd`
+  and has therefore not run on the Pi at all; its map and keycodes are
+  fixture-tested under `qemu-arm`.
 
 Where a number in these documents is an expectation rather than a measurement,
 it says so; [docs/README](docs/README.md) explains the convention.
@@ -151,8 +182,10 @@ What does have to change is everything that named a device:
 * **Controls** — the FLX4 sends different messages than any earlier surface,
   and puts its toggles on CCs rather than notes, so the map grew a CC-as-button
   concept and the shim stopped hardcoding a client id and a device node.
-* **Audio** — `hw:1,0` with 8 channels becomes `plughw:CARD=DDJFLX4,DEV=0` with
-  4, negotiated rather than forced, with the pair map in config.
+* **Audio** — `hw:1,0` with 8 channels becomes `hw:CARD=DDJFLX4,DEV=0` with 4,
+  negotiated rather than forced, with the pair map and the output format in
+  config. `plughw:` was the plan and was wrong: the map names hardware channels,
+  and a plug device reports the wrong count for that (see [09](docs/09-audio.md)).
 
 ---
 

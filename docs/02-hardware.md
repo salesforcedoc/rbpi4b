@@ -12,7 +12,7 @@ target).
 | OS | BusyBox / in-house init | Buildroot 2023.02.11, systemd | Buildroot 2023.02.11, systemd | **Pi OS Lite 32-bit**, Debian 13 (trixie) as measured, systemd |
 | Display | 1280×800 landscape, RGB565 | 800×1280 portrait, RGB32 DRM fb | 800×1280 portrait, RGB32 DRM fb | **HDMI** `vc4drmfb`, **1280×720 at 16 bpp RGB565 as measured** — the mode has never been asked for; 1280×800 is `rbp`'s logical geometry ([13](13-raspberrypi4.md)) |
 | Touch | tsc2007 resistive | ILI2117 capacitive (event0) | ILI2117 capacitive (event0) | **none** — an evdev pointer (mouse or USB touch panel) |
-| Audio | 3× CS4344 DACs | JP11 codec, 4 ch (`hw:1,0`) | JP21 codec, 8 ch (`hw:1,0`) | DDJ-FLX4 USB audio, 4 ch (`plughw:CARD=DDJFLX4,DEV=0`) |
+| Audio | 3× CS4344 DACs | JP11 codec, 4 ch (`hw:1,0`) | JP21 codec, 8 ch (`hw:1,0`) | DDJ-FLX4 USB audio, 4 ch (`hw:CARD=DDJFLX4,DEV=0`), **S16_LE/S24_3LE at 44100 or 48000 as measured** ([13](13-raspberrypi4.md)) |
 | Controls | EUP / SUB MCUs over SPI | ALSA MIDI "Control Surface" (seq 16) | ALSA MIDI "Control Surface" (seq 16) | ALSA MIDI **"DDJ-FLX4 MIDI 1"** over USB |
 | USB | 2 host ports + sub-MCU | 1× USB-A | USB-A host (EHCI/OHCI) | 2× USB 3.0 + 2× USB 2.0 |
 | Storage | — | root 466 MB ro, `/data` ~50 MB free | root 466 MB ro, `/data` 5.6 GB free | microSD, root rw, GBs free |

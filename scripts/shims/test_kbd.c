@@ -69,6 +69,12 @@
 #define KEY_ESC       1
 #define KEY_1         2
 #define KEY_2         3
+#define KEY_5         6
+#define KEY_6         7
+#define KEY_7         8
+#define KEY_8         9
+#define KEY_9         10
+#define KEY_0         11
 #define KEY_BACKSPACE 14
 #define KEY_ENTER     28
 #define KEY_Z         44
@@ -206,6 +212,27 @@ static const struct step steps[] = {
      { "LOAD deck 2 down",     EV_KEY, KEY_2, 1, 1, { W(K_LOAD, OP_PRESS, 2, 0) } },
      { "LOAD deck 2 up",       EV_KEY, KEY_2, 0, 1, { W(K_LOAD, OP_RELEASE, 2, 0) } },
 
+     /* ---- the rest of the digit row: rbp's browse-screen keys, all global --- */
+     { "SOURCE down",          EV_KEY, KEY_5, 1, 1, { W(K_SOURCE, OP_PRESS, CH_GLOBAL, 0) } },
+     { "SOURCE repeat",        EV_KEY, KEY_5, 2, 0, { {0,0,0,0} } },
+     { "SOURCE up",            EV_KEY, KEY_5, 0, 1, { W(K_SOURCE, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "SOURCE up again",      EV_KEY, KEY_5, 0, 0, { {0,0,0,0} } },
+     { "BROWSE down",          EV_KEY, KEY_6, 1, 1, { W(K_BROWSE, OP_PRESS, CH_GLOBAL, 0) } },
+     { "BROWSE up",            EV_KEY, KEY_6, 0, 1, { W(K_BROWSE, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "TAG LIST down",        EV_KEY, KEY_7, 1, 1, { W(K_TAGLIST, OP_PRESS, CH_GLOBAL, 0) } },
+     { "TAG LIST up",          EV_KEY, KEY_7, 0, 1, { W(K_TAGLIST, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "MENU down",            EV_KEY, KEY_0, 1, 1, { W(K_MENU, OP_PRESS, CH_GLOBAL, 0) } },
+     { "MENU up",              EV_KEY, KEY_0, 0, 1, { W(K_MENU, OP_RELEASE, CH_GLOBAL, 0) } },
+
+     /* ---- PLAYLIST and SEARCH: declared, but with no rbp keycode, so the two
+      * must produce nothing at all. That is the assertion worth having -- a row
+      * that sends keycode 0 would be a keycode rbp never asked for, and these
+      * rows are what stop a later "helpful" edit from making it do that. ---- */
+     { "PLAYLIST down (no rbp keycode yet)", EV_KEY, KEY_8, 1, 0, { {0,0,0,0} } },
+     { "PLAYLIST up (no rbp keycode yet)",   EV_KEY, KEY_8, 0, 0, { {0,0,0,0} } },
+     { "SEARCH down (no rbp keycode yet)",   EV_KEY, KEY_9, 1, 0, { {0,0,0,0} } },
+     { "SEARCH up (no rbp keycode yet)",     EV_KEY, KEY_9, 0, 0, { {0,0,0,0} } },
+
      /* ---- the selector: the arrows and the wheel rotate, Enter pushes ---- */
      { "selector up",          EV_KEY, KEY_UP, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
      { "selector up (autorepeat repeats the step)", EV_KEY, KEY_UP, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
@@ -259,9 +286,17 @@ static const struct step steps[] = {
      { "a key with no binding", EV_KEY, KEY_LEFT, 1, 0, { {0,0,0,0} } },
      { "a key with no binding, released", EV_KEY, KEY_LEFT, 0, 0, { {0,0,0,0} } },
      /* A code the map does not carry, on a type it does: the filter is a pair,
-      * so EV_REL carrying a key code is nothing. */
+      * so EV_REL carrying a key code is nothing.
+      *
+      * The EV_KEY half has to be REL_X and not a wheel code, because REL_WHEEL
+      * is 8 and KEY_7 is 8 -- the same number in two namespaces. That is not a
+      * bug to fix but a coexistence to pin, and the rows above already do: the
+      * TAG LIST rows drive EV_KEY code 8 to K_TAGLIST while the wheel rows drive
+      * EV_REL code 8 to a selector rotation. Together they are the assertion
+      * that `type` is what tells the two apart, which is why this row cannot
+      * make the same point with the same number. */
      { "EV_REL carrying a key code", EV_REL, KEY_SPACE, 1, 0, { {0,0,0,0} } },
-     { "EV_KEY carrying a wheel code", EV_KEY, REL_WHEEL, 1, 0, { {0,0,0,0} } },
+     { "EV_KEY carrying the pointer's X code", EV_KEY, REL_X, 1, 0, { {0,0,0,0} } },
 };
 
 #define NSTEPS ((int)(sizeof(steps) / sizeof(steps[0])))
@@ -291,6 +326,9 @@ static void pin_keycodes(void)
      CHECK(K_SELECTOR == 0x420c, "K_SELECTOR is 0x%04x, not 0x420c", K_SELECTOR);
      CHECK(K_BACK     == 0x420d, "K_BACK is 0x%04x, not 0x420d", K_BACK);
      CHECK(K_SOURCE   == 0x0201, "K_SOURCE is 0x%04x, not 0x0201", K_SOURCE);
+     CHECK(K_BROWSE   == 0x0202, "K_BROWSE is 0x%04x, not 0x0202", K_BROWSE);
+     CHECK(K_TAGLIST  == 0x0203, "K_TAGLIST is 0x%04x, not 0x0203", K_TAGLIST);
+     CHECK(K_MENU     == 0x0206, "K_MENU is 0x%04x, not 0x0206", K_MENU);
 
      /* The ops and the channel are as load-bearing as the keycodes: OP_ROTATE
       * with OP_PRESS's number would push the selector once per notch. */

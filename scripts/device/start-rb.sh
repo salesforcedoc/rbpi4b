@@ -103,7 +103,13 @@ rm -f /tmp/guard_LocalDBServer /tmp/req_LocalDBServer
 # truncated by the writer rather than by us.
 rm -f /tmp/knobshim.log /tmp/audioshim.log
 rm -f /tmp/dfbdig*.log /tmp/rot_surface.dump
-rm -f "$RBP_LOG" "$EDB_LOG"
+# Rotated, not deleted. Under systemd's Restart=always a crash-loop relaunches
+# this script every 10 s, and `rm -f` would therefore destroy the previous
+# cycle's cause before anyone could read it -- the one artifact that says why rbp
+# died would be erased on a 10-second timer. One cycle back is enough to break
+# the loop, and `.prev` cannot grow without bound.
+[ -f "$RBP_LOG" ] && mv -f "$RBP_LOG" "$RBP_LOG.prev"
+[ -f "$EDB_LOG" ] && mv -f "$EDB_LOG" "$EDB_LOG.prev"
 
 # --- 6. the shim environment -------------------------------------------------
 #
@@ -133,7 +139,7 @@ rm -f "$RBP_LOG" "$EDB_LOG"
 SHIM_VARS="
 DFB_PRESENT DFB_ROTATE PAN_PACER_MS FB_DEV
 POINT_KIND POINT_DEV POINT_DEBUG POINT_MIN_DWELL_MS POINT_MOUSE_SPEED
-POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y
+POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y POINT_CURSOR POINT_CURSOR_MS
 AUDIO_DEV AUDIO_CHANNELS AUDIO_MAP AUDIO_FMT AUDIO_MONITOR_PAIR
 STARTUP_MUTE_MS STARTUP_FADE_MS SCHED_RT
 MIDI_MAP MIDI_IN_MATCH MIDI_OUT_MATCH MIDI_DUMP MIDI_REPLAY
@@ -208,14 +214,31 @@ fi
 # --- 10. USB watcher, then wait ---------------------------------------------
 sh "$HERE/usb-watch.sh" start 2>/dev/null
 
+# --- 11. cleanup, on every exit path ----------------------------------------
+#
+# Defined before the wait loop and installed as a signal handler, because
+# `systemctl stop`/`restart` sends SIGTERM to THIS shell: without the trap the
+# shell dies where it stands and everything it started -- rbp, edb_streamd, the
+# watcher, and the media mounts -- is left running. The unit would then be
+# "stopped" with a live player on screen, and the next start would fight it.
+# This also makes docs/11's existing claim ("Ctrl-C the launcher") true, which it
+# has not been: a Ctrl-C killed the shell and orphaned rbp the same way.
+cleanup() {
+    sh "$HERE/usb-watch.sh" stop 2>/dev/null
+    for p in $(pids_matching "$RB_PLAYER") $(pids_matching edb_streamd); do
+        kill -9 "$p" 2>/dev/null
+    done
+}
+# `exit 0` and not the signal's default status: a stop is a successful stop, and
+# a non-zero exit here would make systemd record a failure for a deliberate
+# `systemctl stop`. Under Restart=always the exit status does not decide whether
+# we relaunch, but it does decide what `systemctl status` reports afterwards.
+trap 'cleanup; exit 0' TERM INT
+
 # Sleep while rbp lives, so the launching shell does not redraw over the UI.
 while kill -0 "$RBP" 2>/dev/null; do
     sleep 2
 done
 
-# --- 11. cleanup ------------------------------------------------------------
-sh "$HERE/usb-watch.sh" stop 2>/dev/null
-for p in $(pids_matching "$RB_PLAYER") $(pids_matching edb_streamd); do
-    kill -9 "$p" 2>/dev/null
-done
+cleanup
 echo "start-rb: rbp exited (see $RBP_LOG)"

@@ -25,4 +25,19 @@ int pointsrc_start(void);
  * status output and for debugging without a log file. */
 void pointsrc_status(char *buf, unsigned long buflen);
 
+/* The live pointer, for the fb cursor compositor (fb_cursor.c). Returns 1 when a
+ * *relative* device is driving the pointer and fills in its logical position and
+ * button state; 0 when nothing is attached, or when the device is an absolute
+ * one — which reports where it is touched and needs no arrow drawn for it.
+ *
+ * Unlocked, like the status above: these are four `volatile int`s the reader
+ * thread updates, and the consumer redraws at 30 Hz anyway, so the worst a torn
+ * read can do is place the arrow one frame behind. */
+int pointsrc_cursor(int *logical_x, int *logical_y, int *down);
+
+/* Append one line to /tmp/pointsrc.log when POINT_DEBUG is set. Shared between
+ * the reader thread and the compositor so both halves of the pointer path land
+ * in one file, in the order things happened. */
+void pointsrc_log(const char *fmt, ...);
+
 #endif /* RBLIVE4_POINTSRC_H */

@@ -78,14 +78,15 @@ LOAD  → FLX4 MIDI → knobshim → sendKey(0x4311)
       → rbp loads track + ANLZ analysis → waveform
 PLAY  → knobshim → sendKey(0x4101)
       → DjEngineIF::play → PlayEngine clocked by the ALSA callback
-      → audioshim feeds S24_LE periods to plughw:CARD=DDJFLX4,DEV=0
+      → audioshim packs S24_LE periods into S24_3LE for hw:CARD=DDJFLX4,DEV=0
       → master (pair 1) + headphones (pair 2) on the FLX4
 ```
 
-The note numbers above are what the FLX4 map sends, and the FLX4 side of the
-first hop is the one part of this diagram nobody has measured yet: the map is
-written and fixture-tested, but its tables come from Pioneer's published MIDI
-list rather than from the unit — see [15 — DDJ-FLX4 MIDI](15-flx4-midi.md).
+The note numbers above are what the FLX4 map sends. The map is written and
+fixture-tested, and the unit's own messages have been inventoried with
+`aseqdump`, but the tables themselves still come from Pioneer's published MIDI
+list: no control has yet been pressed and watched through to rbp. See
+[15 — DDJ-FLX4 MIDI](15-flx4-midi.md).
 
 ## Repository map
 

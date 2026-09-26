@@ -101,16 +101,41 @@ port.
 | `space` / `z` / `x` | `0x4101` K_PLAY / `0x4102` K_CUE / `0x4112` K_SYNC | deck 1 |
 | `n` / `m` / `,` | the same three | deck 2 |
 | `1` / `2` | `0x4311` K_LOAD | deck 1 / 2 |
+| `5` / `6` / `7` | `0x0201` K_SOURCE / `0x0202` K_BROWSE / `0x0203` K_TAGLIST | global |
+| `0` | `0x0206` K_MENU | global |
+| `8` / `9` | **no rbp keycode exists** — PLAYLIST / SEARCH. Declared, so the press is logged by name, but nothing is sent | — |
 | `↑` / `↓` | `0x420c` K_SELECTOR, rotate ±1 (repeats while held) | global |
 | `Enter` | `0x420c` K_SELECTOR, press/release | global |
 | `Backspace`, mouse right button | `0x420d` K_BACK | global |
 | `Esc` | `0x0201` K_SOURCE | global |
 | mouse wheel | `0x420c` K_SELECTOR, rotate ±1 per notch | global |
 
+The browse keys sit on the rest of the digit row on purpose: `1`/`2` are LOAD, so
+the whole browse surface is one hand's worth of keys that need no mnemonic.
+`5`/`6`/`7`/`0` are the four rbp has keycodes for.
+
+**`8`/`9` are declared rather than absent, and that is a deliberate half-step.**
+rbp has all six controls — the labels are in the binary as `Source`, `BROWSE`,
+`TAGLIST`, `PlayList`/`PLAYLIST`, `Search` and `menu` — but `rbp_abi.h` carries a
+keycode for only four of them, and the `MAPPING.md` it cites for the `0x020x`
+block is not in this repository. So the two rows exist with key `0` (the
+`ctrl_map.h` "a control rbp has no code for"), which makes a press *visibly*
+pending: `kbd_build()` says so at startup whether or not `KNOB_VERBOSE` is on,
+and under it the trace names the control. **The two unclaimed slots in that block
+(`0x0204`, `0x0205`) are a plausible-looking trap, not an answer** — measure one
+before writing it, and move the row up with the other four when you do.
+
+One kernel-ABI collision is worth knowing before editing the table: **`REL_WHEEL`
+is 8 and `KEY_7` is 8** — the same number in two namespaces. The binding loop
+matches on the *pair* `(type, code)`, so `EV_KEY` code 8 is the digit 7 (TAG
+LIST) and `EV_REL` code 8 is a wheel notch. Neither row can be folded into the
+other, and both directions are pinned in `test_kbd.c`.
+
 The second deck mirrors the first on the same keycodes with the deck in the
 *channel*, which is how the JP21 map drives both decks from one table. rbp has no
-per-deck variants of the selector, BACK or SOURCE, so those three are global on
-both — `CH_GLOBAL`, which is the channel rbp's own browse/source keys are sent on.
+per-deck variants of the selector, BACK, SOURCE or the browse keys, so all of
+those are global on both — `CH_GLOBAL`, which is the channel rbp's own
+browse/source keys are sent on.
 
 It is not a degraded version of the FLX4 map:
 

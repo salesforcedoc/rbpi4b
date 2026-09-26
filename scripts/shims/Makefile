@@ -140,8 +140,13 @@ s24pack.o: s24pack.c s24pack.h
 #   tscfake.o    the fake /dev/tsc2007_2-0048: rbp ABI, target-independent
 #   pointsrc.o   evdev discovery + the absolute and relative reader loops
 #   point_xform.o  raw -> logical coordinate math (pure, unit-tested)
-FBSHIM_OBJS := fb_shim.o tscfake.o pointsrc.o point_xform.o
-FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h syscalls.h envutil.h
+#   fb_cursor.o    the visible pointer: maps the real /dev/fb0 and composites
+#                  an arrow at the live pointer position
+#   cursor_paint.o the glyph and the save-under rule (pure, unit-tested)
+FBSHIM_OBJS := fb_shim.o tscfake.o pointsrc.o point_xform.o fb_cursor.o \
+               cursor_paint.o
+FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h syscalls.h envutil.h \
+               fb_cursor.h cursor_paint.h fbdev.h
 
 fbshim.so: $(FBSHIM_OBJS) $(FBSHIM_HDRS) \
            $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
@@ -159,8 +164,10 @@ fb_shim.o: CFLAGS += -Wno-nonnull-compare -Wno-maybe-uninitialized
 
 pointsrc.o: pointsrc.c pointsrc.h point_xform.h tscfake.h
 point_xform.o: point_xform.c point_xform.h
+fb_cursor.o: fb_cursor.c fb_cursor.h cursor_paint.h fbdev.h pointsrc.h point_xform.h
+cursor_paint.o: cursor_paint.c cursor_paint.h
 
-# The one rule for the four objects above. -Wall -Wextra is on, so a genuinely
+# The one rule for the objects above. -Wall -Wextra is on, so a genuinely
 # unused helper fails the build rather than lingering.
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -179,6 +186,22 @@ seqinject2: seqinject2.c
 
 udplog: udplog.c
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -static -o $@ $<
+
+# pcmprobe is a diagnostic, not a shim: NOT built by `all` and never shipped. It
+# links the chroot's libasound — the same copy the audio shim dlopens — because
+# the question it answers is "which integer is S24_3LE, and what does this card
+# accept", and the answer has to come from the library that will be asked. Run the
+# enum half under qemu-arm; run the device half inside the chroot on the Pi, where
+# /dev/snd is bound in:
+#
+#   make -C scripts/shims pcmprobe
+#   qemu-arm -L $(RX3) scripts/shims/pcmprobe
+#   chroot /opt/rblive4/rbx3-run /tmp/pcmprobe hw:CARD=DDJFLX4,DEV=0
+#
+# It exists because one of the shim's hand-rolled SND_PCM_FORMAT_* values was
+# wrong and surfaced only as a nameless -EINVAL from the card. See tools/pcmprobe.c.
+pcmprobe: ../../tools/pcmprobe.c
+	$(CC) $(CFLAGS) -o $@ $< -lasound $(LDFLAGS)
 
 # --- unit tests ---------------------------------------------------------------
 #
@@ -202,7 +225,11 @@ udplog: udplog.c
 # pins the rbp keycodes that come out. evdev_io.o is deliberately NOT linked
 # into it: opening /dev/input is the one thing in this port that cannot be
 # exercised without a device.
-TESTS := test_point test_audio test_midi test_flx4 test_kbd
+# test_cursor.c links the PRODUCTION glyph and compositing rule, because the rule
+# it pins -- that a restore only puts back a pixel that is still ours -- is
+# exactly the kind of thing that would be rewritten in a copy. Its surface is a
+# local array: no framebuffer, no thread, no device.
+TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor
 
 test_point: test_point.c tscfake.c point_xform.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -268,6 +295,10 @@ test_kbd.o: test_kbd.c ctrl_map.h rbp_abi.h rbp_bridge.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -c -o $@ $<
 
+test_cursor: test_cursor.c cursor_paint.c cursor_paint.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_cursor.c cursor_paint.c
+
 test: $(TESTS)
 	@for t in $(TESTS); do echo "-- $$t"; qemu-arm ./$$t || exit 1; done
 
@@ -292,4 +323,4 @@ check: $(SHARED)
 	done; exit $$rc
 
 clean:
-	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) *.o
+	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) pcmprobe *.o

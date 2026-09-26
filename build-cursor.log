@@ -1,0 +1,5 @@
+make: Entering directory '/w/scripts/shims'
+arm-linux-gnueabi-gcc -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector -fPIC -Wall -Wextra -Wno-unused-parameter -c -o fb_cursor.o fb_cursor.c
+arm-linux-gnueabi-gcc -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector -fPIC -Wall -Wextra -Wno-unused-parameter -c -o cursor_paint.o cursor_paint.c
+arm-linux-gnueabi-gcc -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector -fPIC -Wall -Wextra -Wno-unused-parameter -shared -o fbshim.so fb_shim.o tscfake.o pointsrc.o point_xform.o fb_cursor.o cursor_paint.o -lpthread -lm -lc -Lcompat -L/w/extracted/XDJRX3-rootfs/lib -L/w/extracted/XDJRX3-rootfs/usr/lib -Wl,-rpath-link,/w/extracted/XDJRX3-rootfs/lib:/w/extracted/XDJRX3-rootfs/usr/lib
+make: Leaving directory '/w/scripts/shims'

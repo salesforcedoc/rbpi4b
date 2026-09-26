@@ -20,11 +20,14 @@
  * applied to the *raw* word gives 0x00ffffff * 0.5, full-scale positive, where
  * -1 * 0.5 is silence. test_audio.c pins both halves of this.
  *
- * The default path needs none of this. AUDIO_DEV is a `plughw:` device, so ALSA's
- * plug chain converts S24_LE to whatever the card wants and we hand over rbp's
- * own words untouched. These exist for the escape hatch — a `hw:` device with an
- * explicit AUDIO_FMT, where nothing converts for us and the bytes must be exactly
- * right.
+ * This is the default path, not an escape hatch. AUDIO_DEV is a `hw:` device, so
+ * nothing between the shim and the card converts and the bytes have to be exactly
+ * right; `rb.conf` sets AUDIO_FMT=s24_3le, which is what the FLX4 accepts and
+ * therefore what these produce. They are only bypassed when AUDIO_DEV names a
+ * *plug* device, where ALSA's plug chain does the conversion and rbp's own words
+ * go over untouched — which is also the one case where leaving AUDIO_FMT unset is
+ * right, since an unset name parses to S24_LE and hands rbp's words through
+ * unchanged.
  *
  * Pure: no ALSA, no allocation, no globals. That is what lets test_audio.c run
  * the real functions under qemu-arm with no card attached.
@@ -36,11 +39,13 @@
 #include <stddef.h>
 
 /* One entry per format we can pack to. S24_LE is the container rbp already
- * writes, so it is the identity case and the default. */
+ * writes, so it is the identity case — and on this target it is NOT the default:
+ * the FLX4 accepts S24_3LE (measured: `aplay --dump-hw-params` lists S16_LE and
+ * S24_3LE, and no 4-byte 24-bit format at all), so `rb.conf` selects s24_3le. */
 enum {
     AUDIO_FMT_S24_LE = 0,   /* 4 bytes, value in the low 3 — rbp's own layout */
-    AUDIO_FMT_S24_3LE,      /* 3 bytes, packed (the DDJ-FLX4's likely native)   */
-    AUDIO_FMT_S16_LE        /* 2 bytes, low 8 bits dropped                      */
+    AUDIO_FMT_S24_3LE,      /* 3 bytes, packed — the DDJ-FLX4's native format */
+    AUDIO_FMT_S16_LE        /* 2 bytes, low 8 bits dropped                    */
 };
 
 /* Bytes per sample, or 0 for an unknown format. */

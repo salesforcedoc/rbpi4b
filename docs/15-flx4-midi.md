@@ -471,8 +471,10 @@ FX type; and rbp's ALOOP/SLIPLOOP pad modes.
 
 `RB_MIDI_MAP=kbd` needs nothing plugged in: space/z/x are PLAY/CUE/SYNC on deck
 1, 1/2 LOAD, arrows plus Enter drive the selector, Backspace is `K_BACK`, Esc is
-`K_SOURCE`. Mouse right-button is `K_BACK` and the wheel rotates the selector.
-Deck 2 is n/m/, and the full table — with the status of each binding — is in
+`K_SOURCE`, and the rest of the digit row is the browse screen — 5/6/7/0 are
+SOURCE/BROWSE/TAG LIST/MENU. Mouse right-button is `K_BACK` and the wheel rotates
+the selector. Deck 2 is n/m/, and the full table — with the status of each
+binding, including the two keys declared but with no keycode behind them — is in
 [08 — Controls](08-controls.md#the-keyboard-map-rb_midi_mapkbd).
 
 It exists so that display and audio can be brought up and tested with an empty
@@ -483,8 +485,10 @@ the fastest path to "the display works, now play something".
 Unlike every other map it does not go through the sequencer at all: its events
 come from `/dev/input/event*` (`evdev_io.c`), which is also why a missing
 `/dev/snd/seq` does not stop it. It has been written, cross-compiled and
-fixture-tested, and like everything else in this port **it has never been run
-with a real keyboard or mouse on the Pi**.
+fixture-tested, and it has **not been run on the Pi**: the reader starts only
+under `RB_MIDI_MAP=kbd`, and this target runs the `flx4` map. (The same reader's
+*pointer* half is always active and has opened a real mouse — see
+[07](07-touch.md).)
 
 ## Open questions
 
@@ -505,7 +509,7 @@ is still open or has been answered (with S5.1, the `aseqdump` capture).
 | 7 | **Which position the FX CH SELECT lever rests in**, and rbp's default Beat FX target. The map deliberately does not force a target, so it does nothing until the lever moves. | move the lever through all three positions and watch `KNOB_VERBOSE=1`; then note what rbp had selected before the first move |
 | 8 | Whether the BEAT SYNC release (footnote *3) carries the ON edge, the OFF edge or both. | **Answered in S5.1**: one press produced both edges (`on/off x1/1` on note 88), so the map's first-edge rule is load-bearing rather than merely defensive. The map would handle either order without double-sending, so which came first is for the record — the dump has it in order (`grep 'note=88' flx4.dump`). |
 | 9 | rbp's **keycode for CUE/LOOP CALL** ◁/▷, which would turn two log-only rows into bindings. | rbp's own key table, or a keyboard/pointer session against the RX3 UI |
-| 10 | Whether the FLX4's USB audio is `S24_3LE`, `S16_LE` or `S32_LE`, and its native rate. | `aplay --dump-hw-params -D plughw:CARD=DDJFLX4,DEV=0` — but this one does **not** change the shim: `plughw:` makes ALSA's plug chain do the conversion, so the answer is for the record |
+| 10 | ~~Whether the FLX4's USB audio is `S24_3LE`, `S16_LE` or `S32_LE`, and its native rate.~~ | **Answered in S1.4**, and it did change the shim: `aplay --dump-hw-params -D hw:CARD=DDJFLX4,DEV=0` reads `FORMAT S16_LE S24_3LE`, `SAMPLE_BITS [16 24]`, `FRAME_BITS [64 96]`, `CHANNELS 4`, `RATE [44100 48000]` — **no `S32_LE`**. The plan's `plughw:` default assumed the question did not matter, because the plug chain would convert whatever the answer was; the card's real count is what `AUDIO_MAP`'s hardware indices need, and a plug device reports 10000 for it (see [13](13-raspberrypi4.md) S1.4 and [09](09-audio.md)) |
 | 11 | The **units of the jog's `l` field** (the 16-bit `pos` in the `OP_ROTATE` message). The map fills it with raw platter counts, so the measured 720 counts/revolution now goes into a field rbp may *compare* rather than difference — and the map inherited 128 from the JP21. `RB_JOG_SCALE` cannot express that conversion: it scales `vpos` but cancels out of the speed, and it is clamped to ≥ 1, so it can only make the units larger. | if the platter misbehaves in a way the speed cannot explain (a deck that jumps when touched), log `JOG_VERBOSE=1`'s `pos=` against a known turn and compare it with what rbp does |
 
 ## Testing without the hardware
