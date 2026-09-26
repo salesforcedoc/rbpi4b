@@ -274,6 +274,30 @@ audioshim: startup mute released after 79424 frames
 the arithmetic in that line is also a check that the values in force are the
 ones intended.
 
+**But that line does not prove a card is open, and it is a trap for exactly that
+reason.** `flush_master()` is the master write path with *and* without a device —
+with none it ends in `pace_without_device()` — and the mute counter is released
+inside it either way. So `startup mute released after N frames` appears on a run
+that is producing no sound at all. On 2026-09-26 that is what it was: the FLX4
+was not on the USB bus, and the run that printed it had zero `writei #` lines.
+
+**The line that means "a real device is open" is `writei #N frames=... written=...`**
+— it is only printed from the branch that actually writes to the card
+([audioshim.c:1290-1305](../scripts/shims/audioshim.c)). To tell a silent run
+from a working one, in this order:
+
+```sh
+grep -c "writei #" /tmp/audioshim.log     # 0 = silent; >0 = the card is being fed
+grep -a "NO OUTPUT DEVICE" /tmp/audioshim.log
+grep -a "open('hw:CARD=DDJFLX4,DEV=0')" /tmp/audioshim.log   # res=-19 is -ENODEV
+cat /proc/asound/cards                                        # no DDJFLX4 entry?
+lsusb | grep 2b73:0045                                        # the FLX4 itself
+```
+
+`-ENODEV` on the configured device means the card is absent, not misconfigured —
+and the fallbacks below it (`plughw:`, `default`) then fail too, which is how a
+missing controller turns into `NO OUTPUT DEVICE`.
+
 ## VU meters
 
 The master level comes from `audioshim.so`, which sees the master mix in

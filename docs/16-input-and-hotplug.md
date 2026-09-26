@@ -21,7 +21,7 @@ nobody has run it yet.
 | 2 | Enter should be a rotary push | **already was**; it was dead after one use because of the release defect, which is fixed |
 | 3 | `w` = PLAY deck 1, `s` = PLAY deck 2 | **bound**, additive to SPACE/N |
 | 4 | controllers should be hot-swappable | evdev: **fixed** (hot-add verified on the unit); MIDI: already worked; audio: **still unverified** |
-| 5 | the FLX4 pops/buzzes when rbp first opens the audio | **mute enabled by default** (1500/300) — needs the operator's ear to confirm |
+| 5 | the FLX4 pops/buzzes when rbp first opens the audio | **mute enabled by default** (1500/300) — **not yet heard with a card open**: the restarts on 08:39 and 08:41 ran with no FLX4 on the bus at all |
 | — | **a key release was lost, so a second press did nothing** | **fixed and verified**: a 120 ms press now delivers its release |
 
 ## The defect: the reader loses the release
@@ -240,6 +240,18 @@ audioshim: startup mute released after 79424 frames
 
 79424 frames at 44100 Hz is 1.8 s, which is 1500 ms + 300 ms. What it *sounds*
 like is the one thing left, and it needs the operator's ears.
+
+**And it is still unverified, because of a trap in those two lines.** The
+mute-release line is printed by `flush_master()`, which the silent path also
+runs, so it appears on a run with no audio at all. Checked on the unit later the
+same day: **both restarts were silent** — the FLX4 was not on the USB bus, the
+shim logged `NO OUTPUT DEVICE` with `open('hw:CARD=DDJFLX4,DEV=0') res=-19`
+(-ENODEV), and there were **zero** `writei #` lines, which is the only line that
+means a real device is being fed ([09 — Audio](09-audio.md) has the recipe for
+telling the two apart).
+
+So "no pop" on a restart is not evidence of anything until `writei #` is
+appearing. Listen for the pop with the FLX4 connected and the card open.
 
 ## Reaching the unit's input path from a workstation
 
