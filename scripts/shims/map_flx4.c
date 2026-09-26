@@ -603,9 +603,11 @@ static void flx4_pitch(int ch, int cc, int val)
 
 static void flx4_build(void)
 {
-     /* A map switch is a rebuild, not an append -- and build() must be safe to
-      * run twice, because the binding tables are shared storage, not this map's. */
-     ctrl_bindings_reset();
+     /* ADDITIVE, deliberately: this fills the tables and never empties them.
+      * A keyboard can be live on the other selection at the same time, and the
+      * front end clears the tables once before any build -- see the note on
+      * ctrl_bindings_reset() in ctrl_map.h. A reset here would take map_kbd.c's
+      * bindings with it, and its build puts nothing back. */
 
      /* Calibration, read by value so an empty export from start-rb.sh's
       * SHIM_VARS loop means "use the default" rather than 0. */

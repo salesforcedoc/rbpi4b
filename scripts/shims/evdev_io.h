@@ -35,10 +35,20 @@
  * tell from the arguments (and must not care) which node an event came from.
  *
  * The device set is discovered rather than configured: every /dev/input/event*
- * with EV_KEY, re-scanned whenever one goes away, so unplugging and replugging
- * a keyboard or a mouse needs no restart. KBD_DEV pins the reader to one node
- * instead of scanning (bring-up aid; with it set, a keyboard pinned means the
- * mouse is not read at all, and so BTN_RIGHT and the wheel are not either).
+ * with EV_KEY, re-checked once a second and on any device's death, so unplugging
+ * and replugging a keyboard or a mouse needs no restart -- and neither does
+ * plugging one in while rbp is already running. KBD_DEV pins the reader to one
+ * node instead of scanning (bring-up aid; with it set, a keyboard pinned means
+ * the mouse is not read at all, and so BTN_RIGHT and the wheel are not either).
+ *
+ * ONE THING A HANDLER CAN BE SENT THAT THE KERNEL DID NOT SEND: when a device
+ * goes away, the reader emits (EV_KEY, code, 0) for every key it still believes
+ * that device is holding. A kernel never sends a release for a device that is no
+ * longer there, and a handler that latches a key down -- as map_kbd.c does --
+ * would otherwise hold it down forever and ignore the next press. So a handler
+ * must be prepared to see a release whose press it may not have seen (an
+ * unplugged device, or one that appeared with its key already down), and must
+ * treat it as an ordinary release. It never has to know which node it came from.
  */
 int evdev_start(void (*on_event)(int type, int code, int value));
 

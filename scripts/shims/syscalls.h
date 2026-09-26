@@ -41,6 +41,14 @@ static inline ssize_t real_read(int fd, void *buf, size_t n)
     return syscall(SYS_read, fd, buf, n);
 }
 
+/* Here for klog(), which is the one writer in the controls shim that must not go
+ * through a name another library could interpose: a shim that ever wrapped
+ * write() would send its own log into itself. */
+static inline ssize_t real_write(int fd, const void *buf, size_t n)
+{
+    return syscall(SYS_write, fd, buf, n);
+}
+
 static inline int real_close(int fd)
 {
     return (int)syscall(SYS_close, fd);

@@ -19,9 +19,22 @@
  *
  * Not every surface is MIDI, though. A keyboard is an evdev device, so a map
  * says whether it wants a non-MIDI source through devices()/input() at the end
- * of struct ctrl_map -- and the front end's rule there is the whole of the
- * special case: a map that wants one gets the reader started, a map that does
- * not is left exactly as it was.
+ * of struct ctrl_map.
+ *
+ * TWO MAPS RUN AT ONCE, on two independent selections: MIDI_MAP picks the
+ * sequencer surface and EVDEV_MAP picks the non-MIDI one, so the FLX4 and a
+ * keyboard drive rbp together with no configuration. The three consequences a
+ * reader of this file needs:
+ *
+ *  - `devices()`/`input()` still describe ONE surface's need for a non-MIDI
+ *    source; the front end asks the evdev map, not the MIDI one. A MIDI-only map
+ *    leaves both NULL and that is not a gap -- nothing on that side wants them.
+ *  - The two selections may name the SAME map (MIDI_MAP=kbd), and then it is
+ *    built, started and ticked once rather than twice.
+ *  - `build()` is ADDITIVE. ctrl_bindings_reset() is called by the front end,
+ *    exactly once, before either build -- a build that reset the shared tables
+ *    would wipe the other surface's bindings, and map_kbd.c's leaves them empty
+ *    on purpose. See the note on ctrl_bindings_reset() below.
  */
 #ifndef RBLIVE4_CTRL_MAP_H
 #define RBLIVE4_CTRL_MAP_H
@@ -65,7 +78,14 @@ extern int abs_map_n;
  * struct abs_ctrl, or a third table with a threshold -- and until one exists,
  * the honest answer at a call site is a comment saying so. */
 
-/* Empty both tables. A map switch is a rebuild from nothing, not an append. */
+/* Empty both tables. Called by the front end exactly once, before any build():
+ * two maps can be live at once, so a build that reset them would wipe the other
+ * surface's bindings -- and map_kbd.c's build leaves both tables empty on
+ * purpose, so the wipe would be of the FLX4's bindings by a map that put nothing
+ * in their place. A build() must therefore ADD to the tables as it finds them.
+ *
+ * Kept here rather than inlined at the call site because the absolute cache and
+ * the bindings have to be emptied together. */
 void ctrl_bindings_reset(void);
 void add_note(int rch, int note, int key, int sch);
 void add_abs(int rch, int cc, int key, int sch);
@@ -104,11 +124,16 @@ struct ctrl_map {
       * as small as this: the front end asks one question (does this surface want
       * a non-MIDI source at all?) and then hands over raw triples.
       *
-      * devices() answers that question: how many non-MIDI event sources this map
-      * wants, 0 for a MIDI-only surface. Anything above zero makes the front end
-      * start the evdev reader against input(); 0 makes it start nothing, which is
-      * what keeps a MIDI-only map -- and its behaviour -- exactly as it was.
-      * Both members are optional; a map that leaves them NULL is MIDI-only. */
+      * The question is asked of the EVDEV_MAP selection and never of the
+      * MIDI_MAP one, which is what lets a MIDI controller and a keyboard be live
+      * together (see the header). A map that leaves both members NULL is
+      * MIDI-only, and that no longer means "no keyboard" -- it means "not this
+      * map's business", because the other side of the selection is asked
+      * separately.
+      *
+      * devices() answers that question with a count rather than a flag, because
+      * the caller's line reads better with one: anything above zero makes the
+      * front end start the evdev reader against input(). */
      int (*devices)(void);
 
      /* One raw evdev event, (type, code, value) exactly as the kernel delivered
@@ -118,6 +143,12 @@ struct ctrl_map {
       * only once rbp's KeyManager exists. */
      void (*input)(int type, int code, int value);
 };
+
+/* "Nothing on this side." The absence of a surface is a real selection and not a
+ * missing one: EVDEV_MAP=none is the way back to a MIDI controller with no
+ * keyboard and no mouse buttons, without a rebuild and without the silent
+ * fallback to a map the operator did not ask for. */
+extern const struct ctrl_map map_none;
 
 /* The SC Live 4 / Prime GO surface, which is what this shim grew up on. */
 extern const struct ctrl_map map_jp21;

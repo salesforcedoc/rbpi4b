@@ -7,10 +7,13 @@
  * ctrl_map.o, shimutil.o are the objects that ship, not copies) and pins the
  * rbp keycodes that come out. What is being checked, in the order it matters:
  *
- *   1. The map is a non-MIDI surface. kbd_devices() says so, and the tables it
- *      fills are empty — a keyboard has no note and no CC, and if build() ever
- *      left stale bindings in ctrl_map.c's tables, the map would still dispatch
- *      through them if someone later gave it an event().
+ *   1. The map is a non-MIDI surface. kbd_devices() says so, there is an input()
+ *      and no event(), and its build() leaves the shared binding tables exactly
+ *      as it found them — a keyboard has no note and no CC. That last one used to
+ *      read "build() empties them"; since 2026-09-26 the front end owns the reset
+ *      (ctrl_map.h), because a keyboard and an FLX4 are built into the same two
+ *      tables and a build that cleared them would leave the controller with no
+ *      bindings at all. main() is where that is asserted, with the planted rows.
  *
  *   2. Every binding reaches the keycode its table row says it should. This is
  *      the assertion with teeth: the deck channels (2 as well as 1), LOAD on the
@@ -25,10 +28,13 @@
  *
  * What is NOT checked here, and cannot be:
  *
- *   - evdev_io.c. Opening /dev/input/event* is the one thing in this port that
- *     needs a device; it is deliberately not linked into this test, so nothing
- *     here claims it reads events correctly. What is checked is the contract on
- *     the other side of it: that this map knows what to do with a raw triple.
+ *   - evdev_io.c. Opening /dev/input/event* needs a device; it is deliberately
+ *     not linked into THIS test, so nothing here claims it reads events
+ *     correctly. What is checked here is the contract on the other side of it:
+ *     that this map knows what to do with a raw triple. The reader's own
+ *     behaviour — which nodes it opens, when it notices a new one, and what it
+ *     does when one goes away — is test_evdev's, which fakes the syscall
+ *     boundary rather than the module.
  *   - The sign of the selector rotation against rbp's list. map_kbd.c sends the
  *     same +1/-1 that map_jp21.c's knob sends for a clockwise turn, and that is
  *     asserted here; whether rbp's list scrolls up or down for it had never been
@@ -436,20 +442,13 @@ static void check_surface(void)
 
      /* A keyboard is not a MIDI device: no sequencer event, and no heartbeat.
       * Both are optional in struct ctrl_map, and both being NULL is what makes
-      * the reader the map's only source. */
+      * the reader the map's only source -- which is also why this map can sit
+      * beside a live FLX4 without consuming its events. */
      CHECK(map_kbd.event == NULL, "the keyboard map has a sequencer handler");
      CHECK(map_kbd.tick == NULL, "the keyboard map has a tick");
 
      CHECK(map_kbd.name != NULL && map_kbd.name[0] != '\0',
            "the keyboard map has no name for MIDI_MAP to select it by");
-
-     /* It fills neither binding table -- there is no note and no CC on a
-      * keyboard -- and a map switch is a rebuild from nothing, so a keyboard
-      * after a JP21 session must leave the tables empty rather than carrying the
-      * controller's rows into a surface that can never dispatch them. */
-     CHECK(note_map_n == 0 && abs_map_n == 0,
-           "the keyboard map left %d notes and %d absolute controls in the "
-           "shared binding tables", note_map_n, abs_map_n);
 }
 
 int main(void)
@@ -464,18 +463,60 @@ int main(void)
 
      pin_keycodes();
 
-     /* Plant a binding the way a MIDI map would, so the reset below has
-      * something to clear: asserting that an empty table is still empty proves
-      * nothing. A keyboard arriving after a JP21 session must not leave the
-      * controller's rows behind in the shared tables. */
+     /* The ownership change of 2026-09-26, and the reason these assertions live
+      * here at the top level rather than inside check_surface(): the shared
+      * binding tables are reset by the FRONT END (ctrl_map.h), once, before it
+      * builds either map, because two maps are now live at the same time -- a
+      * MIDI surface and a non-MIDI one.
+      *
+      * The failure mode to pin is the one that change removed: if kbd_build()
+      * ever calls ctrl_bindings_reset() again, it wipes the FLX4's rows and puts
+      * nothing in their place, so every button on the controller goes dead from a
+      * map that is working exactly as it was designed to. So plant bindings the
+      * way a MIDI map would, build, and require them to still be there.
+      *
+      * Two of each, not one, so the surviving count cannot be read as "the map
+      * added something of its own" -- this map adds nothing at all. */
      add_note(0, 36, K_PAD1, 1);
+     add_note(0, 37, K_LOOPIN, 1);
      add_abs(0, 17, K_HPMIX, 1);
-     CHECK(note_map_n == 1 && abs_map_n == 1,
-           "planting a binding left %d notes and %d absolute controls",
-           note_map_n, abs_map_n);
+     add_abs(0, 18, K_HPLEVEL, 1);
+     CHECK(note_map_n == 2 && abs_map_n == 2,
+           "planting bindings left %d notes and %d absolute controls, expected 2 "
+           "and 2", note_map_n, abs_map_n);
 
      map_kbd.build();
      check_surface();
+
+     CHECK(note_map_n == 2 && abs_map_n == 2,
+           "a keyboard build must ADD to the shared binding tables, not wipe "
+           "them: it left %d notes and %d absolute controls, expected the 2 and 2 "
+           "that were planted before it -- an FLX4 built second would have no "
+           "bindings left", note_map_n, abs_map_n);
+
+     /* And the front end's reset -- now the only thing that clears them -- does
+      * clear them, both tables together. */
+     ctrl_bindings_reset();
+     CHECK(note_map_n == 0 && abs_map_n == 0,
+           "ctrl_bindings_reset() left %d notes and %d absolute controls",
+           note_map_n, abs_map_n);
+
+     /* MIDI_MAP=none / EVDEV_MAP=none exist so that "no surface on this side" is
+      * a selection someone can make deliberately, rather than the silent
+      * fallback to a map the operator did not ask for. So it has to be
+      * selectable: an inert surface, with a build() the front end can call like
+      * any other. */
+     CHECK(map_none.build != NULL, "map_none has no build()");
+     CHECK(map_none.startup == NULL && map_none.event == NULL &&
+           map_none.tick == NULL && map_none.devices == NULL &&
+           map_none.input == NULL,
+           "map_none is not inert");
+     CHECK(map_none.name != NULL && map_none.name[0] != '\0',
+           "map_none has no name for MIDI_MAP to select it by");
+     map_none.build();
+     CHECK(note_map_n == 0 && abs_map_n == 0,
+           "map_none built %d notes and %d absolute controls into the shared "
+           "tables", note_map_n, abs_map_n);
 
      drive();
      check_clamp();

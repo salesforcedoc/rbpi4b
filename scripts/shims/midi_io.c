@@ -321,6 +321,9 @@ void seq_setup(void)
 void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev))
 {
      struct snd_seq_event ev;
+     /* Rate limit for the "this fd is not usable" line below. Static rather than
+      * automatic because it has to survive the round it was set in. */
+     static unsigned long long seq_bad_next_ms;
 
      for (;;) {
           struct pollfd pfd;
@@ -346,6 +349,22 @@ void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev))
                on_event(&ev);
           else if (n < 0 && errno == EINTR)
                continue;
+          else if (n < 0) {
+               /* Not EINTR: poll() said there was something to read and the read
+                * failed. A sequencer fd the kernel has given up on answers
+                * POLLNVAL -- with a POSITIVE count, so the idle branch above is
+                * skipped, read() fails immediately, and the loop spins at 100%
+                * CPU for as long as rbp runs. This shim never reopens the
+                * sequencer, so there is nothing to fix here; what there is to do
+                * is stop the spin, keep the surface work below running, and say
+                * so once every five seconds rather than once per turn. */
+               if (shim_now_ms() >= seq_bad_next_ms) {
+                    seq_bad_next_ms = shim_now_ms() + 5000;
+                    klog("knobshim2: seq read: %s; this fd is not usable"
+                         " (poll said there was data)\n", strerror(errno));
+               }
+               usleep(100000);
+          }
      }
 }
 

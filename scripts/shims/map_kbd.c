@@ -201,6 +201,76 @@ static void kbd_rot(int key, int ch, int n)
 enum { ACT_IGNORE = 0, ACT_PRESS, ACT_RELEASE, ACT_ROTATE };
 static const char *const act_name[] = { "ignored", "press", "release", "rotate" };
 
+/* The unmapped-event log, rate-limited per (type, code).
+ *
+ * It is a diagnostic for a control nobody has bound yet, and it is worth keeping
+ * for exactly that. What made it a problem is the mouse: motion arrives as
+ * EV_REL/REL_X and REL_Y, which match no binding, and every one of those reports
+ * used to log a line -- through klog(), which opens, writes and closes
+ * /tmp/knobshim.log on every call. At 125 Hz that is ~250 lines and ~750
+ * syscalls a second, at 1000 Hz it is eight times that, all of it on the single
+ * thread that has to dispatch keypresses. A key pressed during a mouse move
+ * therefore arrives late, which is one half of "the keyboard is sometimes laggy"
+ * and is entirely self-inflicted by KNOB_VERBOSE=1 (docs/16).
+ *
+ * So: at most one line per (type, code) per second, with the number suppressed
+ * in between. Eight slots, evicted least-recently-used; the realistic keyboard
+ * and mouse together report well under that, and a device reporting more than
+ * eight distinct unmapped codes is already worth looking at. */
+#define UNMAPPED_SLOTS  8
+#define UNMAPPED_PER_MS 1000
+
+struct unmapped_slot {
+     int type, code;
+     unsigned long long last_ms;
+     unsigned long suppressed;
+};
+
+static void log_unmapped(int type, int code, int value)
+{
+     static struct unmapped_slot slots[UNMAPPED_SLOTS];
+     unsigned long long now = shim_now_ms();
+     struct unmapped_slot *s = NULL, *free_slot = NULL, *oldest = NULL;
+
+     for (int i = 0; i < UNMAPPED_SLOTS; i++) {
+          struct unmapped_slot *c = &slots[i];
+
+          if (c->last_ms == 0) {
+               if (!free_slot)
+                    free_slot = c;
+               continue;
+          }
+          if (c->type == type && c->code == code) {
+               s = c;
+               break;
+          }
+          if (!oldest || c->last_ms < oldest->last_ms)
+               oldest = c;
+     }
+     if (!s) {
+          s = free_slot ? free_slot : oldest;
+          s->type = type;
+          s->code = code;
+          s->last_ms = 0;
+          s->suppressed = 0;
+     }
+     if (s->last_ms && now - s->last_ms < UNMAPPED_PER_MS) {
+          s->suppressed++;
+          return;
+     }
+     /* The first line of a burst carries the value; the repeats carry the count,
+      * because after the first one the interesting number is how many were
+      * dropped, not what the hundredth one's value happened to be. */
+     if (s->suppressed)
+          klog("knobshim2: kbd: unmapped evdev type=%d code=%d (%lu more in "
+               "the last second)\n", type, code, s->suppressed);
+     else
+          klog("knobshim2: kbd: unmapped evdev type=%d code=%d value=%d\n",
+               type, code, value);
+     s->last_ms = now;
+     s->suppressed = 0;
+}
+
 /* The name of a control this map can see but cannot drive yet. Only the two
  * browse keys with no keycode are in here (see the bindings above); naming them
  * is the difference between a log that says which control is dead and one that
@@ -276,18 +346,24 @@ static void kbd_input(int type, int code, int value)
           return;
      }
 
+     /* Rate-limited: see log_unmapped(). A mouse's motion is unmapped by design
+      * and arrives thousands of times a second, and a log line per report is how
+      * the keypress behind it is made to feel late. */
      if (verbose)
-          klog("knobshim2: kbd: unmapped evdev type=%d code=%d value=%d\n",
-               type, code, value);
+          log_unmapped(type, code, value);
 }
 
 static void kbd_build(void)
 {
-     /* A keyboard fills neither binding table: it has no note and no CC. The
-      * reset is still the right thing -- the tables are shared storage and a map
-      * switch is a rebuild from nothing rather than an append (ctrl_map.h) --
-      * and neither table is ever consulted, because this map has no event(). */
-     ctrl_bindings_reset();
+     /* A keyboard fills neither binding table: it has no note and no CC, and
+      * neither table is ever consulted because this map has no event().
+      *
+      * Nor does it EMPTY them. It used to call ctrl_bindings_reset() here, which
+      * was correct while a map was the only surface in the process; now that the
+      * FLX4 can be live on the other selection, that call would wipe the FLX4's
+      * bindings and put nothing in their place -- every controller button dead,
+      * from a map that is working exactly as designed. The front end owns the
+      * reset (ctrl_map.h), and this build is additive: it adds nothing. */
 
      /* No key is held either: a rebuild must not leave one latched down, or the
       * release would be sent as a key that was never pressed. */

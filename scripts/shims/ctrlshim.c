@@ -41,8 +41,15 @@
  * environment; declared in shimutil.h for everyone whose logging it gates. */
 int verbose = 0;
 
-/* The selected map. Set once, before any thread can dispatch an event. */
-static const struct ctrl_map *g_map;
+/* The two selected maps. Set once, before any thread can dispatch an event, and
+ * read-only afterwards. They are TWO selections and not one -- a controller on
+ * the sequencer and a keyboard on evdev are different devices with different
+ * event sources, and the only reason they used to be mutually exclusive was that
+ * one struct had to answer for both. MIDI_MAP picks the first, EVDEV_MAP the
+ * second (see ctrl_map.h). They may name the same map, and then it is built,
+ * started and ticked once. */
+static const struct ctrl_map *g_midi;
+static const struct ctrl_map *g_evdev;
 
 /* Set when the map has been built, so a replay cannot start before there are
  * bindings to replay into -- a dump fed to empty tables looks like a broken map. */
@@ -53,29 +60,52 @@ static FILE *dump_f;
 static unsigned long long dump_t0;
 static int dump_started;
 
-/* The maps this build knows. An unknown MIDI_MAP must not silently do nothing
- * -- see pick_map(). */
-static const struct ctrl_map *const maps[] = { &map_flx4, &map_jp21, &map_kbd };
+/* The maps this build knows, one table per selection. `kbd` is in BOTH on
+ * purpose: MIDI_MAP=kbd has meant "no controller, keyboard only" since before
+ * the two selections existed, and that is still exactly what it says here (the
+ * evdev side resolves to the same map, so it is built once and the MIDI side
+ * consumes no sequencer events). Keeping the name out of the MIDI table would
+ * turn `MIDI_MAP=kbd` into a typo warning and a silent fall back to the FLX4,
+ * which is the opposite of what an operator writing it wants. */
+static const struct ctrl_map *const midi_maps[] = {
+     &map_flx4, &map_jp21, &map_kbd, &map_none,
+};
+static const struct ctrl_map *const evdev_maps[] = {
+     &map_kbd, &map_none,
+};
 
-/* The surface to fall back to when MIDI_MAP says nothing, or says something this
- * build has never heard of. Both answers are the FLX4, for the same reason: it
- * is the surface this port targets, and it is the value rb.conf ships, so a
- * shim started by hand with no environment and a typo'd name both end up where
- * they would have been anyway. The previous target's map is still one word away
- * (MIDI_MAP=jp21) -- the point of the fallback is that a mistake is LOUD, not
- * that it is impossible. */
-static const struct ctrl_map *const default_map = &map_flx4;
+/* The surface to fall back to when the environment says nothing, or says
+ * something this build has never heard of. The MIDI side falls back to the FLX4
+ * for the same reason it always did: it is the surface this port targets, and it
+ * is the value rb.conf ships, so a shim started by hand with no environment and
+ * a typo'd name both end up where they would have been anyway. The previous
+ * target's map is one word away (MIDI_MAP=jp21) -- the point of the fallback is
+ * that a mistake is LOUD, not that it is impossible.
+ *
+ * The evdev side falls back to the keyboard: it is the only non-MIDI surface
+ * there is, it is the value rb.conf ships, and asking for no keyboard on purpose
+ * has a name of its own (EVDEV_MAP=none), so the fallback does not have to be
+ * one.
+ */
+static const struct ctrl_map *const default_midi_map = &map_flx4;
+static const struct ctrl_map *const default_evdev_map = &map_kbd;
 
-static const struct ctrl_map *pick_map(void)
+/* Resolve one selection. The warning names the environment variable rather than
+ * only the bad value, because with two selections "not a map this build has" no
+ * longer says which of them was wrong. */
+static const struct ctrl_map *pick_map(const char *env_name,
+                                       const struct ctrl_map *const *table,
+                                       unsigned n,
+                                       const struct ctrl_map *dflt)
 {
-     const char *want = env_text("MIDI_MAP", default_map->name);
+     const char *want = env_text(env_name, dflt->name);
 
-     for (unsigned i = 0; i < sizeof(maps) / sizeof(maps[0]); i++)
-          if (strcmp(maps[i]->name, want) == 0)
-               return maps[i];
-     klog("knobshim2: MIDI_MAP '%s' is not a map this build has; "
-          "falling back to '%s'\n", want, default_map->name);
-     return default_map;
+     for (unsigned i = 0; i < n; i++)
+          if (strcmp(table[i]->name, want) == 0)
+               return table[i];
+     klog("knobshim2: %s '%s' is not a map this build has; "
+          "falling back to '%s'\n", env_name, want, dflt->name);
+     return dflt;
 }
 
 /* ---- MIDI_DUMP / MIDI_REPLAY ---- */
@@ -126,8 +156,8 @@ static void ctrl_dispatch(const struct snd_seq_event *ev)
 
      if (!get_key_manager())
           return;
-     if (g_map->event)
-          g_map->event(ev);
+     if (g_midi->event)
+          g_midi->event(ev);
 }
 
 /* The non-MIDI path: one raw evdev triple, gated exactly like a sequencer event
@@ -140,8 +170,8 @@ static void ctrl_input_dispatch(int type, int code, int value)
 {
      if (!get_key_manager())
           return;
-     if (g_map->input)
-          g_map->input(type, code, value);
+     if (g_evdev->input)
+          g_evdev->input(type, code, value);
 }
 
 /* MIDI_REPLAY: drive a recorded dump through ctrl_dispatch. Runs alongside the
@@ -186,27 +216,46 @@ static void *midi_thread(void *arg)
      verbose = env_on("KNOB_VERBOSE", 0);
      dump_open();
 
-     g_map = pick_map();
-     g_map->build();
+     g_midi = pick_map("MIDI_MAP", midi_maps,
+                       (unsigned)(sizeof midi_maps / sizeof midi_maps[0]),
+                       default_midi_map);
+     g_evdev = pick_map("EVDEV_MAP", evdev_maps,
+                        (unsigned)(sizeof evdev_maps / sizeof evdev_maps[0]),
+                        default_evdev_map);
+
+     /* Clear the shared tables HERE, once, before either build -- a build is
+      * additive from now on (ctrl_map.h). Leaving the reset inside the builds is
+      * what would make them order-dependent: map_kbd.c's puts nothing back, so a
+      * keyboard built second would leave the FLX4 with no bindings at all and
+      * every button on the controller dead. */
+     ctrl_bindings_reset();
+     g_midi->build();
+     if (g_evdev != g_midi)
+          g_evdev->build();
      maps_ready = 1;
-     klog("knobshim2: map '%s': %d notes, %d abs knobs; "
-          "g_speaker_gain addr=%p cue_gain=%p cue_mix=%p\n",
-          g_map->name, note_map_n, abs_map_n, (void *)&g_speaker_gain,
+     klog("knobshim2: maps: MIDI_MAP='%s' EVDEV_MAP='%s'%s; %d notes, "
+          "%d abs knobs; g_speaker_gain addr=%p cue_gain=%p cue_mix=%p\n",
+          g_midi->name, g_evdev->name,
+          g_evdev == g_midi ? " (one map on both sides, built once)" : "",
+          note_map_n, abs_map_n, (void *)&g_speaker_gain,
           (void *)&g_cue_gain, (void *)&g_cue_mix);
 
-     /* A map that is not a MIDI surface gets the evdev reader here: before the
+     /* The evdev reader belongs to the EVDEV_MAP selection, never to the MIDI
+      * one -- which is the whole of the fix for "the keyboard does nothing while
+      * the FLX4 works": the map being asked about non-MIDI sources is now the
+      * keyboard map even when the FLX4 is the controller. Started before the
       * KeyManager wait, so a keyboard starts working as soon as rbp's key path
       * exists, and independent of both the sequencer and any controller being
-      * found. A MIDI-only map (devices() absent or 0) starts nothing, which is
-      * what keeps its behaviour unchanged. */
-     n_evdev = g_map->devices ? g_map->devices() : 0;
+      * found. EVDEV_MAP=none (or a map that leaves devices() NULL) starts
+      * nothing, which is how the old behaviour is asked for on purpose. */
+     n_evdev = g_evdev->devices ? g_evdev->devices() : 0;
      if (n_evdev > 0) {
           if (evdev_start(ctrl_input_dispatch) == 0)
-               klog("knobshim2: map '%s': %d non-MIDI source(s) wanted; "
-                    "evdev reader started\n", g_map->name, n_evdev);
+               klog("knobshim2: evdev map '%s': %d non-MIDI source(s) wanted; "
+                    "evdev reader started\n", g_evdev->name, n_evdev);
           else
-               klog("knobshim2: map '%s': %d non-MIDI source(s) wanted but the "
-                    "evdev reader would not start\n", g_map->name, n_evdev);
+               klog("knobshim2: evdev map '%s': %d non-MIDI source(s) wanted but "
+                    "the evdev reader would not start\n", g_evdev->name, n_evdev);
      }
 
      replay = env_text("MIDI_REPLAY", NULL);
@@ -224,9 +273,14 @@ static void *midi_thread(void *arg)
      }
      klog("knobshim2: KeyManager ready, opening sequencer...\n");
 
-     /* Whatever this surface needs rbp to be told, told before the first event:
-     * anything sent earlier is dropped by rbp's own mixer init. */
-     g_map->startup();
+     /* Whatever each surface needs rbp to be told, told before the first event:
+      * anything sent earlier is dropped by rbp's own mixer init. MIDI side first,
+      * so a controller's deck routing and mixer defaults are established before a
+      * keyboard adds its (empty) startup, which is the order these were written
+      * in and the order their tests pin. */
+     g_midi->startup();
+     if (g_evdev != g_midi)
+          g_evdev->startup();
 
      seq_setup();
      if (seq_fd < 0) {
@@ -234,7 +288,7 @@ static void *midi_thread(void *arg)
                klog("knobshim2: sequencer setup failed, giving up\n");
                return NULL;
           }
-          /* Fatal for a MIDI-only map, and only for a MIDI-only map: this one
+          /* Fatal without a non-MIDI source, and only then: the evdev selection
            * has a source that is not on the sequencer, and a missing
            * /dev/snd/seq is a property of the image (fix-dev.sh modprobes it
            * before launching) rather than a reason to take down a shim whose
@@ -247,14 +301,27 @@ static void *midi_thread(void *arg)
            * MIDI input, so "the keyboard works and nothing else does" should
            * never be a mystery. Nothing here retries seq_setup(); a Pi that
            * boots without the module needs fix-dev.sh, not a second chance. */
-          klog("knobshim2: sequencer setup failed (reason above), but map '%s' "
-               "has a non-MIDI source: the keyboard still works and this thread "
-               "stays up. There will be no MIDI input and no LED/meter output "
-               "for as long as rbp runs.\n", g_map->name);
+          klog("knobshim2: sequencer setup failed (reason above), but evdev map "
+               "'%s' has a non-MIDI source: the keyboard still works and this "
+               "thread stays up. There will be no MIDI input and no LED/meter "
+               "output for as long as rbp runs.\n", g_evdev->name);
           for (;;)
                pause();
      }
-     klog("knobshim2: reading sequencer events (map '%s')\n", g_map->name);
+     klog("knobshim2: reading sequencer events (MIDI map '%s')\n", g_midi->name);
+
+     /* The sequencer is subscribed whichever map was selected -- seq_setup() runs
+      * unconditionally above -- so a map with no event() is not "no controller",
+      * it is "nothing done with the controller's events". Saying so is worth a
+      * line: under MIDI_MAP=kbd the FLX4 is still found and its LED/meter route
+      * still exists, and the only reason this is invisible is that RB_LED_DISABLE
+      * ships as 1. (docs/16 used to claim no subscription was made, which was
+      * wrong on both counts.) */
+     if (!g_midi->event)
+          klog("knobshim2: MIDI map '%s' has no event handler: sequencer events "
+               "are read and dropped, and any controller found is subscribed "
+               "with nothing on the other end of it. That is a selection, not a "
+               "failure -- EVDEV_MAP handles the keyboard.\n", g_midi->name);
 
      midi_poll_forever(ctrl_dispatch);
      return NULL;
@@ -270,8 +337,13 @@ static void *tick_thread(void *arg)
           return NULL;
      for (;;) {
           usleep(20000);   /* 50 Hz */
-          if (g_map && g_map->tick)
-               g_map->tick();
+          /* Both sides tick, and a shared map ticks once: a hold timeout driven
+           * twice per round would expire at half the interval it was written
+           * for, which is a bug that would read as a twitchy button. */
+          if (g_midi && g_midi->tick)
+               g_midi->tick();
+          if (g_evdev && g_evdev != g_midi && g_evdev->tick)
+               g_evdev->tick();
      }
      return NULL;
 }

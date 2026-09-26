@@ -701,9 +701,9 @@ static void *bfx_init_thread(void *arg)
 
 static void jp21_build(void)
 {
-     /* A map switch is a rebuild, not an append -- and build() must be safe to
-      * run twice because the tables are shared storage, not this map's. */
-     ctrl_bindings_reset();
+     /* ADDITIVE, deliberately -- see the note on ctrl_bindings_reset() in
+      * ctrl_map.h. The front end clears the shared tables once, before either
+      * selection is built; a reset here would wipe the other surface's. */
 
      /* The map's own calibration. Read here, by value, so an empty export from
       * start-rb.sh's SHIM_VARS loop means "use the default" rather than 0 --
