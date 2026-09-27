@@ -6,6 +6,7 @@ Two kinds of tool live here:
 |---|---|---|---|
 | [`patch-rbp/`](patch-rbp/) | workstation | Python | apply the interoperability patches to a stock `rbp` |
 | [`build-directfb/`](build-directfb/) | workstation | C / patch | patched DirectFB 1.4.16 (core + fbdev + modules) |
+| [`build-toolchain/`](build-toolchain/) | workstation | Docker | the soft-float armel cross build environment the shims are built in |
 | [`fit-crosscheck.sh`](fit-crosscheck.sh) | workstation | shell + C | prove the driver's copy and the shim's copy of the fit rule still agree |
 | [`fbdump.c`](fbdump.c) | **the Pi** | C | dump `/dev/fb0` geometry/format + say what it means for the present path |
 | [`evdevdump.c`](evdevdump.c) | **the Pi** | C | enumerate input devices; find the pointer and its axis algebra |
@@ -38,6 +39,33 @@ The `getPcController()` patch is applied as a second stage by
 Contains `directfb-full.diff`, the complete patch against DirectFB 1.4.16. No
 upstream DirectFB sources are shipped; fetch them and apply the diff, then
 install to `work/dfb` (see the [README](build-directfb/README.md)).
+
+## `build-toolchain`
+
+The `Dockerfile` for the image `scripts/shims` is built in: `debian:bookworm`
+plus `gcc-arm-linux-gnueabi` (**armel/soft-float**, never `…hf`) and
+`qemu-user`, so the cross compiler and the emulator that runs the static ARM
+test binaries come from one place.
+
+```bash
+docker build -t rblive4-build tools/build-toolchain/
+docker run --rm -v "$PWD:/src" -w /src rblive4-build \
+    make -C scripts/shims RX3=extracted/XDJRX3-rootfs test
+```
+
+Both commands work on a fresh clone — the context is the Dockerfile's own
+directory and nothing is `COPY`ed, so the image needs no repository content at
+all. The native equivalent is the same two packages from your distribution's
+archive (`gcc-arm-linux-gnueabi`, `libc6-dev-armel-cross`, plus `qemu-user`),
+which is what the `RUN` line installs; Docker is a convenience, not a
+requirement, and it is the only route that needs nothing on the host.
+
+There is deliberately **no `libasound2-dev`** in the image: no shim includes
+`<alsa/…>` — every `snd_*` call is resolved with `dlsym(RTLD_DEFAULT, …)` — and
+the one ALSA header used is `<sound/asequencer.h>`, a *kernel* header from
+`linux-libc-dev`. Adding it would pull the build machine's (arm64) ALSA headers
+into an armel build. Same reason [`pcmprobe.c`](pcmprobe.c) declares its own
+`snd_pcm_*` prototypes and links the chroot's libasound.
 
 ## `fit-crosscheck.sh` — the two copies of one rule
 

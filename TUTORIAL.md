@@ -15,7 +15,11 @@ monitor and a DDJ-FLX4.
   DirectFB fetched from git does not ship the source files it generates (see
   [tools/build-directfb](tools/build-directfb/README.md)). The shim build can
   be run in the repo's Docker image if the float-ABI toolchain is awkward to
-  install; the DirectFB build needs a native compiler *and* a cross one.
+  install — that image is
+  [`tools/build-toolchain/Dockerfile`](tools/build-toolchain/Dockerfile), and
+  building it needs nothing on the host but Docker (see
+  [tools/README.md](tools/README.md#build-toolchain)); the DirectFB build needs
+  a native compiler *and* a cross one.
 * **Extracted assets:** an `XDJRX3-rootfs/`, the GUI assets and `rbp-audio`
   (stock `rbp` + the shared patches). See
   [docs/04](docs/04-firmware-assets.md).

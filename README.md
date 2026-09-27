@@ -254,6 +254,7 @@ rblive4/
 ├── tools/
 │   ├── patch-rbp/            shared rbp patch table (stock -> rbp-audio)
 │   ├── build-directfb/       DirectFB 1.4.16 patch + build notes
+│   ├── build-toolchain/      the soft-float armel build image (Dockerfile)
 │   ├── fbdump.c              framebuffer geometry/format diagnostic
 │   └── evdevdump.c           input device names, caps and absinfo
 └── work/                     local scratch (gitignored)
