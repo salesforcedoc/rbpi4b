@@ -41,9 +41,18 @@
 #include <unistd.h>
 
 /* Bump on any change to the type or meaning of a symbol below. Overridable so a
- * test build can deliberately mis-version a producer to exercise the check. */
+ * test build can deliberately mis-version a producer to exercise the check.
+ *
+ * v2: g_mirror_gain added. A symbol ADDED to the list is already caught from the
+ * consumer's side -- a new audioshim's dlsym() finds nothing in an old producer
+ * and shmstate_require() aborts with "missing symbol". The reverse mix is the
+ * silent one: an old audioshim's list does not mention the new symbol, so it
+ * resolves everything it knows about and happily ignores the value the new
+ * knobshim is writing -- the mirror gain would be set and never read, with no
+ * symptom but a dead knob. The bump is what makes that direction loud too, which
+ * is the whole reason to bump for an addition. */
 #ifndef SHMSTATE_ABI_VERSION
-#define SHMSTATE_ABI_VERSION 1
+#define SHMSTATE_ABI_VERSION 2
 #endif
 
 /* The preload order that satisfies this contract; quoted in error messages so
@@ -56,6 +65,13 @@
 /* master-out level (Main Vol). Applied to the main/XLR pair only, NOT to rbp's
  * master stream, so it does not affect the monitors or the headphones. */
 extern volatile float g_master_gain;
+
+/* The HDMI mirror's level, fed by the unit's own MASTER LEVEL knob (ch 6,
+ * CC 8 MSB + CC 40 LSB, 14-bit). Read by audioshim.c's mirror fill and by
+ * nothing else -- see the definition in shmstate.c for why it is a separate
+ * symbol from g_master_gain rather than a second writer of it. Consumers should
+ * still clamp it: it is a float written from a MIDI message. */
+extern volatile float g_mirror_gain;
 
 /* headphone cue mix and level. g_cue_mix: 0 = cue only, 1 = main only.
  * g_cue_gain: 0..1.
@@ -98,6 +114,7 @@ extern const int shmstate_abi_version;
  */
 #define SHMSTATE_SYMBOL_LIST(X) \
     X("g_master_gain")          \
+    X("g_mirror_gain")          \
     X("g_cue_gain")             \
     X("g_cue_mix")              \
     X("g_speaker_gain")         \

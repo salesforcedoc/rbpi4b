@@ -645,6 +645,218 @@ static void check_state(void)
            "setting", stereo_calls);
 }
 
+/* MASTER LEVEL, the one control whose whole purpose is that it reaches NOTHING
+ * in rbp. That is what makes it a check of its own rather than a row in
+ * check_state(): everything it does is invisible in `sent[]`, so a map that had
+ * quietly also sent K_MASTERLVL would look perfect from the keycode stream, and
+ * the failure would be a master attenuated twice -- once in the samples the Pi
+ * feeds the FLX4, again in the unit's own output stage.
+ *
+ * The numbers are spelled out rather than taken from map_flx4.c's CH_MIX and
+ * CC_MASTER_* names, because they are MEASUREMENTS (list ch 7 = 0-based 6, CC 8
+ * MSB + CC 40 LSB, 2026-09-27) and a #define that drifted would take the test
+ * with it -- which is the one thing this test exists to notice.
+ *
+ * The position is then mapped by flx4_mastervol_gain(), and the expectations
+ * below spell that law's arithmetic out rather than calling it, for the same
+ * reason the CC numbers are spelled out: a change to the law has to be a
+ * deliberate change to this test too. The law is
+ *
+ *      gain = (pos / 16383) / 0.6,  clamped at 1.0
+ *
+ * -- unity at ONE O'CLOCK, flat above it, and a linear ramp below. The knee has
+ * moved twice, both times on the operator's ear, and both times as an edit here
+ * rather than a silent retune:
+ *
+ *   - 2026-09-27, first: unity at the stop left the mirror too quiet to use, so
+ *     it moved to 0.5 -- the middle of the range, -6 dB at the knob's working
+ *     point.
+ *   - 2026-09-27, then: the operator asked for the top of the useful travel to
+ *     be 1 o'clock rather than 12. The knob's travel is the whole raw range (its
+ *     own MIDI dump shows both stops pinning, at raw 0 and raw 16383) and 12
+ *     o'clock is raw 0.5, so 1 o'clock is 0.60-0.61 of the rotation;
+ *     flx4_mastervol_gain() carries the derivation.
+ *
+ * So the cases below sit mostly in the ramp, where the position is injective and
+ * a wrong decode is visible, and **nothing is asserted equal any more**: at 0.6
+ * the middle of the range is 0.833, deliberately short of full level. What is
+ * pinned instead is where unity STARTS -- raw 9829.8 -- with 9829 one count short
+ * of it and 9830 the first position to reach it.
+ *
+ * What is NOT covered, said plainly because the rest of this file pins what it
+ * claims:
+ *   - the "LSB before any MSB" guard. The fixture's own MSB is dispatched before
+ *     this runs, and the high-half flag is a file-static in map_flx4.c with no
+ *     reset, so by here it is already set. The guard still earns its place -- it
+ *     is what stops a stray CC 40 inventing a position out of nothing -- but the
+ *     suite proves it exists, not that it fires.
+ *   - MIRROR_GAIN_MID, and the fallback for a degenerate one. Both are read in
+ *     flx4_build(), which this file deliberately does not call (the same reason
+ *     flx4_startup() is out of scope), so only the default 0.6 is exercised here.
+ */
+static int gain_is(float got, double want)
+{
+     double d = (double)got - want;
+
+     return (d < 0.0 ? -d : d) < 1e-6;
+}
+
+/* A CONTROLLER event, built through the dump format rather than by hand: the
+ * map consumes exactly what mididump_parse() produces, and constructing the
+ * struct directly would let this test pass against a shape the surface never
+ * sends. */
+static void send_cc(int ch, int num, int val)
+{
+     char line[64];
+     struct snd_seq_event ev;
+
+     snprintf(line, sizeof line, "0.000000 CONTROLLER ch=%d cc=%d val=%d\n",
+              ch, num, val);
+     CHECK(mididump_parse(line, &ev) == 1, "could not build \"%s\"", line);
+     dispatch(&ev);
+}
+
+static void check_mastervol(void)
+{
+     int base = sent_n;
+     float held;
+
+     /* Start from a value the fixture cannot have set. The fixture's single
+      * MASTER LEVEL line is an MSB with no LSB, which is exactly the unit's
+      * behaviour at connect (measured: the knob's high half is announced, the
+      * low half only arrives when it moves), so the gain must still be at its
+      * initial 1.0 -- set explicitly so the assertion below is about the map and
+      * not about what ran before it. */
+     g_mirror_gain = 1.0f;
+
+     /* Half an update is not a position. The MSB alone says nothing about where
+      * the knob is, so neither it nor a later one may move the gain.
+      *
+      * Which also means an MSB arriving changes what the NEXT LSB completes: the
+      * high half is held, not buffered per pair. So a pair asserted here has to
+      * send its own MSB first -- MSB 127 followed by LSB 0 is 16256, not 0, and
+      * that is the map working. */
+     send_cc(6, 8, 0);
+     CHECK(g_mirror_gain == 1.0f,
+           "an MSB with no LSB moved the mirror gain to %.6f, expected 1.0 "
+           "(half a 14-bit pair is not a value)", (double)g_mirror_gain);
+     send_cc(6, 8, 127);
+     CHECK(g_mirror_gain == 1.0f,
+           "a second MSB with no LSB moved the mirror gain to %.6f, expected 1.0",
+           (double)g_mirror_gain);
+
+     /* Full down: 0 of 16383, and the bottom of the ramp is silence. */
+     send_cc(6, 8, 0);
+     send_cc(6, 40, 0);
+     CHECK(gain_is(g_mirror_gain, 0.0),
+           "full down (MSB 0, LSB 0) left the mirror gain at %.6f, expected 0",
+           (double)g_mirror_gain);
+
+     /* Up the ramp, MSB first: 16 << 7 = 2048 of 16383, which the law maps to
+      * 2048/16383/0.6 = 0.2083460. The MSB on its own must not move it, so the
+      * full-down 0 is still standing; that assertion is also what catches a map
+      * latching the high half without waiting for its low half. */
+     send_cc(6, 8, 16);
+     CHECK(gain_is(g_mirror_gain, 0.0),
+           "the MSB of a quarter-travel position moved the mirror gain to %.6f "
+           "before its LSB arrived", (double)g_mirror_gain);
+     send_cc(6, 40, 0);
+     CHECK(gain_is(g_mirror_gain, 0.20834604976703494),
+           "MSB 16 + LSB 0 left the mirror gain at %.6f, expected 0.208346 "
+           "(2048 of 16383)", (double)g_mirror_gain);
+
+     /* Where unity STARTS, which is the whole point of the knee and the one
+      * number a retune must move: 16383 x 0.6 = 9829.8, so 9829 (MSB 76, LSB
+      * 101) is one count short and 9830 (the same MSB, LSB 102 -- a ONE-COUNT
+      * move of the low half alone) is the first position to reach full level.
+      *
+      * This is the pair that pins the knee. A law that reached 1.0 early, or
+      * rounded the product up, passes every other case in this function. */
+     send_cc(6, 8, 76);
+     send_cc(6, 40, 101);
+     CHECK(gain_is(g_mirror_gain, 0.9999186148243099),
+           "one count below the knee (9829 of 16383) left the mirror gain at "
+           "%.9f, expected 0.999918615 -- unity starts at 9829.8, not "
+           "somewhere before it", (double)g_mirror_gain);
+     send_cc(6, 40, 102);
+     CHECK(g_mirror_gain == 1.0f,
+           "the first position at the knee (9830 of 16383, its LSB alone moving "
+           "one count up from 9829) left the mirror gain at %.9f, expected "
+           "exactly 1.0", (double)g_mirror_gain);
+
+     /* And the middle of the range is now BELOW full level -- 64 << 7 = 8192 of
+      * 16383 reads 0.8333842, about -1.6 dB. That is the change the operator
+      * asked for on 2026-09-27 (1 o'clock is the top of the useful travel, not
+      * 12), and asserting it as a value rather than as a description is what
+      * stops a later edit from quietly restoring the middle-as-unity law this
+      * function used to assert. */
+     send_cc(6, 8, 64);
+     send_cc(6, 40, 0);
+     CHECK(gain_is(g_mirror_gain, 0.8333841990681398),
+           "the middle of the range (MSB 64, LSB 0 = 8192 of 16383) left the "
+           "mirror gain at %.6f, expected 0.833384 -- the middle is deliberately "
+           "not unity any more; the knee is at 1 o'clock", (double)g_mirror_gain);
+
+     /* Above the knee it is flat, so the stop is worth no more than the knee:
+      * both are exactly 1.0, never "1.0 and a bit over". There is no boost
+      * anywhere in the law, because s24pack() WRAPS rather than clamps, so a gain
+      * past unity would fold the waveform -- the distortion S4.6 measured. That
+      * is flx4_mastervol_gain()'s reason, and this is where it is pinned. */
+     send_cc(6, 8, 95);
+     send_cc(6, 40, 127);
+     CHECK(g_mirror_gain == 1.0f,
+           "three-quarters of the range (MSB 95, LSB 127 = 12287 of 16383) left "
+           "the mirror gain at %.6f, expected 1.0 -- above the knee is flat",
+           (double)g_mirror_gain);
+     send_cc(6, 8, 127);
+     send_cc(6, 40, 127);
+     CHECK(g_mirror_gain == 1.0f,
+           "full up (MSB 127, LSB 127 = 16383 of 16383) left the mirror gain at "
+           "%.6f, expected 1.0 -- the same as the knee, so cranking the knob past "
+           "1 o'clock buys nothing", (double)g_mirror_gain);
+
+     /* And the shape the recording is actually full of: a LONE LSB, the low half
+      * repeated with no MSB behind it (58 such lines in the measured dump). It
+      * must combine with the high half already held -- 2048 | 64 = 2112, a move
+      * of 64 counts -- not be read as a position of its own. A map that took the
+      * LSB for the value would read 64/127 as the position and print 0.840 here;
+      * one that clamped it would pin 1.0. Either is a mute or a blast out of the
+      * HDMI while the room is playing.
+      *
+      * Deliberately done back down in the ramp. Above the knee the law
+      * saturates, where every value is 1.0 and this case would prove nothing. */
+     send_cc(6, 8, 16);
+     send_cc(6, 40, 0);
+     send_cc(6, 40, 64);
+     CHECK(gain_is(g_mirror_gain, 0.21485686382225477),
+           "a lone LSB (64) left the mirror gain at %.6f, expected 0.214857 "
+           "(2112 of 16383 -- the low half combined with the high half held, not "
+           "a position of its own, which would be 0.840)", (double)g_mirror_gain);
+
+     /* Nothing else moves it: the CCs on either side of the pair, and the same
+      * CC 40 on the Beat FX channel the recording also carries traffic on. */
+     held = g_mirror_gain;
+     send_cc(6, 9, 127);
+     send_cc(6, 39, 0);
+     send_cc(4, 40, 64);
+     CHECK(g_mirror_gain == held,
+           "a neighbour CC moved the mirror gain from %.6f to %.6f; only ch 6 "
+           "CC 8/40 is MASTER LEVEL", (double)held, (double)g_mirror_gain);
+
+     /* The two properties the mechanism exists for.
+      *   - no rbp keycode, so the unit's own output stage is the only thing the
+      *     knob attenuates;
+      *   - g_master_gain untouched, which is the difference between a mirror
+      *     that tracks the room and a master that is attenuated twice. */
+     CHECK(sent_n == base,
+           "MASTER LEVEL sent %d rbp keycodes; it must reach g_mirror_gain and "
+           "nothing else", sent_n - base);
+     CHECK(g_master_gain == 1.0f,
+           "MASTER LEVEL left g_master_gain at %.6f; driving rbp's master level "
+           "from this knob would attenuate the master twice",
+           (double)g_master_gain);
+}
+
 /* The jog's end-of-motion edge, which is the one thing this map does on the tick
  * rather than on an event. Real time has to pass for it, so this waits for it
  * instead of pretending the fixture's timestamps are seconds. */
@@ -915,6 +1127,7 @@ int main(void)
 
      check_stream();
      check_state();
+     check_mastervol();
      check_idle();
      check_leds();
 

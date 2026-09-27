@@ -18,6 +18,17 @@ const int shmstate_abi_version = SHMSTATE_ABI_VERSION;
  * headphones. */
 volatile float g_master_gain = 1.0f;
 
+/* The HDMI mirror's level, from the unit's own MASTER LEVEL knob (ch 6,
+ * CC 8 MSB + CC 40 LSB -- 14-bit, measured 2026-09-27).  Deliberately NOT
+ * g_master_gain: that knob sits *downstream* of the USB audio the FLX4 is fed,
+ * so driving rbp's master level from it would attenuate the master twice -- once
+ * in the samples the Pi sends, again in the unit's own analogue stage.  This one
+ * scales the advisory mirror alone, so the HDMI copy tracks the room while not a
+ * sample of the FLX4's stream changes.  1.0 until the knob is first moved: the
+ * unit reports no knob position on connect (measured), and no CC 8/40 appears at
+ * all in a run where the knob is untouched. */
+volatile float g_mirror_gain = 1.0f;
+
 /* headphone cue mix (0 = cue only, 1 = main only) / level (0..1). */
 volatile float g_cue_gain = 1.0f;
 volatile float g_cue_mix  = 1.0f;

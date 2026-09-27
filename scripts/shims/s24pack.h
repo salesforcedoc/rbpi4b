@@ -29,8 +29,45 @@
  * right, since an unset name parses to S24_LE and hands rbp's words through
  * unchanged.
  *
+ * AUDIO_FMT_SUBFRAME_LE is the fourth case and the odd one out: it is not a
+ * container rbp writes, it is not the FLX4's, and it is not one a plug chain will
+ * make either — the vc4 HDMI PCMs offer it and *nothing else* (measured, and it
+ * is in the driver: `drivers/gpu/drm/vc4/vc4_hdmi.c` gives its CPU DAI
+ * `.formats = SNDRV_PCM_FMTBIT_IEC958_SUBFRAME_LE` alone, so the card's mask is
+ * the intersection with hdmi-codec's list and collapses to that one name). It is
+ * a genuine IEC 60958 subframe rather than a 4-byte container, and the position
+ * of the sample is the whole of it:
+ *
+ *     bits 0-3   preamble
+ *         4-27   24-bit sample, LSB at bit 4
+ *         28     validity
+ *         29     user data
+ *         30     channel status
+ *         31     parity (even over bits 4..30)
+ *
+ * That is alsa-lib's layout, taken from the encoder every working setup on this
+ * hardware goes through (`src/pcm/pcm_iec958.c`): it is handed the sample
+ * left-justified and immediately does `data >>= 4; data &= ~0xf;`. The Pi
+ * hardware "does almost no repacking between the FIFO submission and the wire",
+ * so those bits are what the sink reads — which is why the *wrong* reading looks
+ * so specific. Putting the sample at bits 8..31 (the obvious reading of "24-bit
+ * sample left-justified in a 32-bit word", and what this file first shipped) puts
+ * it 4 bits high: the sink reads bits 4..27, finds the sample's low 20 bits
+ * promoted to the top, and plays a wrapped, aliased waveform at full level. On
+ * the unit that is loud and *very distorted* and nothing else — the picture, the
+ * FLX4 and every counter stay perfect, so it is an ears-only defect, and S4.6 is
+ * the row that found it. The parity bit is set so each word is a valid subframe;
+ * the preamble and V/U/C are left zero because the hardware signals Z/B itself
+ * (the driver sets its b-frame identifier to 8 to match ALSA's Z) and because an
+ * all-zero preamble demonstrably does not stop the sink locking — it was audible,
+ * just wrong, which is the measurement that says the preamble is not the bug.
+ * See raspberrypi/linux issues #4654 and #4193.
+ *
  * Pure: no ALSA, no allocation, no globals. That is what lets test_audio.c run
- * the real functions under qemu-arm with no card attached.
+ * the real functions under qemu-arm with no card attached — and it is also why
+ * the preamble is not synthesised here: a correct preamble needs a 192-subframe
+ * block counter, i.e. state, which would cost this file the property that makes
+ * it testable.
  */
 #ifndef RBLIVE4_S24PACK_H
 #define RBLIVE4_S24PACK_H
@@ -45,7 +82,8 @@
 enum {
     AUDIO_FMT_S24_LE = 0,   /* 4 bytes, value in the low 3 — rbp's own layout */
     AUDIO_FMT_S24_3LE,      /* 3 bytes, packed — the DDJ-FLX4's native format */
-    AUDIO_FMT_S16_LE        /* 2 bytes, low 8 bits dropped                    */
+    AUDIO_FMT_S16_LE,       /* 2 bytes, low 8 bits dropped                    */
+    AUDIO_FMT_SUBFRAME_LE   /* 4 bytes, value in the HIGH 3 — the vc4 HDMI DMA */
 };
 
 /* Bytes per sample, or 0 for an unknown format. */

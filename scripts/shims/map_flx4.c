@@ -206,9 +206,31 @@
 #define CC_CFX2       24   /* ditto, deck 2 */
 #define CC_HP_MIX     12
 #define CC_HP_LEVEL   13
+/* MASTER LEVEL, the unit's own output volume (list ch 7 -> CH_MIX). 14-bit like
+ * every other continuous control here: MSB CC 8, LSB CC 40 (= 8 + 32). MEASURED
+ * on the unit 2026-09-27, after the dump showed cc8 sweeping 40,41,39,37,32,28,
+ * 24,21,15,11,7,2,0 on ch 6 with a companion cc40 whose values looked random --
+ * which they are not: combining them as cc8*128+cc40 traces a smooth monotonic
+ * ramp down to 0 and back up (412 non-zero steps, 30 sign flips), so cc40 is the
+ * low 7 bits. Two things this is NOT, both worth stating because the raw dump
+ * suggests them: it is not the FX LEVEL/DEPTH knob (that is CC 2, and the dump
+ * shows it separately on ch 4), and cc40 is not idle chatter. Neither the map's
+ * table nor this comment previously carried the LSB.
+ *
+ * Deliberately NOT routed to rbp's master level or g_master_gain: the knob is
+ * downstream of the USB audio the FLX4 is fed, so driving either from it would
+ * attenuate the master twice. It feeds g_mirror_gain -- the HDMI mirror only --
+ * which is how the HDMI copy comes to track the room. See flx4_mastervol(). */
+#define CC_MASTER_MSB 8
+#define CC_MASTER_LSB 40
 #define CC_FX_DEPTH   2    /* Beat FX LEVEL/DEPTH */
 #define CC_BROWSE     64   /* relative, 0x01/0x7F -- NOT the jog's convention */
 #define CC_BROWSE_SHIFT 100
+
+/* Where the knob's travel reaches unity, as a fraction of the raw 14-bit range:
+ * 0.6, which is ONE O'CLOCK on this knob. Measured from the knob's own stops, not
+ * assumed -- see flx4_mastervol_gain(). */
+#define MIRROR_GAIN_MID_DEFAULT 0.6
 
 /* ---- the map's own calibration (read by value: empty means default) ------ */
 static int knob_scale = 1;      /* browse steps per detent */
@@ -621,6 +643,105 @@ static void flx4_pitch(int ch, int cc, int val)
                ch, s->sch, pos, (double)norm, v10);
 }
 
+/* ---- MASTER LEVEL --------------------------------------------------------
+ * The unit's own output volume, 14-bit on CH_MIX: CC 8 (MSB) + CC 40 (LSB).
+ * Shaped like flx4_pitch() above and for the same reason -- one physical change
+ * arrives as a pair of messages, so dispatching on the LSB is what makes the
+ * value complete rather than half-updated, and `have_hi` is what stops an LSB
+ * that has no MSB yet from producing a number out of nothing. */
+static int mastervol_have_hi = 0;
+static int mastervol_pos = 0;
+static double mastervol_mid = MIRROR_GAIN_MID_DEFAULT;
+
+/* Position -> mirror level. Unity is reached at ONE O'CLOCK, and the travel above
+ * it is flat.
+ *
+ * The travel IS the raw range, and that is a measurement rather than a
+ * convenience. The unit's own MIDI dump (RB_MIDI_DUMP) was read back on
+ * 2026-09-27 with a hand on the knob: the composed MSB/LSB positions span raw 0 to
+ * raw 16383, and both ends are among the most-visited positions (14 samples at
+ * 16383, 11 at 0), which is what a mechanical stop looks like -- the pot pins at
+ * the ends of its electrical range rather than stopping short of them. So
+ * `pos / 16383` is a fraction of ROTATION, and the earlier reading of that dump
+ * which put the bottom stop at raw 2228 was simply a sweep that never reached the
+ * bottom (the same document already said full-down had not been recorded).
+ *
+ * 12 o'clock is therefore raw 0.5 -- the electrical midpoint, and where the hand
+ * rests: the same dump's most-visited positions cluster on 0.479..0.532, centred
+ * on 0.50, which is the knob's parking spot. 1 o'clock is one hour past it, i.e.
+ * 30 degrees of a 270-300 degree sweep, or 0.60-0.61 of the rotation. 0.6 is the
+ * round number, and the difference between the two is 0.15 dB at 12 o'clock.
+ *
+ * Why not 0.5, the middle: that was the first fix and it worked -- see below --
+ * but the operator's follow-up the same day (2026-09-27) was that the top of the
+ * useful travel should be 1 o'clock rather than 12. So unity moved up with it,
+ * and 12 o'clock is no longer full level: it reads 0.833, about -1.6 dB. Nothing
+ * anywhere in the law can exceed 1.0, so this change only ever LOWERS what a given
+ * position gives -- it moves the knee, it does not add level. The one mercy of the
+ * travel being the whole range is that the bottom is unaffected by any of it: full
+ * down is still silence, as it was under every version of this law.
+ *
+ * Why not the obvious `pos / 16383`: that puts unity at the END of the travel,
+ * which is not where anyone leaves a volume knob. Measured 2026-09-27 -- the
+ * operator had to crank the knob to the stop to get a level they liked, and at
+ * the middle the HDMI was too quiet to use. Unity belongs at the working point,
+ * so the travel above it becomes headroom that this path cannot spend.
+ *
+ * It cannot spend it because gain > 1 would clip: the mirror's samples are
+ * packed by s24pack(), which does NOT clamp -- its own comment describes what a
+ * sample pushed past 24 bits sounds like, and it is the wrapped, aliased
+ * waveform S4.6 found. rbp's master does peak below full scale (measured, the
+ * loudest window of a run: 3229776 of 8388608, about -8 dBFS), so a boost is
+ * possible in principle; it needs a saturating clamp in s24pack() first, and
+ * that is not this change. Until then clamp01() in audioshim.c is a ceiling and
+ * not a limit to be raised.
+ *
+ * `mid` is a fraction so the working point can be dialled by ear without a
+ * rebuild (MIRROR_GAIN_MID). MID=1.0 reproduces the old law exactly, which makes
+ * the knob its own rollback. */
+static float flx4_mastervol_gain(int pos)
+{
+     double mid = mastervol_mid;
+     double g;
+
+     if (!(mid > 0.0) || mid > 1.0)
+          mid = MIRROR_GAIN_MID_DEFAULT;    /* 0 would divide, >1 would boost */
+
+     g = ((double)pos / 16383.0) / mid;
+     if (g > 1.0)
+          g = 1.0;
+     return (float)g;
+}
+
+static void flx4_mastervol(int cc, int val)
+{
+     if (cc == CC_MASTER_MSB) {
+          mastervol_have_hi = 1;
+          mastervol_pos = (mastervol_pos & 0x7f) | (val << 7);
+          return;
+     }
+     mastervol_pos = (mastervol_pos & 0x3f80) | (val & 0x7f);
+     if (!mastervol_have_hi)
+          return;                    /* no MSB yet: nothing to combine */
+     int pos = mastervol_pos;
+     if (pos < 0) pos = 0;
+     if (pos > 0x3FFF) pos = 0x3FFF;
+
+     /* g_mirror_gain and NOTHING ELSE. In particular no K_MASTERLVL: rbp's own
+      * master level is pinned at unity by flx4_startup(), and this knob sits
+      * downstream of the USB audio the Pi feeds the FLX4 -- so attenuating rbp's
+      * level from it would attenuate the master twice, once in the samples the
+      * Pi sends and again in the unit's analogue stage. flx4_build()'s note on
+      * MASTER LEVEL left this CC unrouted for exactly that reason; the HDMI
+      * mirror is the one place the value can go without that happening.
+      *
+      * The knob's electrical taper is neither published nor measured, so the
+      * position is tracked rather than converted to the room's dB; doing that
+      * would mean measuring the RCA output against knob position. What the
+      * position is mapped ONTO is flx4_mastervol_gain()'s business. */
+     g_mirror_gain = flx4_mastervol_gain(pos);
+}
+
 /* ---- the tables ---------------------------------------------------------- */
 
 static void flx4_build(void)
@@ -642,6 +763,12 @@ static void flx4_build(void)
      jog_rev = env_on("JOG_REV", 0);
      jog_idle_ms = env_num("JOG_IDLE_MS", 120);
      if (jog_idle_ms < 10) jog_idle_ms = 10;
+     /* Where the HDMI mirror reaches unity in the MASTER LEVEL knob's travel --
+     * env_dnum because it is a fraction, not a count (shimutil.h's reason for
+     * having two readers), and read here so an empty export from SHIM_VARS means
+     * the default. See flx4_mastervol_gain() for what the number does, and for
+     * why MID=1.0 is the rollback. */
+     mastervol_mid = env_dnum("MIRROR_GAIN_MID", MIRROR_GAIN_MID_DEFAULT);
      jog_verbose = env_on("JOG_VERBOSE", 0);
      tempo_verbose = env_on("TEMPO_VERBOSE", 0);
      tempo_rev = env_on("TEMPO_REV", 0);
@@ -760,12 +887,14 @@ static void flx4_build(void)
      add_note(CH_MIX, N_SMART_CFX, 0, CH_GLOBAL);
      add_note(CH_MIX, N_SMART_FADER, 0, CH_GLOBAL);
      add_note(CH_MIX, N_MONO_STEREO, 0, CH_GLOBAL);
-     /* And the two controls this map deliberately leaves alone rather than
-      * routes: MASTER LEVEL (CC 8) is the unit's own output volume, which sits
-      * after the USB audio it feeds -- driving rbp's master level or
-      * audioshim's g_master_gain from it would attenuate the master twice --
-      * and MIC LEVEL (CC 5) has no reader, because rbp's mic input is not part
-      * of this port. flx4_startup() pins rbp's master level at unity instead. */
+     /* And the control this map deliberately does not route to rbp: MASTER LEVEL
+      * (CC 8 + CC 40) is the unit's own output volume, which sits after the USB
+      * audio it feeds -- driving rbp's master level or audioshim's g_master_gain
+      * from it would attenuate the master twice -- so flx4_startup() pins rbp's
+      * master level at unity instead. Since 2026-09-27 the knob is not dropped:
+      * flx4_mastervol() feeds g_mirror_gain, which scales the HDMI mirror and
+      * nothing else. MIC LEVEL (CC 5) stays unrouted and has no reader, because
+      * rbp's mic input is not part of this port. */
 
      /* ---- Beat FX (list ch 5/6 -> rch 4/5) ---- */
      add_note(CH_FXA, N_FX_ONOFF, K_BFX, CH_GLOBAL);
@@ -855,6 +984,8 @@ static void flx4_event(const struct snd_seq_event *ev)
                flx4_jog(ch, val);
           else if (ch == CH_MIX && (cc == CC_BROWSE || cc == CC_BROWSE_SHIFT))
                flx4_browse(val);
+          else if (ch == CH_MIX && (cc == CC_MASTER_MSB || cc == CC_MASTER_LSB))
+               flx4_mastervol(cc, val);
           else
                flx4_cc_abs(ch, cc, val);
           break;

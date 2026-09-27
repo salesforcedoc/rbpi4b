@@ -183,11 +183,12 @@ DFB_PRESENT_AUTO DFB_PRESENT_FIT DFB_PRESENT_SKIP DFB_PRESENT_PX_BUDGET
 POINT_KIND POINT_DEV POINT_DEBUG POINT_MIN_DWELL_MS POINT_MOUSE_SPEED
 POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y POINT_CURSOR POINT_CURSOR_MS
 AUDIO_DEV AUDIO_CHANNELS AUDIO_MAP AUDIO_FMT AUDIO_MONITOR_PAIR
+AUDIO_MIRROR_DEV AUDIO_MIRROR_FMT AUDIO_MIRROR_REOPEN_MS
 STARTUP_MUTE_MS STARTUP_FADE_MS SCHED_RT
 MIDI_MAP EVDEV_MAP MIDI_IN_MATCH MIDI_OUT_MATCH MIDI_DUMP MIDI_REPLAY
 MIDI_REPLAY_SPEED KBD_DEV
 LED_VU LED_VU_SEGMENTS LED_PADS LED_DISABLE PAD_BRIGHT JOG_PPR
-JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV
+JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV MIRROR_GAIN_MID
 KNOB_VERBOSE JOG_VERBOSE TEMPO_VERBOSE LED_VERBOSE
 SHMSTATE_STRICT
 "
@@ -209,6 +210,13 @@ done
 echo "start-rb: LD_PRELOAD=$RB_LD_PRELOAD"
 echo "start-rb: DFB_PRESENT=${DFB_PRESENT:-<unset>} DFB_ROTATE=${DFB_ROTATE:-<off>}"
 echo "start-rb: AUDIO_DEV=$AUDIO_DEV MIDI_MAP=$MIDI_MAP POINT_KIND=$POINT_KIND"
+# The mirror is the second output device, and the device list is long enough that
+# putting it on the line above would make that line hard to read. `<off>` is the
+# honest reading of the empty value that disables it — it must not be mistakable
+# for a device name — and the fmt fallback shown is what s24pack_parse() makes of
+# an empty string, not the shim's in-source default. The shim logs the list it
+# actually resolved, one candidate per line, in /tmp/audioshim.log.
+echo "start-rb: AUDIO_MIRROR_DEV=${AUDIO_MIRROR_DEV:-<off>} fmt=${AUDIO_MIRROR_FMT:-<s24_le>}"
 
 # --- 7. start the EDB daemon inside the chroot ------------------------------
 #

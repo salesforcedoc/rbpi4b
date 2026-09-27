@@ -78,6 +78,7 @@
 #include "shmstate.h"
 #include "envutil.h"
 #include "s24pack.h"
+#include "mirror_policy.h"
 
 /* Enforce GLIBC_2.4 versioning for libdl on glibc 2.13 */
 __asm__(".symver dlsym, dlsym@GLIBC_2.4");
@@ -134,6 +135,12 @@ typedef void snd_pcm_info_t;
 #define SND_PCM_STREAM_CAPTURE  1
 #define SND_PCM_ACCESS_RW_INTERLEAVED 3
 
+/* 0x1, and NOT the 0x2 that open_real_device() clears for the master. The mirror
+ * (below) is the one caller that wants this bit to survive: a non-blocking write
+ * that cannot be delivered returns -EAGAIN instead of stalling rbp's audio thread
+ * on a screen someone has just unplugged. */
+#define SND_PCM_NONBLOCK        1
+
 /* ALSA's own snd_pcm_format_t values. Spelled out rather than included, because
  * this shim deliberately does not link against the target's ALSA headers — only
  * against libdl and libc — so that it can be built from the armel toolchain
@@ -153,6 +160,12 @@ typedef void snd_pcm_info_t;
 #define SND_PCM_FORMAT_S16_LE    2   /* width=16 physical=16 */
 #define SND_PCM_FORMAT_S24_LE    6   /* width=24 physical=32 — 4-byte container */
 #define SND_PCM_FORMAT_S24_3LE  32   /* width=24 physical=24 — 3 bytes packed */
+/* width=24 physical=32 — the sample in the HIGH three bytes of the word. The only
+ * format the vc4 HDMI devices offer, and not a convenience: measured 2026-09-27
+ * with tools/pcmprobe inside the chroot, `plughw:CARD=vc4hdmi0,DEV=0` advertises
+ * this one value and rejects S16_LE, S24_LE and S24_3LE with -EINVAL at
+ * set_format, so the plug layer converts nothing for it and `hw:` is the route. */
+#define SND_PCM_FORMAT_IEC958_SUBFRAME_LE 18
 
 /* ---- geometry ------------------------------------------------------------- */
 
@@ -189,6 +202,10 @@ static struct {
     struct pair headphones;
     struct pair booth;
     struct pair monitor;       /* AUDIO_MONITOR_PAIR */
+    char mirror_dev[DEV_MAX + 64]; /* AUDIO_MIRROR_DEV, the raw list ("" = off) */
+    int  mirror_fmt;           /* s24pack format, from AUDIO_MIRROR_FMT */
+    char mirror_fmt_name[24];  /* as written, for the log */
+    long mirror_reopen_ms;     /* AUDIO_MIRROR_REOPEN_MS: ceiling on the retry wait */
     long mute_frames;          /* STARTUP_MUTE_MS at 44100 */
     long fade_frames;          /* STARTUP_FADE_MS at 44100 */
     int  sched_rt;             /* SCHED_RT: 1 = keep rbp off RT (default) */
@@ -209,6 +226,113 @@ static const char *g_dev_candidates[4];
  * string; this is the fallback for when the variable is unset entirely. */
 #define AUDIO_DEV_DEFAULT "hw:CARD=DDJFLX4,DEV=0"
 
+/* ---- the HDMI mirror: defaults and tunables ------------------------------- */
+
+/* AUDIO_MIRROR_DEV's default, and the measurement that chose it.
+ *
+ * `hw:` and not `plughw:`, which is the opposite of what the first version of
+ * this assumed — and the way it was wrong is worth keeping, because the same
+ * measurement will be repeated by whoever reads this next.
+ *
+ * The vc4 HDMI PCMs offer exactly ONE format: IEC958_SUBFRAME_LE, 32-bit samples,
+ * 2 channels, 32000-48000 Hz. The question is whether anything will convert to it
+ * for us. A HOST aplay says yes, enthusiastically — the Pi OS libasound's plug
+ * layer advertises the full 32-format logical set for this device and
+ * `aplay -D plughw:CARD=vc4hdmi0,DEV=0 -f S24_3LE` plays happily. That is the
+ * wrong libasound. rbp and this shim run against the CHROOT's (XDJ-RX3 rootfs,
+ * glibc 2.13 era), and there the plug advertises THE SAME ONE FORMAT as the hw
+ * device and rejects everything else:
+ *
+ *   chroot /opt/rblive4/rbx3-run /tmp/pcmprobe plughw:CARD=vc4hdmi0,DEV=0 32 nonblock
+ *     mask:          IEC958_SUBFRAME_LE
+ *     set_format     FAILED  Invalid argument (-22)          # S24_3LE, and S16_LE
+ *                                                            # and S24_LE likewise
+ *   chroot /opt/rblive4/rbx3-run /tmp/pcmprobe plughw:CARD=vc4hdmi0,DEV=0 18 nonblock
+ *     set_format ok … hw_params ok … negotiated: rate=44100 channels=2 period=256
+ *     write ok
+ *
+ * So there is no conversion to lean on, on either device name, and the one that
+ * works is the one with no plugin under it at all. tools/pcmprobe's sequence mode
+ * is the instrument (see its header: a host aplay is not an oracle for the
+ * chroot's libasound, which is the whole reason it grew that mode).
+ *
+ * Both HDMI ports are listed because moving the monitor's cable is an ordinary
+ * thing to do. A disconnected port fails at open — `Unknown error 524`, measured
+ * on both forms — so a panel on the other port costs one failed open and no write.
+ * Note that neither the rate nor the format is negotiable here: a sink that wanted
+ * a rate outside 32000-48000 would need RB_AUDIO_MIRROR_FMT and a different
+ * device, which is why the knob exists. */
+#define AUDIO_MIRROR_DEV_DEFAULT \
+    "hw:CARD=vc4hdmi0,DEV=0 hw:CARD=vc4hdmi1,DEV=0"
+
+/* subframe_le, and it is the only value that can work on this device: see above.
+ * It is the master pair at full 24 bits, left-justified in the 32-bit word the
+ * vc4 DMA reads (s24pack.c documents the layout and why a byte-aligned reading of
+ * "IEC958 subframe" is the one to take). s16_le and s24_3le are still accepted by
+ * this knob — they are the right names for a device that converts for us — but on
+ * the vc4 HDMI PCMs they fail at set_format, loudly, which is how the log reads. */
+#define AUDIO_MIRROR_FMT_DEFAULT "subframe_le"
+
+/* The ceiling on the retry wait after the mirror goes down, in ms. 5000 matches
+ * the master's reopen ceiling and is deliberately the same kind of number: a
+ * screen coming back is not urgent, and the attempt happens on rbp's audio thread.
+ * RB_AUDIO_MIRROR_REOPEN_MS=0 means try once at startup and never again. */
+#define AUDIO_MIRROR_REOPEN_MS_DEFAULT 5000
+
+/* The mirror's own ring, in frames and periods. Bigger than the master's 64-frame
+ * block on purpose: the two ends run on independent clocks (the FLX4 and the HDMI
+ * sink), so what this sizes is how much drift the mirror can absorb before it has
+ * to correct. 256 x 4 is 1024 frames.
+ *
+ * The first version of this comment predicted the drift from crystal tolerance —
+ * ~50 ppm, 2.2 frames/s, a block dropped every ~460 s — and only in the draining
+ * direction. The unit measured something else, which is why mirror_pad() exists:
+ * this sink consumes **6.9 frames/s faster** than the FLX4 feeds it (~155 ppm, the
+ * vc4 HDMI clock being derived rather than a plain crystal), so the ring empties
+ * rather than fills, and a lead sized only by the prefill is gone in ~74 s. The
+ * half-full target that both correctors work around is the number the measurement
+ * chose: half the ring is the most room in either direction, and at 1024 frames it
+ * is 11.6 ms of latency on an output nobody syncs to anything. There is no
+ * resampler here and there is not meant to be: the master's clock is the one that
+ * must not move. */
+#define MIRROR_RATE      44100
+#define MIRROR_PERIOD    256
+#define MIRROR_PERIODS   4
+
+/* The silence written at each stream start, in frames: half the ring above.
+ *
+ * This is not padding and it is not optional. rbp hands the mirror 64 frames per
+ * master block, which at 44100 Hz is exactly real time — measured on the unit as
+ * ~700 blocks a second, i.e. one every 1.43 ms. A ring that is only ever given 64
+ * frames holds 64 frames: the DMA drains it in 1.43 ms and then has nothing, so
+ * the stream reaches XRUN before the next block arrives, every single time. That
+ * is what the first working deploy measured — status XRUN, avail pinned at the
+ * full buffer size, and `retries=3500` of 3501 blocks, i.e. a prepare (which
+ * discards the ring) before nearly every write. The counters read perfectly
+ * healthy throughout, because the retry path resets the stream and then accepts
+ * the block; what was wrong was invisible in them and visible only in the sink's
+ * own state.
+ *
+ * Half the ring is the lead that makes the two ends independent: the mirror then
+ * writes into a ring that is already playing, jitter in rbp's thread is absorbed
+ * instead of starving the DMA, and the two clocks drift against a half-full ring
+ * rather than against an empty one — which is what the drift comment above sizes
+ * it for. 512 frames is 11.6 ms of latency on an output nobody syncs to anything.
+ *
+ * It is silence in every format this shim packs: all four of them encode a zero
+ * sample as zero bytes. */
+#define MIRROR_PREFILL_FRAMES (MIRROR_PERIOD * MIRROR_PERIODS / 2)
+
+/* The ceiling on one block's padding, in frames. The measured drift needs about one
+ * frame per 0.2 s of audio, so anything approaching this number is not drift — it is
+ * a ring that was drained by something else (a stop in between, a level reading that
+ * arrived after a stall), and 64 frames bounds how much silence such an event can
+ * inject in one go. Sixteen blocks at most to work off a whole ring. */
+#define MIRROR_PAD_MAX 64
+
+/* The retry floor, matching the master's REOPEN_MIN_MS. */
+#define MIRROR_REOPEN_MIN_MS 500
+
 /* ---- virtual handles ------------------------------------------------------ */
 
 /* rbp holds these as opaque snd_pcm_t*, so they only have to be distinct and
@@ -223,6 +347,11 @@ static int g_h_cap    = 5;
 
 static snd_pcm_t *g_real_playback = NULL;
 static int g_playback_open_count  = 0;
+
+/* Set while this shim is inside a real snd_pcm_open() of its own, so that a
+ * re-entrant public snd_pcm_open() from libasound's plugin chain is forwarded
+ * instead of being handed one of the fake handles. See snd_pcm_open() below. */
+static int g_in_real_open = 0;
 
 /* Real ALSA function pointers */
 static int (*real_snd_pcm_open)(snd_pcm_t **, const char *, int, int) = NULL;
@@ -246,6 +375,8 @@ static int (*real_snd_pcm_sw_params_set_stop_threshold)(snd_pcm_t *, snd_pcm_sw_
 static int (*real_snd_pcm_sw_params)(snd_pcm_t *, snd_pcm_sw_params_t *) = NULL;
 static int (*real_snd_pcm_prepare)(snd_pcm_t *) = NULL;
 static snd_pcm_sframes_t (*real_snd_pcm_writei)(snd_pcm_t *, const void *, snd_pcm_uframes_t) = NULL;
+/* The mirror's level sensor, and the mirror's only use of it: see mirror_pad(). */
+static snd_pcm_sframes_t (*real_snd_pcm_avail_update)(snd_pcm_t *) = NULL;
 static int (*real_snd_ctl_open)(snd_ctl_t **, const char *, int) = NULL;
 static int (*real_snd_ctl_close)(snd_ctl_t *) = NULL;
 static const char *(*real_snd_pcm_format_name)(int) = NULL;
@@ -274,6 +405,7 @@ static void check_format_constants(void)
         { SND_PCM_FORMAT_S16_LE,  "S16_LE"  },
         { SND_PCM_FORMAT_S24_LE,  "S24_LE"  },
         { SND_PCM_FORMAT_S24_3LE, "S24_3LE" },
+        { SND_PCM_FORMAT_IEC958_SUBFRAME_LE, "IEC958_SUBFRAME_LE" },
     };
     size_t i;
     int bad = 0;
@@ -294,8 +426,10 @@ static void check_format_constants(void)
         }
     }
     if (!bad)
-        alog("audioshim: format constants verified: S16_LE=%d S24_LE=%d S24_3LE=%d\n",
-             SND_PCM_FORMAT_S16_LE, SND_PCM_FORMAT_S24_LE, SND_PCM_FORMAT_S24_3LE);
+        alog("audioshim: format constants verified: S16_LE=%d S24_LE=%d S24_3LE=%d "
+             "IEC958_SUBFRAME_LE=%d\n",
+             SND_PCM_FORMAT_S16_LE, SND_PCM_FORMAT_S24_LE, SND_PCM_FORMAT_S24_3LE,
+             SND_PCM_FORMAT_IEC958_SUBFRAME_LE);
 }
 
 static void init_real_alsa(void)
@@ -337,6 +471,7 @@ static void init_real_alsa(void)
     real_snd_pcm_sw_params = dlsym(lib, "snd_pcm_sw_params");
     real_snd_pcm_prepare = dlsym(lib, "snd_pcm_prepare");
     real_snd_pcm_writei = dlsym(lib, "snd_pcm_writei");
+    real_snd_pcm_avail_update = dlsym(lib, "snd_pcm_avail_update");
     real_snd_ctl_open = dlsym(lib, "snd_ctl_open");
     real_snd_ctl_close = dlsym(lib, "snd_ctl_close");
     real_snd_pcm_format_name = dlsym(lib, "snd_pcm_format_name");
@@ -378,6 +513,54 @@ struct stage {
     unsigned warn_size;     /* last mismatching size already logged */
 };
 static struct stage g_phone_stage, g_booth_stage;
+
+/* ---- the HDMI mirror's runtime state -------------------------------------- */
+
+/* The advisory second output: the master pair, post Main Vol and post startup
+ * mute, written to whatever HDMI sink is attached. It is advisory in the strict
+ * sense — every failure below costs a log line and some frames on HDMI, and none of
+ * them may touch g_real_playback, rbp's return value, or the master's cadence.
+ *
+ * It is written from the audio thread, non-blocking, and recovers from there too;
+ * there is no second thread and no dependency beyond libc (the shim links only
+ * libc/libdl — do not add -lpthread for this). */
+static char g_mirror_cands[MIRROR_CAND_MAX][MIRROR_NAME_MAX];
+static int g_mirror_ncands;            /* 0 = the mirror is off */
+static int g_mirror_dropped_cands;     /* entries the list could not hold */
+static snd_pcm_t *g_mirror;            /* the open handle, NULL = not up */
+static char g_mirror_dev[MIRROR_NAME_MAX];  /* what opened, for the log */
+static unsigned long g_mirror_blocks;  /* writei() calls made */
+static unsigned long g_mirror_frames;  /* frames actually delivered */
+static unsigned long g_mirror_drops;   /* blocks dropped (ring full) */
+static unsigned long g_mirror_shorts;  /* blocks only partly accepted */
+static unsigned long g_mirror_retries; /* streams prepared once and retried */
+static unsigned long g_mirror_losses;  /* handles closed after a hard error */
+static unsigned long long g_mirror_absent_ms;  /* 0 = never lost */
+static unsigned long g_mirror_backoff_ms = MIRROR_REOPEN_MIN_MS;
+static int g_mirror_open_fails;        /* walks that opened nothing; quiets at 3 */
+static int g_mirror_tried;             /* the startup attempt has been made */
+static int g_mirror_written_once;      /* "UP" has been earned and logged */
+static int g_mirror_pack_failed;       /* the pack refusal has been logged */
+static unsigned long g_mirror_prefill; /* frames of silence at each stream start */
+static unsigned long g_mirror_buffer;  /* the ring the sink granted, in frames */
+static unsigned long g_mirror_pads;    /* blocks whose write carried padding */
+static unsigned long g_mirror_pad_frames_sum;  /* frames of padding written */
+
+/* The mirror's staging buffers, stereo and only stereo: channel 0 is the master's
+ * left, channel 1 its right (flush_master() fills them below). Two buffers, like
+ * the master's, because AUDIO_MIRROR_FMT may ask for a packed form. The packed one
+ * is int32_t sized, i.e. four bytes per sample per channel, which is the widest
+ * container s24pack() has (s24pack_worst()); a format wider than that could not
+ * overflow it anyway, because s24pack() answers 0 rather than truncating. */
+static int32_t g_mirror_out[MAX_FRAMES * 2];
+static int32_t g_mirror_packed[MAX_FRAMES * 2];
+
+/* The prefill, in the mirror's packed format: all zeroes, which is a zero sample
+ * in all four of them (see MIRROR_PREFILL_FRAMES). Static and byte-typed because
+ * what the device is handed is bytes, and it is sized for the worst case — four
+ * bytes per sample per channel — so a larger negotiated geometry can only ever be
+ * clamped, never written past. */
+static unsigned char g_mirror_silence[MIRROR_PREFILL_FRAMES * 2 * sizeof(int32_t)];
 
 static unsigned int g_out_channels;   /* negotiated; 0 until set_channels() */
 static int g_pairs_resolved;
@@ -617,6 +800,56 @@ static void load_config(void)
 
     parse_map(env_str("AUDIO_MAP", ""));
     parse_pair("AUDIO_MONITOR_PAIR", env_str("AUDIO_MONITOR_PAIR", ""), &g_cfg.monitor);
+
+    /* The HDMI mirror. An EMPTY AUDIO_MIRROR_DEV turns it off, and empty is what
+     * start-rb.sh exports for a knob rb.conf does not set — so the in-source
+     * default below reaches only a shim run by hand with no environment at all,
+     * exactly as AUDIO_DEV's does. rb.conf ships the list, and rb.local.conf
+     * overrides it per unit. */
+    s = env_str("AUDIO_MIRROR_DEV", AUDIO_MIRROR_DEV_DEFAULT);
+    if (strlen(s) >= sizeof g_cfg.mirror_dev) {
+        alog("audioshim: AUDIO_MIRROR_DEV is longer than %u bytes; using the "
+             "default %s\n", (unsigned)sizeof g_cfg.mirror_dev - 1,
+             AUDIO_MIRROR_DEV_DEFAULT);
+        s = AUDIO_MIRROR_DEV_DEFAULT;
+    }
+    strcpy(g_cfg.mirror_dev, s);
+    g_mirror_ncands = mirror_candidates(g_cfg.mirror_dev, g_mirror_cands,
+                                        MIRROR_CAND_MAX, &g_mirror_dropped_cands);
+
+    s = env_str("AUDIO_MIRROR_FMT", AUDIO_MIRROR_FMT_DEFAULT);
+    g_cfg.mirror_fmt = s24pack_parse(s);
+    if (g_cfg.mirror_fmt < 0) {
+        alog("audioshim: AUDIO_MIRROR_FMT='%s' is not a format this shim can pack "
+             "(s24_le, s24_3le, s16_le, subframe_le); using %s\n",
+             s, AUDIO_MIRROR_FMT_DEFAULT);
+        g_cfg.mirror_fmt = s24pack_parse(AUDIO_MIRROR_FMT_DEFAULT);
+    }
+    snprintf(g_cfg.mirror_fmt_name, sizeof g_cfg.mirror_fmt_name, "%s",
+             g_cfg.mirror_fmt == AUDIO_FMT_S24_3LE     ? "s24_3le"     :
+             g_cfg.mirror_fmt == AUDIO_FMT_S16_LE      ? "s16_le"      :
+             g_cfg.mirror_fmt == AUDIO_FMT_SUBFRAME_LE ? "subframe_le" : "s24_le");
+
+    g_cfg.mirror_reopen_ms = env_int("AUDIO_MIRROR_REOPEN_MS",
+                                     AUDIO_MIRROR_REOPEN_MS_DEFAULT);
+    if (g_cfg.mirror_reopen_ms < 0)
+        g_cfg.mirror_reopen_ms = 0;
+
+    /* One line per candidate, at startup only, so the log says what was asked for
+     * even when nothing ever opens. alog() truncates at 512 bytes, which a list
+     * could reach, and a silently shortened device list is the kind of thing this
+     * port keeps having to chase. */
+    if (g_mirror_ncands > 0) {
+        int i;
+        alog("audioshim: mirror dev=\"%s\" fmt=%s reopen=%ldms candidates=%d "
+             "dropped=%d\n", g_cfg.mirror_dev, g_cfg.mirror_fmt_name,
+             g_cfg.mirror_reopen_ms, g_mirror_ncands, g_mirror_dropped_cands);
+        for (i = 0; i < g_mirror_ncands; i++)
+            alog("audioshim: mirror candidate %d/%d: %s\n",
+                 i + 1, g_mirror_ncands, g_mirror_cands[i]);
+    } else {
+        alog("audioshim: mirror off (AUDIO_MIRROR_DEV empty)\n");
+    }
 
     /* The in-source default is 0, but rb.conf ships 1500/300: the FLX4 DOES thump
      * when the card is opened (the operator heard it), so the "USB audio has no
@@ -915,14 +1148,27 @@ static void reset_stream_state(void)
  * operator is waiting for. */
 static void open_real_device(int mode, int quiet)
 {
-    /* rbp asks for nonblocking and then relies on the device to pace it. Masking
-     * SND_PCM_NONBLOCK is what makes the card the audio clock. */
+    /* rbp asks for nonblocking and then relies on the device to pace it, and for
+     * the master's real stream that really is the behaviour wanted: the card is
+     * the audio clock, so every write blocks until the card has room.
+     *
+     * The masked bit is NOT SND_PCM_NONBLOCK, which this comment claimed for a
+     * long time. The hand-rolled constants above put SND_PCM_NONBLOCK at 0x1 and
+     * SND_PCM_ASYNC at 0x2, and 0x2 is what is cleared here. That is harmless for
+     * this call — async notification is off unless rbp asks for it and installs a
+     * callback — but it means a caller that does want a non-blocking handle must
+     * ask for it explicitly and must not expect this function to leave the bit
+     * alone. The HDMI mirror is such a caller: it passes SND_PCM_NONBLOCK and
+     * opens the device itself (mirror_open_one()), precisely because this
+     * function's contract is "the master, paced by the card". */
     int real_mode = mode & ~2;
     int i, err = -1;
 
     for (i = 0; g_dev_candidates[i] != NULL; i++) {
+        g_in_real_open = 1;
         err = real_snd_pcm_open(&g_real_playback, g_dev_candidates[i],
                                 SND_PCM_STREAM_PLAYBACK, real_mode);
+        g_in_real_open = 0;
         if (err >= 0) {
             alog("audioshim: open('%s') mode=%d->%d res=%d handle=%p\n",
                  g_dev_candidates[i], mode, real_mode, err, g_real_playback);
@@ -944,11 +1190,464 @@ static void open_real_device(int mode, int quiet)
         g_master_absent_ms = now_ms();
 }
 
+/* ---- the HDMI mirror -------------------------------------------------------
+ *
+ * A second, ADVISORY output: the same master samples the card is being fed, sent
+ * to whatever HDMI sink is attached, so the person looking at the screen hears
+ * what the room hears. The operator asked for both at once, and "both" is the
+ * constraint that shapes everything here.
+ *
+ * Advisory is meant in the strict sense. Every rule below exists to keep this
+ * device from reaching the master's path:
+ *
+ *   - Opened SND_PCM_NONBLOCK and written non-blocking, so a sink that has been
+ *     unplugged mid-set costs one -EAGAIN and a counter, never a stall on rbp's
+ *     audio thread. A monitor is hot-swapped on this unit with the player running.
+ *   - An ALSA `multi` PCM would have been the config-only answer, and it is
+ *     all-or-nothing: if the HDMI slave will not open, the FLX4 goes silent too.
+ *     That is why this is a shim change rather than an asound.conf one.
+ *   - Opened on this shim's own initiative from rbp's first snd_pcm_open() and
+ *     from the write path, never from a second thread: the shim links only
+ *     libc/libdl by design, and -lpthread is not to be added for this.
+ *   - Considered UP only once a write has actually delivered frames. An open that
+ *     succeeds against a port with nothing on it must not read as working.
+ *   - Recovered by a frame-counted backoff, and its recovery deliberately does NOT
+ *     re-arm the startup mute the way reopen_try() does for the master: that mute
+ *     exists because the FLX4 thumps when its card is opened, and copying it here
+ *     would silence the FLX4 for 1.8 s every time the HDMI side hiccuped.
+ *
+ * The master's own write, its prepare-and-retry, its master_lost(-ENODEV) path and
+ * its size accounting are untouched by all of it. flush_master() calls in here
+ * after its device branch has finished, and nothing here returns anything to it.
+ */
+
+/* s24pack's format as ALSA's own number: the hand-rolled constants at the top of
+ * this file, which check_format_constants() has already asked libasound to name. */
+static int mirror_alsa_format(int fmt)
+{
+    if (fmt == AUDIO_FMT_S24_3LE)     return SND_PCM_FORMAT_S24_3LE;
+    if (fmt == AUDIO_FMT_S16_LE)      return SND_PCM_FORMAT_S16_LE;
+    if (fmt == AUDIO_FMT_SUBFRAME_LE) return SND_PCM_FORMAT_IEC958_SUBFRAME_LE;
+    return SND_PCM_FORMAT_S24_LE;
+}
+
+/* Write up to MIRROR_PREFILL_FRAMES of silence, non-blocking and best-effort. The
+ * return is deliberately dropped: a ring with room takes it, a ring without answers
+ * -EAGAIN, and neither is anything the master's audio thread should act on. */
+static void mirror_write_silence(snd_pcm_t *h, unsigned long frames)
+{
+    if (h == NULL || frames == 0 || real_snd_pcm_writei == NULL)
+        return;
+    if (frames > (unsigned long)MIRROR_PREFILL_FRAMES)
+        frames = MIRROR_PREFILL_FRAMES;
+    real_snd_pcm_writei(h, g_mirror_silence, (snd_pcm_uframes_t)frames);
+}
+
+/* Give the mirror a lead before it is asked to keep up: half the ring of silence,
+ * once per stream start — at open, and again whenever a broken stream has been
+ * prepared. MIRROR_PREFILL_FRAMES carries the measurement that makes this necessary
+ * rather than tidy.
+ *
+ * The frames are deliberately NOT counted and NOT logged per call: they are not the
+ * master's output, so they must not reach g_mirror_frames (which the UP line and the
+ * drift arithmetic both mean as delivered audio), and the RETRY path this runs on
+ * was taken once per block on this unit — a line here would have been the flood the
+ * restamp below already cost. What goes on the record is the number itself, on the
+ * OPEN line. */
+static void mirror_prefill(snd_pcm_t *h)
+{
+    mirror_write_silence(h, g_mirror_prefill);
+}
+
+/* Hold the ring near half full while the mirror is up, by writing a few frames of
+ * silence before the master's block when the level has fallen.
+ *
+ * This is the drop's twin, and the measurement is why it exists: the vc4 HDMI sink
+ * consumes ~6.9 frames a second faster than the FLX4 feeds the mirror — ~155 ppm,
+ * two crystals with no resampler between them — so a lead sized by the prefill alone
+ * drains away and the stream reaches XRUN in about 74 s. The recovery from that is a
+ * prepare plus a re-prefill, i.e. an 11.6 ms gap in the monitor's audio every minute
+ * and a quarter, which is exactly the kind of "works, mostly" this port does not
+ * ship when the alternative is a few frames of silence per second.
+ *
+ * The correction is bounded by MIRROR_PAD_MAX and takes several blocks to work off,
+ * so it cannot arrive as a burst; at the measured drift it is about one frame every
+ * 0.2 s, which is 23 us of silence — a number this code does not get to choose,
+ * because it follows from the two clocks.
+ *
+ * A device that will not report a level (no symbol, or -EPIPE on a stream that is
+ * about to be retried anyway) simply gets no padding: the prefill and the RETRY
+ * recovery still carry it, exactly as they did before this existed. */
+static void mirror_pad(void)
+{
+    long avail;
+    unsigned long pad;
+
+    if (g_mirror == NULL || g_mirror_buffer == 0 || real_snd_pcm_avail_update == NULL)
+        return;
+    avail = (long)real_snd_pcm_avail_update(g_mirror);
+    pad = mirror_pad_frames(avail, g_mirror_buffer, g_mirror_buffer / 2,
+                            MIRROR_PAD_MAX);
+    if (pad == 0)
+        return;
+    mirror_write_silence(g_mirror, pad);
+    g_mirror_pads++;
+    g_mirror_pad_frames_sum += pad;
+}
+
+/* Open and configure one candidate, leaving it in g_mirror. Returns 0, or a
+ * negative errno having freed and closed everything it opened.
+ *
+ * Every call here is the REAL function rather than the interposed one, because
+ * this is the shim configuring a device of its own: the entry points above answer
+ * for the handles rbp holds, and the mirror's handle is not one of them. What lies
+ * BELOW these calls does re-enter them — libasound's plug layer configures and
+ * drives the hw slave through the public snd_pcm_* symbols — which is why the
+ * re-entrancy guard in snd_pcm_open(), the is_forwardable() branches in the
+ * parameter plumbing, and the is_rbp_master() scoping of the format override are
+ * all load-bearing for this device and were not for a hw: one. */
+static int mirror_open_one(const char *dev)
+{
+    snd_pcm_hw_params_t *hw = NULL;
+    snd_pcm_sw_params_t *sw = NULL;
+    snd_pcm_t *h = NULL;
+    unsigned int rate = MIRROR_RATE;
+    unsigned int periods = MIRROR_PERIODS;
+    snd_pcm_uframes_t period = MIRROR_PERIOD;
+    int err;
+    /* Which step is running, for the failure line at the bottom. This sequence has
+     * libasound's plug layer underneath it, so a negative result says nothing about
+     * which call produced it — a candidate that opens and then rejects a parameter
+     * returns exactly what a candidate that never opened returns, and the first
+     * version of this function logged only that number, which left -EINVAL
+     * unattributable between fifteen calls. The measurement it cost: a candidate
+     * that aplay configures without complaint (aplay -D plughw:CARD=vc4hdmi0,DEV=0
+     * -t raw -f S24_3LE -c 2 -r 44100 -d 1 /dev/zero, rc=0) and this function
+     * reported as res=-22. */
+    const char *step = "open";
+
+    if (!real_snd_pcm_open || !real_snd_pcm_close ||
+        !real_snd_pcm_hw_params_malloc || !real_snd_pcm_hw_params_free ||
+        !real_snd_pcm_hw_params_any || !real_snd_pcm_hw_params_set_access ||
+        !real_snd_pcm_hw_params_set_format || !real_snd_pcm_hw_params_set_channels ||
+        !real_snd_pcm_hw_params_set_rate_near ||
+        !real_snd_pcm_hw_params_set_period_size_near ||
+        !real_snd_pcm_hw_params_set_periods_near || !real_snd_pcm_hw_params ||
+        !real_snd_pcm_sw_params_malloc || !real_snd_pcm_sw_params_free ||
+        !real_snd_pcm_sw_params_current ||
+        !real_snd_pcm_sw_params_set_start_threshold || !real_snd_pcm_sw_params ||
+        !real_snd_pcm_prepare)
+        return -ENOSYS;
+
+    /* The guard is what keeps a plughw: candidate's slave open from consuming a
+     * slot in g_playback_open_count and being handed a fake handle. */
+    g_in_real_open = 1;
+    err = real_snd_pcm_open(&h, dev, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+    g_in_real_open = 0;
+    if (err < 0)
+        goto fail;                       /* `step` is still "open" */
+
+    step = "hw_params_malloc";
+    if ((err = real_snd_pcm_hw_params_malloc(&hw)) < 0) goto fail;
+    step = "hw_params_any";
+    if ((err = real_snd_pcm_hw_params_any(h, hw)) < 0) goto fail;
+    step = "set_access";
+    if ((err = real_snd_pcm_hw_params_set_access(h, hw, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) goto fail;
+    step = "set_format";
+    if ((err = real_snd_pcm_hw_params_set_format(h, hw, mirror_alsa_format(g_cfg.mirror_fmt))) < 0) goto fail;
+    step = "set_channels";
+    if ((err = real_snd_pcm_hw_params_set_channels(h, hw, 2)) < 0) goto fail;
+    /* _near for the rate and the geometry, like rbp does for the master: the sink
+     * is entitled to answer with something else, and what it answered with is what
+     * the log line reports. */
+    step = "set_rate_near";
+    if ((err = real_snd_pcm_hw_params_set_rate_near(h, hw, &rate, NULL)) < 0) goto fail;
+    step = "set_period_size_near";
+    if ((err = real_snd_pcm_hw_params_set_period_size_near(h, hw, &period, NULL)) < 0) goto fail;
+    step = "set_periods_near";
+    if ((err = real_snd_pcm_hw_params_set_periods_near(h, hw, &periods, NULL)) < 0) goto fail;
+    step = "hw_params";
+    if ((err = real_snd_pcm_hw_params(h, hw)) < 0) goto fail;
+
+    step = "sw_params_malloc";
+    if ((err = real_snd_pcm_sw_params_malloc(&sw)) < 0) goto fail;
+    step = "sw_params_current";
+    if ((err = real_snd_pcm_sw_params_current(h, sw)) < 0) goto fail;
+    /* start_threshold 1, and the mirror does not work without it. hw_params leaves
+     * a playback stream's threshold at the buffer size, so a writer that never
+     * fills the ring never starts the stream: every write succeeds into a buffer
+     * that is never drained, the counters advance, and the sink is silent. It is
+     * the one setting here whose absence would look exactly like success. */
+    step = "set_start_threshold";
+    if ((err = real_snd_pcm_sw_params_set_start_threshold(h, sw, 1)) < 0) goto fail;
+    step = "sw_params";
+    if ((err = real_snd_pcm_sw_params(h, sw)) < 0) goto fail;
+    step = "prepare";
+    if ((err = real_snd_pcm_prepare(h)) < 0) goto fail;
+
+    if (hw) real_snd_pcm_hw_params_free(hw);
+    if (sw) real_snd_pcm_sw_params_free(sw);
+
+    g_mirror = h;
+    /* Half the ring the sink actually granted, not half of what was asked for: the
+     * two differ whenever the device rounds a _near request, and this is the lead
+     * that has to fit in the buffer that exists. Clamped to the silence buffer,
+     * which is sized for the requested geometry. A device that granted no geometry
+     * at all (both zero) leaves the prefill at 0, i.e. the old behaviour, which the
+     * OPEN line then shows as prefill=0 rather than leaving it to be inferred. */
+    g_mirror_prefill = (unsigned long)period * (unsigned long)periods / 2;
+    if (g_mirror_prefill > (unsigned long)MIRROR_PREFILL_FRAMES)
+        g_mirror_prefill = MIRROR_PREFILL_FRAMES;
+    /* The ring the sink granted, kept for mirror_pad()'s level arithmetic — it is the
+     * same product the prefill is half of, and it is recorded rather than re-derived
+     * because a device that grants no geometry must not have one invented for it. */
+    g_mirror_buffer = (unsigned long)period * (unsigned long)periods;
+    /* The precision is what bounds this: a candidate comes from g_mirror_cands,
+     * which is this size, but -Wformat-truncation cannot see that and is right not
+     * to guess. */
+    snprintf(g_mirror_dev, sizeof g_mirror_dev, "%.*s",
+             (int)sizeof g_mirror_dev - 1, dev);
+    alog("audioshim: mirror OPEN %s fmt=%s rate=%u period=%lu periods=%u "
+         "buffer=%lu prefill=%lu handle=%p\n",
+         dev, g_cfg.mirror_fmt_name, rate, (unsigned long)period, periods,
+         g_mirror_buffer, g_mirror_prefill, h);
+
+    /* And the lead itself, which is what makes the ring a ring rather than a
+     * one-block staging area: see MIRROR_PREFILL_FRAMES. The stream starts here
+     * (start_threshold 1), so nothing after this write is a first write. */
+    mirror_prefill(h);
+
+    /* Not "UP": that word is earned by a write, below. */
+    return 0;
+
+fail:
+    if (hw) real_snd_pcm_hw_params_free(hw);
+    if (sw) real_snd_pcm_sw_params_free(sw);
+    /* NULL when the open itself is what failed; libasound's close tolerates that,
+     * but the interposed one is what runs here and guarding is free. */
+    if (h) real_snd_pcm_close(h);
+    /* The step names the call; the number alone does not. */
+    alog("audioshim: mirror open('%s') FAILED at %s res=%d (%s)\n",
+         dev, step, err, strerror(err < 0 ? -err : err));
+    return err;
+}
+
+/* Walk the candidate list, taking the first device that opens. A failure to open
+ * ANY of them leaves the mirror down and arms the backoff; it is never an error
+ * rbp hears about. */
+static void mirror_open(void)
+{
+    int i, err = -ENODEV;
+    int quiet;
+
+    if (g_mirror != NULL || g_mirror_ncands == 0)
+        return;
+
+    /* Three failed walks are logged in full; after that the per-candidate lines
+     * stop. A unit with no monitor on it is a supported configuration, and a line
+     * every few seconds forever is how a log stops being read — the same rule (and
+     * the same number) the master's reopen_try() follows. */
+    quiet = g_mirror_open_fails >= 3;
+
+    for (i = 0; i < g_mirror_ncands; i++) {
+        err = mirror_open_one(g_mirror_cands[i]);
+        if (err == 0) {
+            g_mirror_absent_ms = 0;      /* it is not down any more */
+            g_mirror_backoff_ms = MIRROR_REOPEN_MIN_MS;
+            g_mirror_open_fails = 0;
+            g_mirror_written_once = 0;
+            return;
+        }
+        /* No per-candidate line here: mirror_open_one() has already logged which
+         * step failed, and that line carries the device name. */
+    }
+
+    /* Restamped on every failed walk, not only the first, and this one line is the
+     * difference between a backoff and a permanent green light. reopen_try() above
+     * does the same for the master. A stamp that is set once leaves
+     * `now - stamp >= backoff` true forever after the first interval, so the wait
+     * stops bounding anything and the reopen runs on every audio block: measured on
+     * this unit as ~2000 opens and closes a second and 121k log lines in 28 s, with
+     * a 500 ms floor and a 5 s ceiling configured. */
+    g_mirror_absent_ms = now_ms();
+    g_mirror_open_fails++;
+    g_mirror_backoff_ms = mirror_next_backoff(g_mirror_backoff_ms,
+                                              (unsigned long)g_cfg.mirror_reopen_ms);
+    if (!quiet)
+        alog("audioshim: mirror NONE — none of the %d candidate(s) opened; next "
+             "attempt in %lums (or never, if AUDIO_MIRROR_REOPEN_MS is 0)\n",
+             g_mirror_ncands, g_mirror_backoff_ms);
+}
+
+/* Close the handle after a hard error. The master keeps serving; this device does
+ * not. */
+static void mirror_lost(long err)
+{
+    snd_pcm_t *dead = g_mirror;
+
+    if (dead == NULL)
+        return;
+    g_mirror = NULL;
+    g_mirror_dev[0] = '\0';
+
+    /* Deliberately NOT retire()d, and this is the one place a future reader is
+     * likely to "fix" something that is not broken: is_master() counts a retired
+     * handle as the master stream, so retiring this one would have rbp's next
+     * write folded into flush_master() a second time as if it were the card's.
+     * Nothing but this shim ever holds this pointer, so there is nothing to
+     * protect it from. */
+    if (real_snd_pcm_close)
+        real_snd_pcm_close(dead);
+
+    g_mirror_losses++;
+    g_mirror_absent_ms = now_ms();
+    g_mirror_backoff_ms = MIRROR_REOPEN_MIN_MS;
+    alog("audioshim: mirror LOST err=%ld (%s) after %lu frames in %lu blocks; "
+         "the master is unaffected\n",
+         err, strerror(err < 0 ? (int)-err : (int)err),
+         g_mirror_frames, g_mirror_blocks);
+}
+
+/* Send one block of the master pair to the mirror. Called for every master block,
+ * so everything in here is on rbp's audio thread and nothing in here may block. */
+static void mirror_write(const int32_t *stereo, unsigned frames)
+{
+    unsigned bytes;
+    long written;
+    enum mirror_verdict v;
+
+    if (g_mirror == NULL || frames == 0 || real_snd_pcm_writei == NULL)
+        return;
+
+    bytes = s24pack(g_cfg.mirror_fmt, stereo, frames, 2, g_mirror_packed,
+                    sizeof g_mirror_packed);
+    if (bytes == 0) {
+        /* Only reachable if MAX_FRAMES or the buffer sizes above are changed out
+         * from under this call: it is sized for the 4-byte container, the worst
+         * case. Counted rather than silent, because "the mirror stopped writing"
+         * with no line at all is the shape of failure this port keeps chasing. */
+        if (!g_mirror_pack_failed) {
+            g_mirror_pack_failed = 1;
+            alog("audioshim: mirror packing %u frames to %s FAILED — the mirror "
+                 "will stay silent\n", frames, g_cfg.mirror_fmt_name);
+        }
+        g_mirror_drops++;
+        return;
+    }
+
+    g_mirror_blocks++;
+    /* Hold the ring near half full before asking it to take this block: a separate,
+     * best-effort silence write, so the block's own verdict and accounting below are
+     * untouched by it. See mirror_pad(). */
+    mirror_pad();
+    written = real_snd_pcm_writei(g_mirror, g_mirror_packed, frames);
+    v = mirror_verdict(written, (long)frames);
+
+    if (v == MIRROR_RETRY) {
+        /* One prepare and one more attempt: a broken stream on a device that is
+         * still there. Note what is NOT done here — no mute, no fade, and no touch
+         * of the master's startup state.
+         *
+         * The prepare is what discards the ring, so the lead has to be rebuilt here
+         * and not only at open: this path is taken *because* the stream ran dry, and
+         * a fresh prepare with the same 64 frames per block would run dry again
+         * immediately — which is precisely the state that produced retries on 3500
+         * of 3501 blocks before the prefill existed. Silence, so it costs 11.6 ms of
+         * the mirror's own latency and nothing of the master's audio. */
+        g_mirror_retries++;
+        if (real_snd_pcm_prepare)
+            real_snd_pcm_prepare(g_mirror);
+        mirror_prefill(g_mirror);
+        written = real_snd_pcm_writei(g_mirror, g_mirror_packed, frames);
+        v = mirror_verdict(written, (long)frames);
+        if (v == MIRROR_RETRY)      /* twice is a stream that is not coming back */
+            v = MIRROR_DOWN;
+    }
+
+    switch (v) {
+    case MIRROR_WROTE:
+        g_mirror_frames += frames;
+        break;
+    case MIRROR_SHORT:
+        /* The head of the block went out and the tail did not. The next block
+         * carries the audio that follows, so this is a lost tail and not a retry;
+         * counting it separately from a whole-block drop is what makes the log say
+         * how much audio actually went missing. */
+        g_mirror_frames += (unsigned long)written;
+        g_mirror_shorts++;
+        break;
+    case MIRROR_FULL:
+        /* Nothing consumed and nothing wrong: the sink's ring is full, which is
+         * what two independent clocks drifting into each other look like. The
+         * block is dropped and the count is the only record of it. */
+        g_mirror_drops++;
+        break;
+    case MIRROR_RETRY:
+        break;              /* classified away above */
+    case MIRROR_DOWN:
+        mirror_lost(written);
+        return;
+    }
+
+    if (!g_mirror_written_once && g_mirror_frames > 0) {
+        g_mirror_written_once = 1;
+        alog("audioshim: mirror UP %s (first block delivered %ld of %u frames)\n",
+             g_mirror_dev, written > 0 ? written : 0, frames);
+    }
+
+    if ((g_mirror_blocks % 500) == 1)
+        alog("audioshim: mirror #%lu blocks=%lu frames=%lu dropped=%lu short=%lu "
+             "retries=%lu lost=%lu pads=%lu padframes=%lu gain=%.3f dev=%s\n",
+             g_mirror_blocks, g_mirror_blocks, g_mirror_frames, g_mirror_drops,
+             g_mirror_shorts, g_mirror_retries, g_mirror_losses, g_mirror_pads,
+             g_mirror_pad_frames_sum, (double)g_mirror_gain,
+             g_mirror_dev);
+}
+
+/* Reopen a mirror that is down, if the backoff allows it. Runs on the audio
+ * thread, once per master block; the frame counter in mirror_reopen_due() is what
+ * replaces a timer thread. */
+static void mirror_retry(void)
+{
+    if (g_mirror != NULL || g_mirror_ncands == 0 || real_snd_pcm_open == NULL)
+        return;
+    if (!mirror_reopen_due(now_ms(), g_mirror_absent_ms, g_mirror_backoff_ms,
+                           (unsigned long)g_cfg.mirror_reopen_ms))
+        return;
+    mirror_open();
+}
+
 int snd_pcm_open(snd_pcm_t **pcm, const char *name, int stream, int mode)
 {
     init_real_alsa();
     alog("audioshim: snd_pcm_open(name='%s', stream=%d, mode=%d)\n",
          name ? name : "null", stream, mode);
+
+    /* A plugin device (plughw and friends) opens its slave by calling the PUBLIC
+     * snd_pcm_open(), so this function is re-entered from inside our own
+     * open_real_device(). Without this, the re-entrant call would fall through to
+     * the switch below, consume a slot in g_playback_open_count and hand
+     * libasound one of the fake handles — which is_fake() then answers locally for
+     * the rest of the process's life, so the plugin believes it configured and
+     * drove a device that does not exist and every write surfaces as an
+     * unexplained -EINVAL.
+     *
+     * This is the same defect the parameter plumbing and snd_pcm_close() both had;
+     * they were fixed with is_forwardable(), and this is the one entry point where
+     * that predicate cannot help, because there is no handle to test yet. It was
+     * latent for as long as the master opened a hw: device, and it becomes
+     * reachable the moment anything tries a plughw: candidate — the master's own
+     * fallback chain has one, and the HDMI mirror's device list has one per entry.
+     *
+     * Forwarding with the caller's own arguments, exactly as is_forwardable() does:
+     * the handle belongs to libasound, and it is not this shim's to renumber. */
+    if (g_in_real_open) {
+        alog("audioshim: snd_pcm_open re-entered by a plugin for '%s' — forwarding\n",
+             name ? name : "null");
+        if (real_snd_pcm_open == NULL)
+            return -ENODEV;
+        return real_snd_pcm_open(pcm, name, stream, mode);
+    }
 
     if (pcm == NULL)
         return -EINVAL;
@@ -970,6 +1669,16 @@ int snd_pcm_open(snd_pcm_t **pcm, const char *name, int stream, int mode)
             open_real_device(mode, 0);
         *pcm = g_real_playback ? g_real_playback : (snd_pcm_t *)&g_h_master;
         alog("audioshim: stream 0 is the master stream (handle=%p)\n", *pcm);
+        /* The HDMI mirror's first attempt, and the only one made from here: after
+         * this it is mirror_retry() on the write path, which respects the backoff.
+         * Attempted after the master so the master's open, prepare and first write
+         * are never queued behind a device that may not answer. `g_playback_open_count`
+         * is reset by reset_stream_state(), so case 0 can recur — this flag is what
+         * keeps that from becoming an unbounded second attempt. */
+        if (!g_mirror_tried) {
+            g_mirror_tried = 1;
+            mirror_open();
+        }
         return 0;
 
     case 1:
@@ -1066,15 +1775,27 @@ int snd_pcm_hw_params_set_format(snd_pcm_t *pcm, snd_pcm_hw_params_t *params, in
     init_real_alsa();
     alog("audioshim: set_format req=%d\n", format);
     if (is_forwardable(pcm) && real_snd_pcm_hw_params_set_format) {
-        /* Whatever rbp asked for, the device is configured with AUDIO_FMT's
-         * format — the one s24pack() actually produces. On the default hw:
-         * device that is s24_3le, which is the format the FLX4 accepts and the
-         * only reason the bytes we hand over are the bytes the card sees. With an
-         * unset AUDIO_FMT this is S24_LE, rbp's own container, which is right for
-         * a device that converts for us (the plughw fallback candidate). */
-        int want = SND_PCM_FORMAT_S24_LE;
-        if (g_cfg.fmt == AUDIO_FMT_S24_3LE) want = SND_PCM_FORMAT_S24_3LE;
-        else if (g_cfg.fmt == AUDIO_FMT_S16_LE) want = SND_PCM_FORMAT_S16_LE;
+        /* rbp's request is not honoured literally: the device is configured with
+         * AUDIO_FMT's format, because that is the one s24pack() actually produces.
+         * On the default hw: device that is s24_3le, which is the format the FLX4
+         * accepts and the only reason the bytes we hand over are the bytes the card
+         * sees. With an unset AUDIO_FMT this is S24_LE, rbp's own container, which
+         * is right for a device that converts for us (the plughw fallback
+         * candidate).
+         *
+         * That substitution belongs to rbp's device and to nothing else. A plugin
+         * chain configuring its own slave re-enters this function with the format
+         * IT needs — for the vc4 HDMI devices that is IEC958_SUBFRAME_LE, the only
+         * format those hw devices offer — and answering that with our PCM format
+         * fails the slave's negotiation and takes the whole plug chain down with
+         * it. Measured on this unit: set_format(S24_3LE) on hw:CARD=vc4hdmi0,DEV=0
+         * is a bare -EINVAL, and that device's only format is a 32-bit subframe. */
+        int want = format;
+        if (is_rbp_master(pcm)) {
+            want = SND_PCM_FORMAT_S24_LE;
+            if (g_cfg.fmt == AUDIO_FMT_S24_3LE) want = SND_PCM_FORMAT_S24_3LE;
+            else if (g_cfg.fmt == AUDIO_FMT_S16_LE) want = SND_PCM_FORMAT_S16_LE;
+        }
         int err = real_snd_pcm_hw_params_set_format(pcm, params, want);
         alog("audioshim: real set_format(%d) res=%d\n", want, err);
         return err;
@@ -1264,8 +1985,22 @@ int snd_pcm_sw_params_set_stop_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *pa
 int snd_pcm_sw_params(snd_pcm_t *pcm, snd_pcm_sw_params_t *params)
 {
     init_real_alsa();
+    /* The rbp-facing handle is answered locally with the pointer rbp is really
+     * writing to (g_real_playback, which is not the handle rbp holds). Every other
+     * real handle is libasound's own — a plugin applying sw_params to its slave —
+     * and that one has to be forwarded with the caller's pointer, or the slave
+     * keeps alsa's defaults.
+     *
+     * That is not a tidiness point. hw_params leaves a slave's start_threshold at
+     * the buffer size, so with its sw_params swallowed a device sits in a ring
+     * that never fills: every write succeeds into the buffer, nothing ever starts,
+     * and the log reads perfectly healthy. It is the same failure the parameter
+     * setters above were fixed for; these two — this and snd_pcm_prepare() — are
+     * the pair that still gated on is_real(). */
     if (is_real(pcm) && real_snd_pcm_sw_params)
         real_snd_pcm_sw_params(g_real_playback, params);
+    else if (is_forwardable(pcm) && real_snd_pcm_sw_params)
+        real_snd_pcm_sw_params(pcm, params);
     alog("audioshim: snd_pcm_sw_params(pcm=%p) -> ok\n", pcm);
     return 0;
 }
@@ -1276,6 +2011,8 @@ int snd_pcm_prepare(snd_pcm_t *pcm)
     int err = 0;
     if (is_real(pcm) && real_snd_pcm_prepare)
         err = real_snd_pcm_prepare(g_real_playback);
+    else if (is_forwardable(pcm) && real_snd_pcm_prepare)
+        err = real_snd_pcm_prepare(pcm);
     alog("audioshim: snd_pcm_prepare(pcm=%p) res=%d\n", pcm, err);
     return 0;   /* always succeed: see the sw_params note above */
 }
@@ -1576,6 +2313,13 @@ static void fold_stage(const struct stage *st, const struct pair *pair,
 static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size)
 {
     float master_gain = clamp01(g_master_gain);
+    /* The HDMI mirror's level, from the unit's own MASTER LEVEL knob -- the one
+     * thing here that scales the mirror and not the master. Hoisted out of the
+     * loop with master_gain: it is written by the controls shim from the MIDI
+     * thread, and sampling it once per flush means every frame of a block is
+     * scaled by the same value. Clamped because it arrives over the shared-state
+     * contract rather than from our own arithmetic. */
+    float mirror_gain = clamp01(g_mirror_gain);
     snd_pcm_uframes_t i;
     unsigned long long t0 = g_startup_frames_done;
     unsigned long long mute = (unsigned long long)g_cfg.mute_frames;
@@ -1630,6 +2374,24 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
             g_out[i * g_out_channels + g_cfg.monitor.a] = ol;
             g_out[i * g_out_channels + g_cfg.monitor.b] = or_;
         }
+
+        /* The HDMI mirror's copy of the same two samples: channel 0 is the
+         * master's left and channel 1 its right — post Main Vol, post startup
+         * mute and fade, exactly the values that went to the card, then scaled
+         * by the mirror's own gain from the unit's MASTER LEVEL knob. That gain
+         * is applied HERE and only here: the two writes above are untouched, so
+         * the knob can never change what the FLX4 receives. It exists because
+         * the knob is downstream of the FLX4's USB audio, so the mirror would
+         * otherwise stay at full level while the room went quiet.
+         *
+         * Filled unconditionally rather than only while the mirror is up, so
+         * that whether it is up can never change what the master sends, and so
+         * the buffer that mirror_write() picks up is always this block's. It is
+         * outside the pair_mapped tests on purpose: the mirror is the master
+         * OUTPUT, not a destination for the master PAIR, and must still carry
+         * audio if AUDIO_MAP's master pair is unmapped. */
+        g_mirror_out[i * 2 + 0] = (int32_t)(ol * mirror_gain);
+        g_mirror_out[i * 2 + 1] = (int32_t)(or_ * mirror_gain);
     }
     g_startup_frames_done += size;
 
@@ -1678,22 +2440,30 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
     } else {
         out_bytes = s24pack(g_cfg.fmt, g_out, (unsigned)size, g_out_channels,
                             g_packed, sizeof g_packed);
-        out = g_packed;
         if (out_bytes == 0) {
             /* The destination could not hold the block. Writing a truncated one
-             * would be worse than writing nothing, so skip the device entirely
-             * and say so once. */
+             * would be worse than writing nothing, so the master's device write is
+             * skipped entirely and it is said once.
+             *
+             * `out` is what decides that, rather than this function returning here
+             * as it used to: the mirror below packs its own two channels into its
+             * own buffer, so a master pack failure says nothing about it, and a
+             * screen that keeps playing is worth more than the tidy exit. What is
+             * skipped for the master is the write, the pacing and the reopen —
+             * exactly the three things the early return used to skip. */
             if (!g_pack_failed_logged) {
                 g_pack_failed_logged = 1;
                 alog("audioshim: packing %u frames x %u ch to %s failed; output "
                      "will be silent until this is fixed\n",
                      (unsigned)size, g_out_channels, g_cfg.fmt_name);
             }
-            return (snd_pcm_sframes_t)size;
+            out = NULL;
+        } else {
+            out = g_packed;
         }
     }
 
-    if (g_real_playback && real_snd_pcm_writei) {
+    if (g_real_playback && real_snd_pcm_writei && out) {
         snd_pcm_sframes_t written =
             real_snd_pcm_writei(g_real_playback, out, size);
 
@@ -1717,15 +2487,29 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
                  "peak_m=%d mainvol=%.3f\n",
                  g_write_count, (unsigned long)size, out_bytes, (long)written,
                  s_peak_master, (double)master_gain);
-    } else {
+    } else if (out) {
         pace_without_device(size);
         /* No card: either one was never opened (a unit booted with the controller
          * unplugged) or it was lost above. Both recover the same way, and this is
          * the only place a still-running thread already is. */
         reopen_try();
     }
+
+    /* The HDMI mirror, last and unconditionally: it is advisory, so it runs on the
+     * block the master has just finished with whatever the master's own outcome
+     * was, and nothing it does reaches anything above this line. That includes the
+     * case where the FLX4 is gone — the controller being unplugged is precisely
+     * when a screen that keeps playing is worth having, and the monitor pair
+     * cannot serve that purpose, because it is a channel pair on the missing card.
+     * mirror_retry() comes after the write so that a mirror which has just gone
+     * down is not immediately reopened with a block that predates the loss. */
+    mirror_write(g_mirror_out, (unsigned)size);
+    mirror_retry();
+
     /* Reset every block, not only on the logged one: left to run, this is a
-     * running maximum that never comes back down. */
+     * running maximum that never comes back down. (Now reached on the pack-failure
+     * path as well, which used to return early: a stale peak from before the
+     * failure would be printed on the next logged line as though it were current.) */
     s_peak_master = 0;
 
     return (snd_pcm_sframes_t)size;

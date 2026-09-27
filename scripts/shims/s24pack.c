@@ -11,10 +11,11 @@
 int s24pack_bytes(int fmt)
 {
     switch (fmt) {
-    case AUDIO_FMT_S24_LE:  return 4;
-    case AUDIO_FMT_S24_3LE: return 3;
-    case AUDIO_FMT_S16_LE:  return 2;
-    default:                return 0;
+    case AUDIO_FMT_S24_LE:      return 4;
+    case AUDIO_FMT_S24_3LE:     return 3;
+    case AUDIO_FMT_S16_LE:      return 2;
+    case AUDIO_FMT_SUBFRAME_LE: return 4;
+    default:                    return 0;
     }
 }
 
@@ -28,7 +29,30 @@ int s24pack_parse(const char *name)
         return AUDIO_FMT_S24_3LE;
     if (strcasecmp(name, "s16_le") == 0 || strcasecmp(name, "s16") == 0)
         return AUDIO_FMT_S16_LE;
+    /* The vc4 HDMI DMA's format. "subframe" because that is what the device asks
+     * for (IEC958_SUBFRAME_LE); the iec958 spelling is accepted because that is
+     * the name an operator is likelier to arrive with. */
+    if (strcasecmp(name, "subframe_le") == 0 || strcasecmp(name, "subframe") == 0 ||
+        strcasecmp(name, "iec958_subframe_le") == 0)
+        return AUDIO_FMT_SUBFRAME_LE;
     return -1;
+}
+
+/* Even parity over bits 4..30 of a subframe — the count that bit 31 completes,
+ * so that the whole word carries an even number of set bits. This is the same
+ * sum alsa-lib's iec958_parity() takes, and computing it is what makes the word
+ * a *valid* IEC958 subframe rather than a container with a sample somewhere in
+ * it. Branchless XOR fold; not __builtin_parity, which on ARMv7 is a libgcc
+ * call on a per-sample path. */
+static int subframe_parity(uint32_t v)
+{
+    v &= 0x7ffffff0U;
+    v ^= v >> 16;
+    v ^= v >> 8;
+    v ^= v >> 4;
+    v ^= v >> 2;
+    v ^= v >> 1;
+    return (int)(v & 1U);
 }
 
 unsigned s24pack(int fmt, const int32_t *src, unsigned frames, unsigned ch,
@@ -67,6 +91,30 @@ unsigned s24pack(int fmt, const int32_t *src, unsigned frames, unsigned ch,
             uint32_t v = (uint32_t)src[i];
             d[i * 2 + 0] = (unsigned char)((v >> 8) & 0xff);
             d[i * 2 + 1] = (unsigned char)((v >> 16) & 0xff);
+        }
+        break;
+
+    case AUDIO_FMT_SUBFRAME_LE:
+        /* A real IEC958 subframe, not a container: the sample goes at bits 4..27.
+         * That is what alsa-lib's own encoder does — it is handed the sample
+         * left-justified and its first two lines are `data >>= 4; data &= ~0xf;`
+         * — and it is why a sample placed at bits 8..31 is not merely shifted:
+         * the receiver reads 4..27, gets this sample's low 20 bits promoted to
+         * the top, and plays a wrapped, aliased version of the waveform at full
+         * level. Measured on the unit as exactly that: loud and very distorted,
+         * which is how S4.6 found it. The parity bit is then set so the word is
+         * a valid subframe; the preamble (bits 0..3) and V/U/C (28..30) are left
+         * zero, which is a decision the header explains. Written per byte rather
+         * than as a 32-bit store because the buffer is assembled into a byte
+         * array and this target is little-endian with no alignment promise. */
+        for (i = 0; i < n; i++) {
+            uint32_t v = ((uint32_t)src[i] << 4) & 0x0ffffff0U;
+            if (subframe_parity(v))
+                v |= 0x80000000U;
+            d[i * 4 + 0] = (unsigned char)(v & 0xff);
+            d[i * 4 + 1] = (unsigned char)((v >> 8) & 0xff);
+            d[i * 4 + 2] = (unsigned char)((v >> 16) & 0xff);
+            d[i * 4 + 3] = (unsigned char)((v >> 24) & 0xff);
         }
         break;
 
