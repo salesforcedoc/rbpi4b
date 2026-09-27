@@ -181,6 +181,220 @@ Corollary: the cue mix/level knobs are **not** applied in the audio shim. They
 belong on rbp's mixer engine, through the controls bridge — see
 [08 — Controls](08-controls.md).
 
+## The HDMI mirror
+
+The master audio can also go out of the Pi's HDMI, **at the same time** as the
+FLX4, so a screen on the desk carries what the room hears. It is the *master pair
+only* — `ol`/`or_`, post Main Vol and post startup mute, the same samples the card
+is handed — so it is a second copy of one output, not a second mix. The monitor
+pair above is the same idea for a card that has a monitor output of its own; this
+one is for a sink that is not a sound card at all.
+
+It is **advisory**, and that is the constraint everything about it follows from.
+A monitor is hot-swapped on this unit with the player running, so an absent or
+slower HDMI sink must cost the mirror blocks and never the master:
+
+* Opened and written **non-blocking**. A full ring or a missing sink costs one
+  dropped block and a counter; nothing on this path waits.
+* **No thread and no new dependency** — the shim links only `libc`/`libdl`, and
+  the retry is a frame-counted backoff on the audio thread, not a timer. Its
+  recovery deliberately does **not** re-arm the startup mute the way the master's
+  reopen does: the FLX4 thumps on open, so copying that here would silence the
+  FLX4 for 1.8 s every time the HDMI side hiccuped.
+* **UP is earned by a write**, never by an open. Opening succeeds against a port
+  with nothing on it, so the `mirror UP` line only appears after the first block
+  is actually delivered.
+* An ALSA **`multi`** PCM would have been the config-only answer and is the one
+  thing that cannot work: `multi` is all-or-nothing, so an HDMI slave that will
+  not open takes the FLX4 down with it.
+
+### The knobs
+
+| knob | default | note |
+|---|---|---|
+| `RB_AUDIO_MIRROR_DEV` | `hw:CARD=vc4hdmi0,DEV=0 hw:CARD=vc4hdmi1,DEV=0` | space-separated, tried in order, because which micro-HDMI port the monitor is on is not fixed; each `hw:` entry also yields its `plughw:` twin. **Empty turns the mirror off** |
+| `RB_AUDIO_MIRROR_FMT` | `subframe_le` | `s24_le`, `s24_3le`, `s16_le`, `subframe_le` — see the trap below |
+| `RB_AUDIO_MIRROR_REOPEN_MS` | `5000` | the ceiling on the retry wait after the sink goes away; `0` means try once at startup and never again |
+
+These need a **shim rebuild** when they change, unlike the rest of the audio
+block: the device, the format and the retry interval are read inside
+`audioshim.so`.
+
+### The level: the unit's own MASTER LEVEL knob
+
+By default the mirror follows rbp's Main Vol, because it is handed the same
+`ol`/`or_` — and on this map Main Vol is pinned at unity, so the mirror is at full
+level and the only volume the room hears is the FLX4's own. The HDMI copy can be
+tied to that same knob: the **MASTER LEVEL** knob (list channel 7, i.e. 0-based 6,
+**CC 8 MSB + CC 40 LSB — a 14-bit pair**, measured on the unit 2026-09-27) writes
+`map_flx4.c`'s `g_mirror_gain`, and that is the only thing it writes.
+
+**Why not rbp's master level.** The knob is the unit's *analogue output* volume,
+sitting downstream of the USB audio the Pi feeds it. Driving rbp's Main Vol — or
+`audioshim`'s `g_master_gain` — from it would attenuate the master **twice**: once
+in the samples the Pi sends, again in the unit's output stage. So the two are
+deliberately separate symbols, and `g_mirror_gain` scales the advisory mirror
+alone: the HDMI tracks the room while not a sample of the FLX4's stream changes.
+The handler dispatches on the **LSB** and holds the MSB, like the pitch fader and
+the jog — an MSB alone is half an update, not a position.
+
+**Where unity sits: 1 o'clock, not the stop and no longer the middle.** The raw
+position is not the gain. `flx4_mastervol_gain()` in `map_flx4.c` maps it — unity
+at **1 o'clock**, **flat above it**, and a linear ramp below:
+
+```
+gain = min(1, (pos / 16383) / MID)          MID = MIRROR_GAIN_MID, default 0.6
+```
+
+The knee has moved twice, both times on the operator's ear and both times on
+**2026-09-27**. First: with unity at the stop the mirror was too quiet to use —
+the operator had to crank the knob to the end — because a volume knob's working
+point is not its stop, and the middle was only 0.5, i.e. **−6 dB**. So the middle
+became full level. Then the operator asked for the **top of the useful travel to
+be 1 o'clock rather than 12**, and unity moved up with it.
+
+**Where 1 o'clock is: measured, not assumed** — and the measurement is the unit's
+own MIDI dump. `RB_MIDI_DUMP` was already on, so the knob's whole travel could be
+read back rather than inferred. The composed MSB/LSB positions span raw **0 to
+16383**, and both ends are among the most-visited positions (14 samples at 16383,
+11 at 0), which is what a mechanical stop looks like: the pot pins at the ends of
+its electrical range instead of stopping short of them. So `pos / 16383` is a
+fraction of *rotation*, and **12 o'clock is raw 0.5** — the electrical midpoint
+and, in the same dump, where the hand rests: the most-visited positions cluster on
+0.479–0.532, centred on 0.50. 1 o'clock is one hour past that, 30° of a 270–300°
+sweep, i.e. **0.60–0.61** of the rotation. 0.6 is the round number; the two differ
+by 0.15 dB at 12 o'clock.
+
+An earlier reading of this dump put the bottom stop at raw 2228 and derived 0.65
+from it. **That was wrong, and wrong in a way worth keeping**: it came from the
+hand sweep's *lowest logged gain* under the old `pos / 16383` law, which was 0.136
+— and a sweep that never reaches the bottom prints a low value that is
+indistinguishable from a stop. This document had already recorded that full-down
+had not been observed; the inference was drawn anyway. The dump settles it because
+those are the pot's own raw numbers rather than a law applied to them.
+
+**What that costs, stated plainly:** 12 o'clock is no longer full level. It reads
+**0.833**, about **−1.6 dB**, and everything below the knee scaled down with it.
+Nothing anywhere in the law can exceed 1.0, so this change only ever *lowers* what
+a given position gives — it moves the knee, it does not add level. If what is
+wanted is more level available rather than a different knee, that is the boost
+below, and it needs the `s24pack()` clamp first.
+
+The one mercy of the travel being the whole range is that the **bottom is
+unaffected**: raw 0 is the stop and it still maps to silence, exactly as under
+every earlier version of this law. Under the 0.65 reading it would not have been,
+which is the second thing that bad premise would have got wrong.
+
+The **travel above the knee being flat rather than boosted** is deliberate.
+`s24pack()` does not clamp — `((uint32_t)src[i] << 4) & 0x0ffffff0U`
+**wraps** a sample pushed past 24 bits, folding the waveform into the "loud and
+very distorted" defect S4.6 measured — so `clamp01(g_mirror_gain)` in `audioshim`
+is a ceiling, not a limit to be raised. rbp's master does peak below full scale
+(loudest 500-block window of the 2026-09-27 run: 3229776 of 8388608, ≈ **−8.3
+dBFS**), so a boost is possible in principle — but it needs a saturating clamp in
+`s24pack()` first. That is a separate change and is deliberately not this one.
+
+**How that is checked with no hand on the knob:** point `RB_MIDI_REPLAY` at a
+hand-written dump of CC 8/40 lines — `mididump_replay()` feeds the real
+`ctrl_dispatch`, so a walk of the travel replays with nothing plugged in. That is
+how the middle was shown to be full level on the unit: the `gain=` field read
+`1.000 → 0.000 → 0.500 → 1.000` and then no further change, where the old law
+would have printed six distinct values and **0.500** at the middle
+([13 — Raspberry Pi 4](13-raspberrypi4.md#bring-up-order), S4.9). Under the 0.6
+knee the same replay should read `1.000 → 0.000 → 0.833 → 1.000`: the shape is the
+same and only the middle's number moves, because that is the knee moving and
+nothing else changing. (Predicted from the positions that run used, not yet
+re-run.)
+
+The knob is its own rollback: **`RB_MIRROR_GAIN_MID=1.0`** reproduces the old
+`pos / 16383` law exactly, with unity back at the stop. Values of 0 or below, and
+above 1, are ignored in favour of the default (0 would divide, and >1 would ask
+for the boost above). Unlike the rest of this section the setting is read by
+`map_flx4.c` — the **controls** shim — because the level is the knob's, not the
+audio path's; `audioshim` only consumes the result.
+
+**It starts at unity, every run.** The unit's connect report is a **lone MSB** —
+the FLX4 map's recorded fixture (`scripts/shims/tests/midi_flx4.dump`) has
+`0.098000 CONTROLLER ch=6 cc=8 val=64` with no `CC 40` behind it, and half a pair
+is not a position — and restarting the player does not re-enumerate the unit, so
+nothing arrives at all: measured over **113 501 blocks / 7 264 064 frames (164 s
+of delivered audio)** after a restart, the MIDI dump held **zero** CC 8/40 lines
+and the log's `gain` read `1.000` throughout.
+
+Nor could it be asked. The tree's one absolute-value query is
+`midi_io.c`'s `led_query_absolute()`, and it is a **JP21** protocol message — the
+sequencer route cannot carry it, and a surface matched by name never sends it at
+all (`knobshim2: absolute-value query not sent: the rawmidi route is what carries
+it`). The FLX4 has no such query to answer and reports a control only as it
+moves, so an untouched knob is silent by protocol, not merely by observation. So
+there is nothing to restore, and
+`g_mirror_gain` stays at its initial `1.0` until the knob is first moved. Turning
+it once re-syncs the mirror; until then the HDMI copy is at full level wherever
+the knob is sitting, so the first touch can be a jump. `audioshim` samples it once per flush and clamps it (`clamp01`), because it
+arrives over the shared-state contract rather than from the shim's own arithmetic.
+
+That contract is why **both shims ship together**: `g_mirror_gain` is in
+`SHMSTATE_SYMBOL_LIST`, and `SHMSTATE_ABI_VERSION` is 2. A new `audioshim`
+against an old `knobshim` fails loudly at load (`undefined symbol`); the reverse
+mix is the quiet one — an old `audioshim`'s list never mentions the symbol, so it
+resolves what it knows and the knob is simply dead — which is what the version
+bump exists to make loud. See [08 — Controls](08-controls.md).
+
+### The format is not negotiable, and neither is `hw:`
+
+The vc4 HDMI PCMs offer exactly **one** format — `IEC958_SUBFRAME_LE`, a genuine
+IEC 60958 subframe whose 24-bit sample sits at bits 4..27 with its even-parity bit
+at 31 (`s24pack.h` has the layout and the driver evidence) — and nothing converts
+to it for us. Measured inside the chroot against the libasound the shim dlopens
+(2026-09-27, `tools/pcmprobe` sequence mode):
+
+```
+plughw:CARD=vc4hdmi0,DEV=0   mask: IEC958_SUBFRAME_LE
+                             set_format(32=S24_3LE) FAILED -22   # and S16_LE, S24_LE too
+hw:CARD=vc4hdmi0,DEV=0       format 18 runs the whole sequence: rate=44100 channels=2
+                             period=256, write ok
+```
+
+**A host `aplay` says the opposite** — `aplay -D plughw:CARD=vc4hdmi0,DEV=0 -f
+S24_3LE` plays happily and dumps the full 32-format list — because it links the
+Pi OS libasound, which is newer than the chroot's. That is the trap: the
+instrument that looks authoritative is answering a question about a different
+library. Hence `subframe_le` on a `hw:` device, and hence `pcmprobe`'s sequence
+mode ([tools/README](../tools/README.md#pcmprobe--asking-libasound-what-its-constants-mean)).
+
+### Two clocks, no resampler
+
+The FLX4 and the HDMI sink run on independent clocks and there is no resampler
+between them — the master's clock is the one that must not move. Measured on this
+unit, the vc4 HDMI sink consumes **~6.9 frames a second faster** than the FLX4
+feeds the mirror (~155 ppm), which drains the mirror's 1024-frame ring.
+
+So the mirror holds its ring near **half full** against both directions:
+a **prefill** of 512 frames of silence at each stream start (without it the ring
+holds only the 64 frames of one block, the DMA drains that in 1.4 ms, and the
+stream is in XRUN before the next block arrives — measured as a `prepare` on 3500
+of 3501 blocks), and a **pad** of a few frames of silence when the level falls
+below the target. At the measured drift that is about one frame every 0.2 s — 23 µs
+of silence — and the drop side handles the other direction. Both are silence, so
+neither touches what the master hears.
+
+`/tmp/audioshim.log` carries the record, one line every 500 blocks:
+
+```
+audioshim: mirror OPEN hw:CARD=vc4hdmi0,DEV=0 fmt=subframe_le rate=44100 period=256 periods=4 buffer=1024 prefill=512
+audioshim: mirror UP hw:CARD=vc4hdmi0,DEV=0 (first block delivered 64 of 64 frames)
+audioshim: mirror #50001 blocks=50001 frames=3200064 dropped=0 short=0 retries=1 lost=0 pads=56 padframes=1728 gain=1.000 dev=hw:CARD=vc4hdmi0,DEV=0
+```
+
+`retries` staying at its startup value, `lost=0` and `dropped=0` are the pass;
+`padframes` advancing at ~7 a second is the correction working, not a fault; and
+`gain` is the mirror's level, printed **raw** rather than clamped so the log shows
+what the controls shim actually wrote (`1.000` until the MASTER LEVEL knob is
+touched). The sink's own view is `/proc/asound/card2/pcm0p/sub0/status` —
+`RUNNING`, with a `delay` near half the buffer. Both are in the S4.5–S4.8 rows of
+the bring-up order ([13](13-raspberrypi4.md#bring-up-order)), and the sink going
+away and coming back is S8.8.
+
 ## S24 sign extension — load-bearing, must not be "fixed"
 
 rbp's S24_LE samples are right-justified in 32-bit words but **not

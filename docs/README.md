@@ -17,7 +17,7 @@ unit up; it is the target document and links out to the rest.
 | 06 | [display](06-display.md) | DirectFB fbdev: the present modes + `directfbrc` |
 | 07 | [touch](07-touch.md) | pointing: the fake tsc2007, evdev discovery, the axis transform |
 | 08 | [controls](08-controls.md) | control surface → rbp keycodes, LEDs, VU; the two map selections (`MIDI_MAP`, `EVDEV_MAP`) and the keyboard fallback |
-| 09 | [audio](09-audio.md) | the stream model, `hw:` vs `plughw:`, the channel map, the format constants |
+| 09 | [audio](09-audio.md) | the stream model, `hw:` vs `plughw:`, the channel map, the format constants, the HDMI mirror |
 | 10 | [usb](10-usb.md) | USB stick + rekordbox database |
 | 11 | [runtime-launcher](11-runtime-launcher.md) | launch sequence / systemd integration |
 | 12 | [troubleshooting](12-troubleshooting.md) | symptom → cause → fix |

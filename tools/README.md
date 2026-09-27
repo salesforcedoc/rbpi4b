@@ -154,6 +154,27 @@ deploy. `check_format_constants()` in the shim does the same check at every
 startup and logs the values it resolved, so this tool is for finding out what the
 numbers are — the shim's own line is what catches them later.
 
+Given a device and a format number, it instead **runs the whole configuration
+sequence** and prints each step's result — `hw_params_any`, `set_access`,
+`set_format`, `set_channels`, `set_rate_near`, the period and periods it
+negotiated, `sw_params`, `prepare` and one 0.1 s write — dumping the format mask
+after `hw_params_any` and again after `set_format` so a refusal names itself:
+
+```bash
+pcmprobe hw:CARD=vc4hdmi0,DEV=0 18 nonblock   # IEC958_SUBFRAME_LE, as the mirror opens it
+```
+
+That mode exists because the two questions are genuinely different, and the
+difference cost a wrong design on 2026-09-27. `plughw:CARD=vc4hdmi0,DEV=0` on the
+**host** advertises the full 32-format logical set and plays `S24_3LE` happily —
+through the host's **newer** libasound. Inside the chroot, against the libasound
+the shim dlopens, the same plug device offers **exactly one** format
+(`IEC958_SUBFRAME_LE`) and answers `-22` at `set_format` for `S16_LE`, `S24_LE` and
+`S24_3LE`. So a host `aplay` is not an oracle for the chroot, and the sequence
+mode is what settles it: it links the chroot's libasound and reports the same
+mask the shim's own open would see. The HDMI mirror's device and format defaults
+in `rb.conf` come from that run ([09](../docs/09-audio.md#the-hdmi-mirror)).
+
 ## `aseqdump2dump` — turning a capture into a fixture and a table
 
 A map cannot be written from a datasheet, and the fixture `make -C scripts/shims

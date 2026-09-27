@@ -226,10 +226,26 @@ quietly, because a wrong base lights nothing and sends nothing.
 Two mixer controls are **deliberately not in the table at all**, and the reason
 is not that they are unknown:
 
-* **MASTER LEVEL** (CC 8) is the unit's own output volume, and it sits *after*
-  the USB audio it feeds. Driving rbp's master level or the audio shim's
-  `g_master_gain` from it would attenuate the master twice. `flx4_startup()`
-  pins rbp's master level at unity instead.
+* **MASTER LEVEL** (CC 8 MSB + CC 40 LSB — a 14-bit pair, measured 2026-09-27)
+  is the unit's own output volume, and it sits *after* the USB audio it feeds.
+  Driving rbp's master level or the audio shim's `g_master_gain` from it would
+  attenuate the master twice, so it is deliberately **not** bound to
+  `K_MASTERLVL`; `flx4_startup()` pins rbp's master level at unity instead. It
+  is not dropped either: `flx4_mastervol()` writes **`g_mirror_gain`**, the HDMI
+  mirror's level — the one place the value can go without attenuating anything
+  twice, so the HDMI copy tracks the room while not a sample of the FLX4's
+  stream changes ([09](09-audio.md#the-level-the-units-own-master-level-knob)).
+  Shaped like `flx4_pitch()` and for the same reason: a pair of messages is one
+  physical change, so it dispatches on the **LSB** and holds the MSB, and the
+  unit reports no position at connect — which is why the mirror starts at unity
+  and re-syncs on the knob's first touch. The position is then mapped, not used
+  raw: `flx4_mastervol_gain()` puts **unity at 1 o'clock** — 0.6 of the raw
+  range, measured from the knob's own stops rather than assumed — and holds it flat
+  above, so 12 o'clock reads 0.833 rather than full level. It sat at the *middle*
+  first, because with unity at the stop the mirror was too quiet to use (the
+  operator's 2026-09-27 report); the move to 1 o'clock is that operator's follow-up
+  the same day. `RB_MIRROR_GAIN_MID=1.0` restores the linear law
+  ([09](09-audio.md#the-level-the-units-own-master-level-knob)).
 * **MIC LEVEL** (CC 5) has no reader here, because rbp's mic input is not part
   of this port.
 

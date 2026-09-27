@@ -29,7 +29,7 @@ tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 | Controls | transport, decks, mixer, jog and pads mapped from the DDJ-FLX4 MIDI surface — the tables are written from Pioneer's published MIDI message list and are unverified until a dump from the hardware, see [docs/15](docs/15-flx4-midi.md) | [docs/08](docs/08-controls.md), [docs/15](docs/15-flx4-midi.md) |
 | Panel LEDs | PLAY / CUE / SYNC / FX LEDs mirror rbp's own LED state (blink included) | [docs/08](docs/08-controls.md) |
 | VU meters | No meters on the FLX4, so `RB_LED_VU=0` by default — and the `rbp` machine-code patch behind them is then not installed at all | [docs/15](docs/15-flx4-midi.md) |
-| Audio | master (RCA out) and headphones/cue on the FLX4's 4-channel USB audio; card, channel count and pair map are all configurable | [docs/09](docs/09-audio.md) |
+| Audio | master (RCA out) and headphones/cue on the FLX4's 4-channel USB audio, **plus the same master audio out of the Pi's HDMI**; card, channel count and pair map are all configurable | [docs/09](docs/09-audio.md) |
 | USB | rekordbox-exported stick detection and `export.pdb` import into DeviceSQL | [docs/10](docs/10-usb.md) |
 | Launcher | `start-rb.sh` stops the desktop services that would fight for the display or the stick, then brings the player up | [docs/11](docs/11-runtime-launcher.md) |
 | Boot time | `install.sh` applies a reversible boot trim — cloud-init off the critical chain, the apt timers off the boot path, the launcher's no-op `systemctl` calls behind read-only guards, and the unit ordered at `basic.target` instead of after `multi-user.target` | [docs/13](docs/13-raspberrypi4.md#boot-time) |
@@ -59,7 +59,19 @@ each row there says whether it has been run, and what it measured.
   **zero** negative returns over 41,001 writes. Getting there fixed three
   defects, all documented in [docs/09](docs/09-audio.md) — the last of them a
   hand-rolled `SND_PCM_FORMAT_S24_3LE` that had been wrong for the life of the
-  shim and whose only symptom was silence.
+  shim and whose only symptom was silence. **The same master audio also goes out
+  of the Pi's HDMI**, as a second advisory output the FLX4's stream cannot be
+  affected by: it is opened non-blocking, holds its own ring half full so the two
+  clocks (~155 ppm apart, measured) never starve it, and a sink that is
+  unplugged mid-set costs it dropped blocks and a log line, never a stall. That
+  sink needed **a fourth defect found**: the vc4 HDMI PCMs take only
+  `IEC958_SUBFRAME_LE`, a real IEC 60958 subframe rather than a 32-bit
+  container, and the first `<< 8` reading of it produced *"loud and very
+  distorted"* audio with every counter perfect — an ears-only failure the
+  bring-up table's S4.6 row exists to catch. The HDMI copy's level follows the
+  unit's own **MASTER LEVEL** knob and nothing else, so it tracks the room
+  without attenuating the FLX4's output a second time
+  ([docs/09](docs/09-audio.md#the-hdmi-mirror)).
 * **Controls.** The shim subscribes to the unit's own port
   (`subscribed to 28:0 'DDJ-FLX4 MIDI 1'`), and an `aseqdump` capture taken from
   it turned the FLX4 map's largest guess — the jog's counts per revolution — into
