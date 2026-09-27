@@ -21,7 +21,7 @@ unit up; it is the target document and links out to the rest.
 | 10 | [usb](10-usb.md) | USB stick + rekordbox database |
 | 11 | [runtime-launcher](11-runtime-launcher.md) | launch sequence / systemd integration |
 | 12 | [troubleshooting](12-troubleshooting.md) | symptom → cause → fix |
-| 13 | [raspberrypi4](13-raspberrypi4.md) | **the target**: image, `cmdline.txt`, present modes, pointing, audio, controls, USB, launcher, bring-up order |
+| 13 | [raspberrypi4](13-raspberrypi4.md) | **the target**: image, `cmdline.txt`, present modes, pointing, audio, controls, USB, launcher, boot time, bring-up order |
 | 15 | [flx4-midi](15-flx4-midi.md) | the DDJ-FLX4 map: the tables, their source, the dump procedure, and what is still unverified |
 | 16 | [input-and-hotplug](16-input-and-hotplug.md) | the keyboard map's open defects: the lost key release, the arrow sign, Enter, hot-swap, the FLX4 startup thump |
 

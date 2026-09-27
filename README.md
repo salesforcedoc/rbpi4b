@@ -32,6 +32,7 @@ tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 | Audio | master (RCA out) and headphones/cue on the FLX4's 4-channel USB audio; card, channel count and pair map are all configurable | [docs/09](docs/09-audio.md) |
 | USB | rekordbox-exported stick detection and `export.pdb` import into DeviceSQL | [docs/10](docs/10-usb.md) |
 | Launcher | `start-rb.sh` stops the desktop services that would fight for the display or the stick, then brings the player up | [docs/11](docs/11-runtime-launcher.md) |
+| Boot time | `install.sh` applies a reversible boot trim — cloud-init off the critical chain, the apt timers off the boot path, the launcher's no-op `systemctl` calls behind read-only guards, and the unit ordered at `basic.target` instead of after `multi-user.target` | [docs/13](docs/13-raspberrypi4.md#boot-time) |
 | Access | plain root on Pi OS — none of the previous target's overlay/SSH workarounds are needed | [docs/13](docs/13-raspberrypi4.md) |
 
 ## State of the port
@@ -91,6 +92,23 @@ each row there says whether it has been run, and what it measured.
   settles the rest of S6, and it is also the precondition for playing a track and
   therefore for hearing anything.
 * **Tearing, and the console over the UI** (S2.3/S2.4).
+* **A monitor that is not 1280×800, and a monitor swapped mid-session.** Both are
+  built: the present path's `scale` rung resamples the logical 1280×800 surface
+  into whatever fb is there (aspect-fit, centred, nearest-neighbour), the driver
+  upgrades `off` to it by itself when the real geometry disagrees with the
+  shim's, and `display-watch.sh` restarts the player when a swap changes the
+  geometry. `test_point` and `test_cursor_dev` pin the arithmetic and the
+  cursor's use of it, and `tools/fit-crosscheck.sh` keeps the driver's copy of
+  the fit rule equal to the shim's. **The first half has now been on the panel**:
+  S10.1–S10.4 ran on 2026-09-26, and a 1280×720, a 960×600, an 800×600 and a
+  1920×1080 fb each came up with the whole UI correctly scaled at 1.1–3.4 ms of a
+  16.67 ms frame, while the matched 1280×800 panel was unchanged. Two things are
+  still owed there: a **downscale loses hairline rules and thin glyph strokes**
+  at 0.75× and 0.625× (S10.2, unfixed and a decision rather than a defect), and
+  **the hot-swap rows are unstarted** — S10.0, S10.5–S10.10, the ones that need a
+  `video=` edit, a cable pull and a reboot
+  ([docs/13](docs/13-raspberrypi4.md#s10--the-display-drills),
+  [docs/06](docs/06-display.md#a-mismatch-selects-the-rung-by-itself)).
 * **The LED bridge**, on at `RB_LED_DISABLE=0` and transmitting nothing yet. The
   note numbers moved out of `rbp_led.c` into the selected map's `struct
   led_notes`, so a row that reads `-1` means "this surface has no such LED" and
