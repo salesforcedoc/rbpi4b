@@ -5,10 +5,11 @@
  *
  * 1. The record stream rbp reads. Everything about the fake tsc2007 is
  *    unverifiable without the player, so the parts that *are* verifiable — the
- *    byte layout, the duplicate suppression, and the two-frame burst on a press
- *    — are asserted against a real pipe through the real tscfake_emit(). A
- *    future change to the emit rules has to break this test out loud instead of
- *    silently making the first tap of every gesture invisible.
+ *    byte layout, the duplicate suppression, the two-frame burst on a press, and
+ *    the x reflection — are asserted against a real pipe through the real
+ *    tscfake_emit(). A future change to the emit rules has to break this test out
+ *    loud instead of silently making the first tap of every gesture invisible, or
+ *    moving every tap to the opposite side of the screen.
  *
  * 2. The coordinate algebra. The repo's own two touch implementations disagreed
  *    about it, so this asserts the *old* SC Live 4 result is reproducible from
@@ -145,10 +146,16 @@ static void test_emit_stream(void)
     for (i = 0; i < 5; i++)
         tscfake_emit(seq[i][0], seq[i][1], seq[i][2]);
 
-    tscfake_record(seq[0][0], seq[0][1], seq[0][2], expect);
-    tscfake_record(1, 100, 200, expect + TSC_RECORD_LEN);          /* burst, frame 1 */
-    tscfake_record(1, 100, 200, expect + 2 * TSC_RECORD_LEN);      /* burst, frame 2 */
-    tscfake_record(seq[4][0], seq[4][1], seq[4][2], expect + 3 * TSC_RECORD_LEN);
+    /* The x the seq asks for is 100 and 300; the x on the wire is their
+     * reflection, 1179 and 979, because rbp acts at `1279 - x`.  Written as
+     * literals rather than recomputed here, so that a change to the reflection
+     * fails this assertion instead of moving it along with the code -- the same
+     * discipline as the TSC_MAX_X literals in section 2.  The law and its
+     * measurement are pinned point by point in test_emit_mirrors_x() below. */
+    tscfake_record(seq[0][0], 1179, seq[0][2], expect);
+    tscfake_record(1, 1179, 200, expect + TSC_RECORD_LEN);          /* burst, frame 1 */
+    tscfake_record(1, 1179, 200, expect + 2 * TSC_RECORD_LEN);      /* burst, frame 2 */
+    tscfake_record(seq[4][0], 979, seq[4][2], expect + 3 * TSC_RECORD_LEN);
 
     n = read_exact(fd, got, (int)sizeof expect);
     CHECK(n == (int)sizeof expect, "expected %d bytes on the pipe, got %d",
@@ -165,12 +172,73 @@ static void test_emit_stream(void)
           n, TSC_RECORD_LEN);
     if (n == TSC_RECORD_LEN) {
         unsigned char rel[TSC_RECORD_LEN];
-        tscfake_record(0, 300, 200, rel);
+        tscfake_record(0, 979, 200, rel);
         CHECK(memcmp(got, rel, TSC_RECORD_LEN) == 0, "release record differs");
     }
 
     CHECK(tscfake_close(fd) == 0, "tscfake_close failed");
     CHECK(tscfake_is_fd(fd) == 0, "tscfake_is_fd still true after close");
+}
+
+/* --- 3b. the x reflection, which is the one measured quirk ------------------- */
+
+/* rbp acts at `POINT_LOGICAL_W - 1 - x` of the record it reads.  The evidence is
+ * the framebuffer, not the code: records written into the pipe rbp holds both
+ * ways (work/tap.py) made it select a sidebar cell drawn at x 8..50 for x=1229,
+ * load the deck-2 button drawn at 1152..1272 for x=90, and hit INFO drawn at
+ * 1180..1275 for x=42, while x=50 fell through the sidebar column (0..100) into
+ * the list and x=200 fell outside the deck-2 button.  Slope -1, intercept 1279.
+ *
+ * And the panel side is honest in the same session: with POINT_DEBUG=1 the
+ * operator's finger at raw (1874,1071) emitted logical (1248,792), the
+ * bottom-right corner -- docs/07's S3.2 table, whose "no mirroring" conclusion is
+ * about point_xform_abs() and is still true.  So the reflection is rbp's, it is
+ * undone in tscfake_emit(), and the two literals below are what stops anyone
+ * reading S3.2 alone from "fixing" it back.
+ *
+ * Each point is emitted as a release followed by a press, so both directions of
+ * the wire are covered (a release is one record, a press is the burst of two),
+ * and each gets its own y so the dedup cannot hide a record from the count. */
+static void test_emit_mirrors_x(void)
+{
+    /* x handed to tscfake_emit(), x that must appear on the wire. */
+    static const int pair[][2] = {
+        {    0, 1279 },   /* the UI's far left is the wire's highest x */
+        { 1279,    0 },
+        {   50, 1229 },   /* a sidebar cell is DRAWN here ... */
+        { 1229,   50 },   /* ... and was REACHED at only from here */
+        {   90, 1189 },   /* the deck-2 LOAD button, drawn 1152..1272 */
+    };
+    unsigned char got[3 * TSC_RECORD_LEN];
+    unsigned char exp[TSC_RECORD_LEN];
+    size_t i;
+    int fd;
+
+    fd = tscfake_open();
+    CHECK(fd >= 0, "tscfake_open failed for the reflection test");
+    if (fd < 0)
+        return;
+
+    for (i = 0; i < sizeof pair / sizeof pair[0]; i++) {
+        int in = pair[i][0], wire = pair[i][1], y = 100 + (int)i;
+
+        tscfake_emit(0, in, y);                        /* release: 1 record */
+        tscfake_emit(1, in, y);                        /* press: a burst of 2 */
+        CHECK(read_exact(fd, got, (int)sizeof got) == (int)sizeof got,
+              "x=%d: expected %d bytes on the wire", in, (int)sizeof got);
+
+        tscfake_record(0, wire, y, exp);
+        CHECK(memcmp(got, exp, TSC_RECORD_LEN) == 0,
+              "x=%d: the release carries %d, expected %d", in,
+              got[2] | (got[3] << 8), wire);
+        tscfake_record(1, wire, y, exp);
+        CHECK(memcmp(got + TSC_RECORD_LEN, exp, TSC_RECORD_LEN) == 0,
+              "x=%d: burst frame 1 is not the reflection", in);
+        CHECK(memcmp(got + 2 * TSC_RECORD_LEN, exp, TSC_RECORD_LEN) == 0,
+              "x=%d: burst frame 2 is not the reflection", in);
+    }
+
+    CHECK(tscfake_close(fd) == 0, "tscfake_close failed after the reflection test");
 }
 
 /* --- 4. the coordinate algebra --------------------------------------------- */
@@ -414,6 +482,7 @@ int main(void)
     test_record_layout();
     test_tsc_ioctls();
     test_emit_stream();
+    test_emit_mirrors_x();
     test_abs_sc_live4();
     test_abs_monitor();
     test_abs_degenerate();

@@ -1,12 +1,14 @@
 /*
- * tscfake.c — see tscfake.h. The record encoding, the fd table and the two
- * rbp-facing quirks (dedup, down-burst) are carried over from fbshim-tsc.c
- * unchanged; only the plumbing around them is new.
+ * tscfake.c — see tscfake.h. The record encoding, the fd table and the three
+ * rbp-facing quirks (dedup, down-burst, x reflection) are carried over from
+ * fbshim-tsc.c; only the plumbing around them is new, and the reflection is the
+ * one of the three that had to be measured rather than inherited.
  */
 #define _GNU_SOURCE
 #include "tscfake.h"
 #include "pointsrc.h"
 #include "fb_cursor.h"
+#include "point_xform.h"
 #include "syscalls.h"
 
 #include <errno.h>
@@ -46,10 +48,52 @@ static void push_record(const unsigned char *buf)
         (void)write(out_pipe[1], buf, TSC_RECORD_LEN);
 }
 
+/* --- the third consumer quirk: rbp reflects x -------------------------------
+ *
+ * rbp acts at `POINT_LOGICAL_W - 1 - x` of the x this file writes, and takes y
+ * as written. So the record carries the *reflection* of the position the pointer
+ * is at, and rbp lands on the pixel the finger is on.
+ *
+ * Measured on the unit 2026-09-27 by writing known records into the pipe rbp
+ * holds both ways (work/tap.py), and reading the result off the framebuffer:
+ *
+ *   wrote x=1229 -> rbp selected the sidebar cell drawn at x 8..50 (BPM)
+ *   wrote x=  90 -> rbp loaded deck 2, whose LOAD button is drawn at 1152..1272
+ *   wrote x=  42 -> rbp hit INFO, drawn at 1180..1275
+ *   wrote x=  50 -> fell *through* the sidebar column (x 0..100) into the list
+ *   wrote x= 200 -> fell outside the LOAD 2 button
+ *
+ * That pins slope -1 and intercept 1279, i.e. `1279 - x`, at five points whose
+ * hit rectangles bracket it. It is NOT the panel and NOT point_xform_abs(): with
+ * POINT_DEBUG=1 the operator's own finger at raw (1874,1071) emitted logical
+ * (1248,792) -- the bottom-right corner, honest, exactly as docs/07's S3.2 table
+ * records. The reflection therefore happens inside rbp on the way in, and is
+ * undone here rather than in point_xform.c because that file describes the
+ * *device's* axes: this is a property of the consumer, which is the same reason
+ * the dedup and the press burst live here.
+ *
+ * It applies to both pointer kinds by construction, not by choice: rbp cannot
+ * tell them apart, because an absolute panel and a relative mouse both arrive as
+ * records on this one pipe and nothing in the record says which produced it.
+ * (Which is why the correction cannot go in point_xform_rel()'s dx either -- that
+ * would fix a mouse's click and, since the arrow is drawn from the same variable,
+ * leave it pointing at the mirror of the pixel the click lands on.)
+ *
+ * Reflecting here, at the wire, and not in pointsrc, keeps pointsrc's own idea of
+ * where the pointer is honest -- which is what the visible arrow is drawn from
+ * (fb_cursor.c) and what pointsrc_status() reports.
+ */
+int tscfake_wire_x(int x)
+{
+    return (POINT_LOGICAL_W - 1) - x;
+}
+
 void tscfake_emit(int down, int x, int y)
 {
     static int last_down = -1, last_x = 0, last_y = 0;
     unsigned char buf[TSC_RECORD_LEN];
+
+    x = tscfake_wire_x(x);
 
     if (down == last_down && x == last_x && y == last_y)
         return;

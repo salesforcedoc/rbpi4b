@@ -334,8 +334,14 @@ static void read_loop_abs(int fd, const struct point_xform *x)
                 st_cursor_y = ly;
                 tscfake_emit(down, lx, ly);
                 if (log_debug)
-                    pointsrc_log("pointsrc: abs raw=(%d,%d) logical=(%d,%d) down=%d",
-                         rx, ry, lx, ly, down);
+                    /* Both ends of the transform, because they are not the same
+                     * value: tscfake_emit reflects x (see tscfake.h's third
+                     * quirk), so `wire` is what rbp consumes and `logical` is
+                     * where the finger is. The raw->logical fit is checked
+                     * against the middle pair; a tap landing on the wrong side
+                     * of the screen is read from the last. */
+                    pointsrc_log("pointsrc: abs raw=(%d,%d) logical=(%d,%d) wire=(%d,%d) down=%d",
+                         rx, ry, lx, ly, tscfake_wire_x(lx), ly, down);
             }
             break;
         default:
