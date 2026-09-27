@@ -237,8 +237,13 @@ pcmprobe: ../../tools/pcmprobe.c
 # it pins -- that a restore only puts back a pixel that is still ours -- is
 # exactly the kind of thing that would be rewritten in a copy. Its surface is a
 # local array: no framebuffer, no thread, no device.
+# test_cursor_dev.c is the same seam as test_evdev applied to the pointer's
+# *output* side, and it is fb_cursor.c's first coverage of any kind: test_cursor
+# pins the glyph and stops exactly where the device begins. The production
+# fb_cursor.o is linked and the kernel is scripted, so what is pinned is the retry
+# and the rectangle -- see that file's header.
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
-         test_evdev
+         test_evdev test_cursor_dev
 
 test_point: test_point.c tscfake.c point_xform.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -343,6 +348,31 @@ test_evdev.o: test_evdev.c evdev_io.h
 test_cursor: test_cursor.c cursor_paint.c cursor_paint.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_cursor.c cursor_paint.c
+
+# fb_cursor.o, cursor_paint.o and point_xform.o are the PRODUCTION objects (the
+# generic %.o rule above), so this cannot pass against a version of the module
+# that does not ship -- which is the point, because what it pins is a behaviour
+# (retry forever rather than exit; draw inside the picture, not the page) that a
+# copy of the module would be free to get right on its own. test_cursor_dev.c
+# supplies pointsrc_cursor() and pointsrc_log(), which is the whole of
+# pointsrc.c's interface to fb_cursor.c, so no pointer device is opened.
+#
+# --wrap=usleep as well as --wrap=syscall, unlike test_evdev: the module's sleep
+# is its only tick and the wrapped one is what stops the scripted thread. And
+# NOT --wrap=clock_gettime, also unlike test_evdev: nothing fb_cursor.c,
+# cursor_paint.c or point_xform.c touches reads a clock, so a virtual one would
+# be machinery with nothing to hold.
+CUR_TEST_OBJS := test_cursor_dev.o fb_cursor.o cursor_paint.o point_xform.o
+
+test_cursor_dev: $(CUR_TEST_OBJS)
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ $(CUR_TEST_OBJS) \
+	    -Wl,--wrap=syscall -Wl,--wrap=usleep -lpthread -lm -lc
+
+test_cursor_dev.o: test_cursor_dev.c fb_cursor.h fbdev.h cursor_paint.h \
+                   point_xform.h pointsrc.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -c -o $@ $<
 
 test: $(TESTS)
 	@for t in $(TESTS); do echo "-- $$t"; qemu-arm ./$$t || exit 1; done

@@ -37,7 +37,11 @@
 #include <sys/mman.h>          /* PROT_READ/PROT_WRITE/MAP_SHARED for real_mmap */
 #include <unistd.h>
 
-#define FB_DEV "/dev/fb0"
+/* The fb the driver opens, and so the fb the arrow must be drawn on. It was
+ * hard-coded here while rb.conf, start-rb.sh and fbdev.c all carried the knob
+ * end-to-end, which made RB_FB_DEV=/dev/fb1 move the driver and leave the arrow
+ * painting into fb0. From RB_FB_DEV, which SHIM_VARS exports as FB_DEV. */
+#define FB_DEV_DEFAULT "/dev/fb0"
 /* 0.5 ms, i.e. ~33x rbp's own frame rate, and the measurement is the reason.
  *
  * The arrow is composited into the page rbp paints, so it is erased once per rbp
@@ -64,34 +68,55 @@
  * which is about the granularity of nanosleep on this target anyway. */
 #define CURSOR_US_MIN 50L
 
+/* How long to wait between attempts while there is no usable framebuffer.  A
+ * monitor plugged in long after boot -- or one whose fb the kernel tore down and
+ * rebuilt -- must not cost the arrow for the life of the process, and 5 s is
+ * slower than any of those transitions and faster than an impatient operator. */
+#define CURSOR_RETRY_US 5000000L
+
 struct cursor_state {
     void *pix;
     int fb_w, fb_h, bpp;
     int pitch;                                  /* in pixels, not bytes */
+    /* Where the present path puts the UI inside that fb. On a panel that is
+     * already the logical 1280x800 this is the whole page -- dw==fb_w, dh==fb_h,
+     * bx==by==0 -- so every coordinate below is the identity and this file draws
+     * exactly what it drew before it knew about other panels. Computed once, by
+     * map_fb(), out of point_fit(). */
+    int dw, dh, bx, by;
     unsigned int saved[CURSOR_W * CURSOR_H];
     int drawn, x, y, pressed;
 };
 
 static struct cursor_state g;
 
-static int map_fb(struct cursor_state *s)
+/* Open and map the fb, and work out the rectangle the UI occupies inside it.
+ *
+ * `loud` is what keeps a persistent failure from filling the log one line per
+ * 5 s for the life of the session: the caller passes it true for the first
+ * attempt and then once a minute, and every diagnostic below is gated on it.
+ * The return value is what the caller retries on, so silence here never means
+ * success. */
+static int map_fb(struct cursor_state *s, const char *dev, int loud)
 {
     struct fb_var_screeninfo var;
     struct fb_fix_screeninfo fix;
     long len;
-    int fd;
+    int fd, stretch;
 
-    fd = real_open(FB_DEV, O_RDWR, 0);
+    fd = real_open(dev, O_RDWR, 0);
     if (fd < 0) {
-        pointsrc_log("cursor: open %s: %s (no pointer will be drawn)\n",
-                     FB_DEV, strerror(errno));
+        if (loud)
+            pointsrc_log("cursor: open %s: %s (no pointer will be drawn yet)\n",
+                         dev, strerror(errno));
         return -1;
     }
     memset(&var, 0, sizeof var);
     memset(&fix, 0, sizeof fix);
     if (real_ioctl(fd, FBIOGET_VSCREENINFO, &var) != 0 ||
         real_ioctl(fd, FBIOGET_FSCREENINFO, &fix) != 0) {
-        pointsrc_log("cursor: %s is not a framebuffer (%s)\n", FB_DEV, strerror(errno));
+        if (loud)
+            pointsrc_log("cursor: %s is not a framebuffer (%s)\n", dev, strerror(errno));
         real_close(fd);
         return -1;
     }
@@ -101,14 +126,16 @@ static int map_fb(struct cursor_state *s)
      * refused rather than guessed at, because a wrong pitch or format draws
      * stripes over the UI instead of an arrow. */
     if (var.bits_per_pixel != 16 && var.bits_per_pixel != 32) {
-        pointsrc_log("cursor: %d bpp is not a format this can draw in\n",
-                     var.bits_per_pixel);
+        if (loud)
+            pointsrc_log("cursor: %d bpp is not a format this can draw in\n",
+                         var.bits_per_pixel);
         real_close(fd);
         return -1;
     }
     if (var.xres == 0 || var.yres == 0 || fix.line_length == 0) {
-        pointsrc_log("cursor: fb geometry is %ux%u pitch %u\n",
-                     var.xres, var.yres, fix.line_length);
+        if (loud)
+            pointsrc_log("cursor: fb geometry is %ux%u pitch %u\n",
+                         var.xres, var.yres, fix.line_length);
         real_close(fd);
         return -1;
     }
@@ -126,19 +153,58 @@ static int map_fb(struct cursor_state *s)
     real_close(fd);
     if (s->pix == (void *)-1) {
         s->pix = NULL;
-        pointsrc_log("cursor: mmap %s (%ld bytes): %s\n", FB_DEV, len, strerror(errno));
+        if (loud)
+            pointsrc_log("cursor: mmap %s (%ld bytes): %s\n", dev, len, strerror(errno));
         return -1;
     }
 
-    pointsrc_log("cursor: %dx%d %d bpp pitch %d at %p; drawing a pointer\n",
-                 s->fb_w, s->fb_h, s->bpp, s->pitch, s->pix);
+    /* The rectangle the present path blits the UI into, so the arrow follows the
+     * picture instead of spreading across the whole page. It is point_fit() -- the
+     * same rule as the driver's fbdev_present_fit(), and see that header for why
+     * the two copies must move together -- and on a matching fb it is the identity.
+     *
+     * GEOMETRY decides it, deliberately, and not the mode name. The mode the
+     * driver actually presents with is not visible from here: rb.conf ships
+     * DFB_PRESENT=off and the driver upgrades that to its scale rung by itself
+     * when the fb disagrees with the shim's 1280x800, so reading the env would
+     * say "off" on precisely the panel that needs the fit. Geometry gives the
+     * right answer for everything that is reached automatically, because each of
+     * those puts the picture in this rectangle on a mismatched fb and in the
+     * whole page on a matching one.
+     *
+     * What it does not give is the right rectangle for an explicitly selected
+     * letterbox, crop or rotate on a mismatched fb: those have rectangles of their
+     * own, and the arrow can land outside the picture under them. Nothing selects
+     * them -- the automatic upgrade never does -- and the arrow was already wrong
+     * under them, so that is a known limitation rather than a regression. Doing it
+     * properly means the driver publishing its choice somewhere this process can
+     * read, which is a larger change than the arrow is worth.
+     *
+     * DFB_PRESENT_FIT is the one thing here that is a policy and not a geometry:
+     * "stretch" makes the driver fill both axes, which is the whole page, and the
+     * arrow has to be told. */
+    stretch = strcmp(env_str("DFB_PRESENT_FIT", "fit"), "stretch") == 0;
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, s->fb_w, s->fb_h, stretch,
+              &s->dw, &s->dh, &s->bx, &s->by);
+
+    if (loud)
+        pointsrc_log("cursor: %dx%d %d bpp pitch %d at %p; picture %dx%d at %d,%d%s; "
+                     "drawing a pointer\n",
+                     s->fb_w, s->fb_h, s->bpp, s->pitch, s->pix,
+                     s->dw, s->dh, s->bx, s->by, stretch ? " (stretched)" : "");
     return 0;
 }
 
-/* Logical pointer position -> a pixel on this fb. The two agree exactly on the
- * measured Pi (the forced mode makes the fb rbp's logical surface), but the
- * scale is applied anyway so a panel that came up at 1280x720 puts the arrow
- * where the click lands rather than 40 rows below it. */
+/* Logical pointer position -> a pixel inside the picture rectangle. `real` is the
+ * rectangle's width or height (g.dw/g.dh), not the page's, so the result is
+ * relative to the picture's top-left and the caller adds g.bx/g.by. On the
+ * measured Pi the rectangle is the whole page and this is the identity; on a
+ * panel that came up at another size it is what puts the arrow where the click
+ * lands rather than a proportional distance off it.
+ *
+ * Clamping to real-1 is the second half of the confinement: the logical position
+ * is already clamped to the logical space, but a rounding that landed on the
+ * last row/column of the picture must not spill into the bar past it. */
 static int scale_to(int v, int logical, int real)
 {
     int r = (int)((long)v * real / logical);
@@ -151,7 +217,9 @@ static int scale_to(int v, int logical, int real)
 
 static void *cursor_thread(void *arg)
 {
+    const char *dev;
     long period_us;
+    int attempts;
     (void)arg;
 
     /* Seconds are too coarse and integers too blunt for this one: the useful
@@ -163,17 +231,41 @@ static void *cursor_thread(void *arg)
     if (period_us < CURSOR_US_MIN)
         period_us = CURSOR_US_MIN;
 
-    if (map_fb(&g) != 0)
-        return NULL;
+    dev = env_str("FB_DEV", FB_DEV_DEFAULT);
+
+    /* Retry rather than exit, which is pointsrc.c's rule and for the same reason:
+     * a monitor that appears long after boot, or a framebuffer the kernel tears
+     * down and rebuilds on a hotplug, must not cost the arrow for the life of the
+     * process. There is no second chance -- fb_cursor_start() has already set
+     * `started`, so nothing will call this again.
+     *
+     * The log is loud on the first attempt and then once a minute (60 x 5 s), so a
+     * permanently absent fb costs one line a minute rather than one per attempt.
+     * Note this is NOT what recovers a geometry change: that is display-watch.sh's
+     * restart, because rbp's own present path holds the same stale geometry and a
+     * correct arrow over a sheared picture would not be a fix. */
+    attempts = 0;
+    while (map_fb(&g, dev, attempts == 0 || attempts % 60 == 0) != 0) {
+        attempts++;
+        usleep(CURSOR_RETRY_US);
+    }
 
     for (;;) {
+        /* The picture's top-left inside the page. Nothing else is needed to keep
+         * the arrow inside the picture: cursor_paint() and cursor_restore() clamp
+         * their x and y to the width and height they are handed, so giving them
+         * the rectangle instead of the page confines the arrow to it -- they never
+         * have to know that bars exist. */
+        unsigned char *base = (unsigned char *)g.pix
+                              + (size_t)g.by * (size_t)g.pitch * (size_t)(g.bpp / 8)
+                              + (size_t)g.bx * (size_t)(g.bpp / 8);
         int lx, ly, down, fx, fy;
 
         if (!pointsrc_cursor(&lx, &ly, &down)) {
             /* Nothing relative attached. If an arrow is still on the screen —
              * the mouse was just unplugged — take it back off. */
             if (g.drawn) {
-                cursor_restore(g.pix, g.pitch, g.fb_w, g.fb_h, g.bpp,
+                cursor_restore(base, g.pitch, g.dw, g.dh, g.bpp,
                                g.x, g.y, g.pressed, g.saved);
                 g.drawn = 0;
             }
@@ -181,14 +273,14 @@ static void *cursor_thread(void *arg)
             continue;
         }
 
-        fx = scale_to(lx, POINT_LOGICAL_W, g.fb_w);
-        fy = scale_to(ly, POINT_LOGICAL_H, g.fb_h);
+        fx = scale_to(lx, POINT_LOGICAL_W, g.dw);
+        fy = scale_to(ly, POINT_LOGICAL_H, g.dh);
 
         /* A move (or a press, which inverts the arrow — the only click feedback
          * there is) has to take the old arrow off first: its cells are at the old
          * position, and the restore is what puts rbp's pixels back there. */
         if (g.drawn && (fx != g.x || fy != g.y || down != g.pressed))
-            cursor_restore(g.pix, g.pitch, g.fb_w, g.fb_h, g.bpp,
+            cursor_restore(base, g.pitch, g.dw, g.dh, g.bpp,
                            g.x, g.y, g.pressed, g.saved);
 
         /* Then paint, every tick, whether or not anything moved. This is the
@@ -200,7 +292,7 @@ static void *cursor_thread(void *arg)
          * reliable than asking "is the arrow still there?" first, because that
          * question has no trustworthy answer: our outline is black, and so is a
          * good deal of rbp's UI (see cursor_paint.h). */
-        cursor_paint(g.pix, g.pitch, g.fb_w, g.fb_h, g.bpp,
+        cursor_paint(base, g.pitch, g.dw, g.dh, g.bpp,
                      fx, fy, down, g.saved);
         if (!g.drawn)
             pointsrc_log("cursor: first paint at (%d,%d)", fx, fy);

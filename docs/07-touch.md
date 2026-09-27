@@ -137,6 +137,14 @@ same reason: a pixel is only put back where the buffer still holds exactly what
 `paint()` wrote there, so rbp's fresh repaints are never pasted over with stale
 pixels. Both rules are pinned by `test_cursor.c` under `qemu-arm`.
 
+The *device* half of the arrow — where it is allowed to live — is pinned
+separately, by `test_cursor_dev`, which links the shipping `fb_cursor.o` against a
+faked kernel and asserts that on a panel that is not 1280×800 the arrow is mapped
+into the picture rectangle and never into the bars around it. That rectangle is
+the same one the present path draws into: `point_xform.c`'s `point_fit()`
+transcribes `fbdev_present_fit()`, and `tools/fit-crosscheck.sh` is what keeps the
+two transcriptions equal.
+
 `RB_POINT_CURSOR=0` turns the arrow off. That is the control for any "is the arrow
 what I am seeing?" question — with it off, a scan of `/dev/fb0` finds no arrow at
 all, which is how the feature was verified rather than merely eyeballed.

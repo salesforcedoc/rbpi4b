@@ -33,7 +33,8 @@ The SC Live 4's panel was a fixed 800×1280 portrait 32 bpp fb, so the patch
 could commit to one transform. A Pi drives whatever monitor is attached, so the
 driver has to *decide* what to do from the geometry and format it finds:
 `off` (no conversion), `convert` (565→8888), `letterbox` (1:1, centred, bars),
-`crop` (1:1, truncated) and the old `rotate`, selected by `RB_DFB_PRESENT`.
+`crop` (1:1, truncated), `scale` (uniform resample, centred, bars) and the old
+`rotate`, selected by `RB_DFB_PRESENT`.
 
 **As of this tree the generalization is installed**, not just written up. The
 measurements it was gated on have been taken, and they close the geometry
@@ -42,8 +43,30 @@ format), and after the `cmdline.txt` recipe the fb is **1280×800 with a stride
 of 2560** — the same width, height and stride as `rbp`'s surface. The connector's
 mode list offered nothing above 1280×720, but a `video=` mode is programmed
 whether or not the list names it, and the panel took it: so `crop`, `scale`,
-`letterbox` and `convert` are all dead on this target, and `RB_DFB_PRESENT` never
-needs to leave `off`.
+`letterbox` and `convert` are all dead **on this panel**, and `RB_DFB_PRESENT`
+never needs to leave `off` here.
+
+That last sentence is about the sink, not the code, and the distinction is the
+one this port now turns on. A monitor that is not 1280×800 is a different
+monitor, not a different build: `scale` is written, the driver **upgrades `off`
+to it by itself** when the real fb disagrees with the shim's logical geometry
+(under `off` the layer surface *is* the fb page, so a mismatch is a sheared image
+on a larger fb and no UI at all on a smaller one — deterministic, not cosmetic),
+and a software scaler needs a frame budget because it runs on rbp's `SCHED_FIFO
+98` render thread. `display-watch.sh` handles the other half of the operator's
+request — a monitor swapped for one of a different size mid-session — by
+comparing the framebuffer's geometry against the one rbp was launched with and
+restarting the unit when it changes. **The display half of that is no longer only
+design: S10.1–S10.4 ran on 2026-09-26**, and a 1280×720, a 960×600, an 800×600 and
+a 1920×1080 panel each came up with the whole UI, correctly placed, the last
+without anyone selecting anything — at 1.1–3.4 ms of a 16.67 ms frame, which is
+why the shipped budget stands. What those rows also found is a **downscale**
+losing single-pixel rules and thin glyph strokes at 0.75× and 0.625× (S10.2), which
+is not fixed and is a decision rather than a defect. **The hot-swap half and the
+two remaining modes have not been run**: S10.0, S10.5–S10.10 in
+[13](13-raspberrypi4.md#s10--the-display-drills) are still the rows that settle
+those, and
+[06](06-display.md#a-mismatch-selects-the-rung-by-itself) is the design.
 
 What the target did need was **not** a transform but a page decision. The fb has
 a **single page** (`yres_virtual == yres`, `smem_len == 2560 × 800`) while the

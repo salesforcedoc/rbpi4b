@@ -6,6 +6,7 @@ Two kinds of tool live here:
 |---|---|---|---|
 | [`patch-rbp/`](patch-rbp/) | workstation | Python | apply the interoperability patches to a stock `rbp` |
 | [`build-directfb/`](build-directfb/) | workstation | C / patch | patched DirectFB 1.4.16 (core + fbdev + modules) |
+| [`fit-crosscheck.sh`](fit-crosscheck.sh) | workstation | shell + C | prove the driver's copy and the shim's copy of the fit rule still agree |
 | [`fbdump.c`](fbdump.c) | **the Pi** | C | dump `/dev/fb0` geometry/format + say what it means for the present path |
 | [`evdevdump.c`](evdevdump.c) | **the Pi** | C | enumerate input devices; find the pointer and its axis algebra |
 | [`pcmprobe.c`](pcmprobe.c) | **inside the chroot on the Pi**, or a workstation under `qemu-arm` | C | name ALSA's `snd_pcm_format_t` values, and list a card's accepted formats by name |
@@ -37,6 +38,39 @@ The `getPcController()` patch is applied as a second stage by
 Contains `directfb-full.diff`, the complete patch against DirectFB 1.4.16. No
 upstream DirectFB sources are shipped; fetch them and apply the diff, then
 install to `work/dfb` (see the [README](build-directfb/README.md)).
+
+## `fit-crosscheck.sh` — the two copies of one rule
+
+Where the logical 1280x800 surface lands inside the real framebuffer is decided
+by `fbdev_present_fit()` in the DirectFB fbdev driver and by `point_fit()` in
+`scripts/shims/point_xform.c` — the same arithmetic twice, because the driver is
+cross-built for the target and the shim is a separate `LD_PRELOAD` build, so the
+two cannot share a header. They are held together by comments saying *a change to
+one is a change to both*, which is a promise rather than a check, and the drift it
+lets through is invisible on the unit as shipped: on a 1280x800 panel both
+functions return the identity, so a divergence shows up only on the mismatched
+panel the fit exists for — as an arrow in the wrong place on a screen the operator
+has just swapped in.
+
+```bash
+sh tools/fit-crosscheck.sh        # 7.7M sizes, about a second, no target needed
+```
+
+It extracts the driver's copy from the **tracked** `directfb-full.diff` — never
+from `work/dfb-src`, which `work/dfb-build.sh` rewrites from that diff at step 1,
+so reading it would test whatever was last built on that machine — compiles it
+beside the shim's real source, and sweeps both over six source shapes and
+framebuffers from 16x16 to 4096x2400 in both fit and stretch. A divergence is a
+non-zero exit that names both functions and the diff regeneration step.
+
+It fails loudly when it cannot extract rather than skipping: a guard that quietly
+does nothing when a path is missing keeps the build green while the reader
+believes the two copies were compared. Its limits are worth stating — it checks
+the arithmetic, not that the driver *calls* it correctly or that the cursor uses
+the rectangle it returns. Those are pinned by each side's own log line: the
+driver prints the rectangle in its one-shot `PRESENT:` line
+(`/tmp/dfbdig9.log`) and `fb_cursor.c` logs its own, so the two numbers can be
+compared on a mismatched panel.
 
 ## `fbdump` — the first thing to run on a new target
 

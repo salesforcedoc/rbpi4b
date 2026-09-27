@@ -322,6 +322,93 @@ static void test_rel(void)
     set_flag("POINT_SWAP_XY", NULL);
 }
 
+/* --- 5. the fit rectangle (point_fit) --------------------------------------- */
+
+/* Where the UI lands inside a panel that is not the logical 1280x800.  The
+ * arithmetic is a SECOND COPY of the present path's fbdev_present_fit() in
+ * work/dfb-src/systems/fbdev/fbdev.c -- a different build, no shared header --
+ * so these numbers are pinned here to make a drift a failing test rather than a
+ * cursor that draws in the wrong place.  The expected values are also the worked
+ * table in the plan and what docs/13's S10 rows quote. */
+static void test_fit(void)
+{
+    int dw, dh, bx, by;
+
+    /* A panel that IS the logical size: the identity, which is the case the unit
+     * runs today and must stay byte-for-byte what it was. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 1280, 800, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 1280 && dh == 800 && bx == 0 && by == 0,
+          "identity fit -> %dx%d at %d,%d", dw, dh, bx, by);
+
+    /* 720p, the panel most likely to be swapped in: 0.9x, 64 columns each side.
+     * Here the HEIGHT binds and must come out exactly 720 -- a floored second
+     * rounding gives 719, which is one row of the UI not shown and a one-pixel
+     * bar on the bottom edge only. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 1280, 720, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 1152 && dh == 720 && bx == 64 && by == 0,
+          "720p fit -> %dx%d at %d,%d, expected 1152x720 at 64,0", dw, dh, bx, by);
+
+    /* The logical 1.6 aspect at 0.75: it fills exactly, so no bars at all. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 960, 600, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 960 && dh == 600 && bx == 0 && by == 0,
+          "960x600 fit -> %dx%d at %d,%d, expected the whole panel", dw, dh, bx, by);
+
+    /* 4:3, where the WIDTH binds and the bars are horizontal. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 800, 600, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 800 && dh == 500 && bx == 0 && by == 50,
+          "800x600 fit -> %dx%d at %d,%d, expected 800x500 at 0,50", dw, dh, bx, by);
+
+    /* An upscale, same code path -- and the one a 1080p TV takes. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 1920, 1080, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 1728 && dh == 1080 && bx == 96 && by == 0,
+          "1080p fit -> %dx%d at %d,%d, expected 1728x1080 at 96,0", dw, dh, bx, by);
+
+    /* 16:10 is the logical aspect, so an upscale that fills both axes. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 1920, 1200, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 1920 && dh == 1200 && bx == 0 && by == 0,
+          "1920x1200 fit -> %dx%d at %d,%d, expected the whole panel", dw, dh, bx, by);
+
+    /* stretch ignores the aspect and fills both axes, so there is no bar by
+     * construction.  It is also what makes a same-size panel the identity. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 1280, 720, 1, &dw, &dh, &bx, &by);
+    CHECK(dw == 1280 && dh == 720 && bx == 0 && by == 0,
+          "stretch fit -> %dx%d at %d,%d, expected the whole panel", dw, dh, bx, by);
+
+    /* A degenerate panel must not divide by zero, and must not hand back a
+     * negative width: a fb read while its mode is being torn down can look like
+     * this, and a negative dw would make the cursor paint walk backwards. */
+    point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, 0, 0, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 0 && dh == 0 && bx == 0 && by == 0,
+          "zero fb -> %dx%d at %d,%d", dw, dh, bx, by);
+    point_fit(0, 0, 1280, 800, 0, &dw, &dh, &bx, &by);
+    CHECK(dw == 0 && dh == 0 && bx == 0 && by == 0,
+          "zero source -> %dx%d at %d,%d", dw, dh, bx, by);
+
+    /* The invariant the floored step exists to guarantee, swept rather than
+     * spot-checked: the rectangle may never be wider or taller than the fb (the
+     * present path refuses such a blit outright, and the cursor would paint past
+     * the end of its mapping), may never be empty, and must sit inside the fb.
+     * Aggregated into one CHECK so the sweep does not inflate the check count. */
+    {
+        int fw, fh, bad = 0;
+        char msg[160] = "";
+
+        for (fw = 320; fw <= 2600 && !bad; fw += 7) {
+            for (fh = 200; fh <= 1600; fh += 11) {
+                point_fit(POINT_LOGICAL_W, POINT_LOGICAL_H, fw, fh, 0, &dw, &dh, &bx, &by);
+                if (dw < 1 || dh < 1 || dw > fw || dh > fh || bx < 0 || by < 0 ||
+                    bx + dw > fw || by + dh > fh) {
+                    snprintf(msg, sizeof msg, "fb %dx%d -> %dx%d at %d,%d",
+                             fw, fh, dw, dh, bx, by);
+                    bad = 1;
+                    break;
+                }
+            }
+        }
+        CHECK(bad == 0, "fit escaped its framebuffer: %s", msg);
+    }
+}
+
 int main(void)
 {
     test_record_layout();
@@ -331,6 +418,7 @@ int main(void)
     test_abs_monitor();
     test_abs_degenerate();
     test_rel();
+    test_fit();
 
     printf("test_point: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

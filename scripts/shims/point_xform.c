@@ -110,3 +110,36 @@ void point_xform_rel(const struct point_xform *x, int dx, int dy,
     *cursor_x = clamp_int((long)*cursor_x + mx, 0, POINT_LOGICAL_W - 1);
     *cursor_y = clamp_int((long)*cursor_y + my, 0, POINT_LOGICAL_H - 1);
 }
+
+void point_fit(int logical_w, int logical_h, int fb_w, int fb_h, int stretch,
+               int *dw, int *dh, int *bx, int *by)
+{
+    /* The header says why this duplicates fbdev_present_fit(); this is a
+     * deliberate transcription of it, down to the order of the operations, so
+     * that a reader diffing the two sees structure rather than arithmetic. */
+    if (logical_w <= 0 || logical_h <= 0 || fb_w <= 0 || fb_h <= 0) {
+        *dw = *dh = *bx = *by = 0;
+        return;
+    }
+
+    if (stretch) {
+        *dw = fb_w;
+        *dh = fb_h;
+    } else {
+        unsigned long long s = ((unsigned long long)fb_w << 16) / (unsigned)logical_w;
+        unsigned long long t = ((unsigned long long)fb_h << 16) / (unsigned)logical_h;
+
+        if (t < s)
+            s = t;                                 /* whichever axis binds */
+
+        *dw = (int)(((unsigned long long)logical_w * s + 32768) >> 16);
+        *dh = (int)(((unsigned long long)logical_h * s + 32768) >> 16);
+        if (*dw < 1)
+            *dw = 1;
+        if (*dh < 1)
+            *dh = 1;
+    }
+
+    *bx = (fb_w - *dw) / 2;
+    *by = (fb_h - *dh) / 2;
+}

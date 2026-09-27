@@ -350,12 +350,24 @@ Every SONAME must be `.so.0`, and no NEEDED entry may still say `.so.6`.
 * Do not set `layer-size` in `directfbrc` (historically caused a 2×/half-width
   bug); do not rely on `layer-rotate` (unimplemented).
 * The present mode is read from `DFB_PRESENT` (`off`/`convert`/`letterbox`/
-  `crop`/`rotate`) in `system_initialize`, and the rotation direction from
+  `crop`/`scale`/`rotate`) in `system_initialize`, and the rotation direction from
   `DFB_ROTATE` (`left`/`right`/`180`/`off`), which still means `rotate` plus its
   angle — both for the launcher that has always set it and for anyone who
   learned it here. `rotate` on a fb that is not 32 bpp is refused with a log
-  line, because its loops store 4-byte pixels; `scale` is not implemented and
-  says so.
+  line, because its loops store 4-byte pixels.
+* `scale` resamples the logical surface into the fb — aspect-fit and centred, or
+  stretched with `DFB_PRESENT_FIT=stretch` — and its rectangle comes from one
+  helper, `fbdev_present_fit()`, which the one-shot `PRESENT:` line also calls, so
+  the drawn rectangle and the logged one cannot disagree. An exact fit falls
+  through to the 1:1 body rather than resampling by 1.0. It also selects itself:
+  when `DFB_PRESENT` is `off` (the default) and the real fb disagrees with the
+  shim's logical geometry, `off` cannot present at all — a sheared image on a
+  larger fb, no UI on a smaller one — so the driver upgrades to `scale`, or to
+  `convert` when only the pixel format differs. `DFB_PRESENT_AUTO=0` disables
+  that, and on a fb that matches the shim the branch is dead by construction.
+  `DFB_PRESENT_PX_BUDGET` (default 2,600,000 weighted output pixels) and
+  `DFB_PRESENT_SKIP` bound what the resample may cost per frame; both are in
+  [06's present path](../../docs/06-display.md#a-mismatch-selects-the-rung-by-itself).
 * The framebuffer path can come from `FB_DEV` as well: `dfb_config->fb_device`
   (the `fbdev=` option) still wins, then `FB_DEV`, then `FRAMEBUFFER`, then
   `/dev/fb0`. rblive4 exports it from `rb.conf`'s `RB_FB_DEV`.
@@ -377,7 +389,11 @@ them a throughput bug if it stays on a hot path:
   `/tmp`, and are the only evidence available when a modeset or a driver probe
   fails on a target nobody has tried yet. `src/core/local_surface_pool.c`'s
   two-shot `localsurf.dump` (guarded by `static int dumps`) is in this class:
-  two writes, then never again.
+  two writes, then never again. The `scale` rung's two added lines are also in
+  it, and each fires exactly once: the upgrade notice when `off` is replaced, and
+  the frame average at the 300th present. The frame *timing* is the one thing
+  here that touches a hot path, and it is paid only under `PRESENT_SCALE` — the
+  `off` path, which is the verified configuration, reads no clock at all.
 * **Removed — anything that runs per frame, per input event, or writes a
   whole surface.** In particular `primaryFlipRegion()` used to `fwrite` the
   ~6 MB triple buffer to `/tmp/rot_surface.dump` on *every flip*, and
