@@ -1,7 +1,8 @@
 #!/bin/sh
 # lib.sh — shared pieces of the rblive4 device scripts.
 #
-# Sourced by fix-dev.sh, start-rb.sh and usb-watch.sh. Worth a file of its own
+# Sourced by fix-dev.sh, start-rb.sh, usb-watch.sh and display-watch.sh. Worth a
+# file of its own
 # because two things were previously duplicated in all three, in slightly
 # different forms — which is how this repo ended up with two subtly different
 # copies of the same dangerous `ps w | awk` process match:
@@ -67,10 +68,14 @@ rb_require_root() {
 
 # Sanity-check RB_CHROOT before anything destructive uses it.
 #
-# fix-dev.sh runs `rm -rf "$RB_CHROOT/dev"` and then mounts on top of it. With an
-# empty or relative RB_CHROOT that statement is `rm -rf /dev` — so the check is
-# not tidiness, it is the difference between a boot-time script and a wiped
-# device tree. Require an absolute path of at least two components that exists.
+# Every path these scripts touch is derived from RB_CHROOT, and fix-dev.sh
+# `mount --bind`s over $RB_CHROOT/dev. With an empty or relative RB_CHROOT that
+# target is /dev itself -- and fix-dev.sh used to `rm -rf` it first, which on
+# 2026-09-27 emptied a live unit's device tree when the umount in front of it
+# failed (that rm -rf is gone; the comment at the line records what it did). The
+# check is not tidiness: this whole tree is one bad variable away from the
+# filesystem root. Require an absolute path of at least two components that
+# exists.
 rb_require_chroot() {
     case "$RB_CHROOT" in
         /*/*) ;;

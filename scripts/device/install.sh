@@ -123,8 +123,11 @@ fi
 
 # The launcher scripts live at the deploy root on the device, next to rb.conf,
 # matching how they were laid out on the previous target. lib.sh is required —
-# all three scripts source it for rb.conf loading and the /proc process lookup.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh rb.conf; do
+# all four scripts source it for rb.conf loading and the /proc process lookup.
+# The list is explicit rather than a glob: this directory also holds install.sh
+# itself, plus README.md and the build-side inputs, none of which belong on the
+# unit.
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh boot-trim.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
@@ -262,6 +265,24 @@ if [ ! -d /dev/input ] || [ -z "$(ls /dev/input 2>/dev/null)" ]; then
   tools/evdevdump --list once something is attached to find its node.'
 fi
 
+# --- boot trim --------------------------------------------------------------
+#
+# The first thing in this tree to edit /boot/firmware rather than print a recipe
+# for someone to paste, and the place the boot-time changes are carried. It sits
+# after the kernel-interface checks above on purpose: an operator should see a
+# missing /dev/fb0 or /dev/snd/seq complaint BEFORE the trim reports success.
+#
+# Not fatal, and never has been: this follows the journald block's precedent of
+# applying what it can and warning rather than dying, because a target that
+# cannot be trimmed is still a target with a working player.
+if [ -f "$HERE/boot-trim.sh" ] && [ "${RB_BOOT_TRIM:-1}" = "1" ]; then
+  sh "$HERE/boot-trim.sh" apply || warn "boot trim did not complete; see its output"
+elif [ ! -f "$HERE/boot-trim.sh" ]; then
+  warn "boot-trim.sh is not in $HERE -- the boot-time trim was NOT applied"
+else
+  say "boot trim skipped (RB_BOOT_TRIM=${RB_BOOT_TRIM:-1})"
+fi
+
 # --- finish -----------------------------------------------------------------
 
 say "running fix-dev.sh"
@@ -284,16 +305,31 @@ echo
 # Single-quoted so nothing here is interpreted: the point is to print a command
 # the operator can paste, not to run it.
 cat <<'EOF'
-Before the first launch, set the HDMI mode (edit, then one reboot):
+The boot-time trim was applied above (unless RB_BOOT_TRIM=0). It is idempotent
+and reversible, and it reports what it did rather than asking you to paste it:
 
-  sudo nano /boot/firmware/cmdline.txt
+  sh /opt/rblive4/boot-trim.sh status            # is each item applied, and the evidence
+  sh /opt/rblive4/boot-trim.sh report            # the boot measurement, one boot, monotonic
+  sh /opt/rblive4/boot-trim.sh revert [items]    # undo; each item is its own inverse
+  items: services cloudinit apt unit bootfiles
 
-append to the single existing line:
-  video=HDMI-A-1:1280x800@60 fbcon=map:1 console=tty3 consoleblank=0 vt.global_cursor_default=0
+`status bootfiles` is where a deliberate gap is named rather than closed: this
+installer ships the video= token for HDMI-A-1 only. The token for HDMI-A-2 (the
+other micro-HDMI port) is S10.8's precondition in docs/13-raspberrypi4.md, not a
+boot-time trim -- forcing a mode on a port with nothing attached is not free, and
+nothing here adds it for you.
 
-  sudo reboot
+One reboot is what makes the ordering and the cloud-init changes real. Before you
+reboot, note the measurement you are comparing against -- the boot still running
+is the OLD configuration, which is what makes it the right baseline:
 
-After that reboot the player starts on its own. Day to day:
+  sh /opt/rblive4/boot-trim.sh report > /root/boot-before.txt
+
+That overwrites a file of that name if one is already there. On a unit that has
+one, keep it: a re-run of this installer would replace the original baseline with
+a trimmed boot's numbers, and the comparison then reads as "nothing changed".
+
+After the reboot the player starts on its own. Day to day:
 
   systemctl status rblive4      # is it up, and what is it doing
   systemctl restart rblive4     # re-launch (also the way to pick up a new build)
