@@ -25,7 +25,7 @@ tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 | Subsystem | Detail | Doc |
 |---|---|---|
 | Display | HDMI at 1280×800 — the mode is forced via `video=` and the measured panel takes it, so the fb matches `rbp`'s 1280×800×16 RGB565 surface exactly: no scaling, no bars, no crop | [docs/06](docs/06-display.md), [docs/13](docs/13-raspberrypi4.md) |
-| Pointing | No touchscreen on a monitor: an evdev pointer (touch panel or mouse) is discovered by capability and transformed into the tsc2007 protocol `rbp` reads | [docs/07](docs/07-touch.md) |
+| Pointing | No touchscreen on a monitor: an evdev pointer (touch panel or mouse) is discovered by capability and transformed into the tsc2007 protocol `rbp` reads — including `rbp`'s own `1279 - x` reflection of that protocol's x, undone in the shim so a tap lands under the finger | [docs/07](docs/07-touch.md) |
 | Controls | transport, decks, mixer, jog and pads mapped from the DDJ-FLX4 MIDI surface — the tables are written from Pioneer's published MIDI message list and are unverified until a dump from the hardware, see [docs/15](docs/15-flx4-midi.md) | [docs/08](docs/08-controls.md), [docs/15](docs/15-flx4-midi.md) |
 | Panel LEDs | PLAY / CUE / SYNC / FX LEDs mirror rbp's own LED state (blink included) | [docs/08](docs/08-controls.md) |
 | VU meters | No meters on the FLX4, so `RB_LED_VU=0` by default — and the `rbp` machine-code patch behind them is then not installed at all | [docs/15](docs/15-flx4-midi.md) |
@@ -81,9 +81,13 @@ each row there says whether it has been run, and what it measured.
   published list — the fixture test proves the map matches its own tables and
   nothing more. This is S5.2 and it is the largest remaining unknown
   ([docs/15](docs/15-flx4-midi.md)).
-* **Whether the cursor follows the mouse, and clicks land where you aimed.** The
-  discovery and the open are verified; the visible behaviour needs a hand on the
-  mouse (S3.2/S3.3).
+* **Whether the cursor follows the mouse.** The discovery and the open are
+  verified; the visible behaviour needs a hand on the mouse (S3.2/S3.3). The
+  **touch** half of that row is now settled — the operator attached a USB touch
+  monitor, found taps acting on the mirror of the finger (rbp reflects the
+  tsc2007 x, undone in the shim), and on 2026-09-27 confirmed the fix by hand:
+  the sidebar's cells, deck 2's scrubbing and the list rows all act where the
+  finger is.
 * **USB media has run, but only against a stick it cannot use.** Detection,
   vfat mount, chroot bind and the notification into `/tmp/udev_usb1` all
   succeeded; the watcher then reported `rbp never opened export.pdb` — correctly,

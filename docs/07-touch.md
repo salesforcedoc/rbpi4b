@@ -68,9 +68,12 @@ POINT_DEBUG=1 POINT_KIND=rel POINT_DEV=/dev/input/event2 sh /opt/rblive4/start-r
 #   then click the four corners of the UI and read /tmp/pointsrc.log
 ```
 
-`POINT_DEBUG=1` logs every emitted `(down, raw_x, raw_y, lx, ly)`. Mirrored or
-transposed output is corrected with the flags; anything affine is reachable
-without a rebuild at all via the `TouchCalib_*.dat` files below.
+`POINT_DEBUG=1` logs every emitted `(down, raw_x, raw_y, lx, ly)`, and since
+2026-09-27 also the `wire=(x,y)` the record actually carries — the two are not the
+same value, for the reason in "rbp reflects x" below, and printing both is what
+makes the two separable in one line. Mirrored or transposed *output* is corrected
+with the flags; anything affine is reachable without a rebuild at all via the
+`TouchCalib_*.dat` files below.
 
 ## Relative pointing (mouse)
 
@@ -169,6 +172,104 @@ into the corner, so the event path and the accumulation were already measured
 before the arrow existed. What is still the operator's to confirm (S3.2/S3.3 in
 [13](13-raspberrypi4.md#s32-pointing)) is the *aim* — that the pixel a click lands
 on is the pixel the arrow points at, which is the axis algebra above.
+
+**The pointer on the unit now is an absolute touch panel, and it draws no
+arrow — by design.** On 2026-09-27 the operator's USB touch monitor is what the
+shim adopts: `pointsrc: absolute device /dev/input/event3 name='TSTP CTouch'` and
+`pointsrc: raw range x=[0..1920] y=[0..1080] swap=0 inv_x=0 inv_y=0`. The panel
+presents **two** event nodes (a touchscreen and a secondary interface); the one
+with `EV_ABS` + `ABS_X`/`ABS_Y` + `BTN_TOUCH` is `event3`, and `event3` is the
+node the mouse used to hold — the numbers are assigned at enumeration, so they are
+not stable and neither reader matches on one.
+
+Two consequences that follow from the *kind* being chosen once per process:
+
+* **No arrow.** `pointsrc_cursor()` returns 0 for a non-REL device, so a
+  touchscreen is driven by touching it. The 20-of-20 glyph scan above is the
+  *mouse's* measurement and does not describe this device.
+* **`auto` resolves to one device, and it prefers absolute.** With the panel
+  present, a mouse plugged in later contributes nothing until the next restart —
+  the mouse is the fallback, not a second pointer. The reader does rescan every
+  500 ms, so the panel itself can be unplugged and replugged freely; what the
+  restart buys is the *preference*, not possession of the node.
+
+It was **not** found at all until a `RB_POINT_KIND=rel` pin left over from the
+mouse was removed — the pin excluded the panel silently (`/tmp/pointsrc.log` had
+no `pointsrc:` line at all, because the filter is applied before anything is
+logged). A pin is a statement about the hardware as it was.
+
+**The aim is now measured, and the transform is exact.** The panel's raw range is
+1920×1080 against a 1280×800 fb, so the open question was whether the pixel a
+touch lands on is the pixel under the finger. It is a `point_xform_abs()`
+question, not a `point_fit()` one — that function fits the *logical surface* into
+the fb for the cursor — and it answers with `range = max - min + 1`
+(`point_xform.c:55`), i.e. `raw × 1280/1921` and `raw × 800/1081`. Note the `+1`:
+it is the difference between 635 and 636 at the raw middle, and it is the term a
+reader is most likely to drop. The operator tapped three places on 2026-09-27
+with `RB_POINT_DEBUG=1`, and **every emitted coordinate is reproduced exactly,
+with no residual**, by that arithmetic:
+
+| tap | raw | logical, emitted | logical, predicted |
+|---|---|---|---|
+| top-left | (12, 9) | (7, 6) | (7, 6) |
+| centre | (954, 477) | (635, 353) | (635, 353) |
+| bottom-right | (1874, 1071) | (1248, 792) | (1248, 792) |
+
+So there is nothing to calibrate: no mirroring, no transposition, no offset and no
+scale error, and the affine `TouchCalib` hook is not needed for this panel. The
+centre tap reads 47 px above the logical middle, and that is the *finger* rather
+than the fit — the corner taps land at 0.8% and 99.2% of the panel, symmetric, and
+a linear map preserves midpoints, so raw y 477 simply is 44.2% of 1080.
+
+## rbp reflects x, and `tscfake_emit()` undoes it
+
+That "no mirroring" is a statement about `point_xform_abs()` and it is true, but
+it is **not** a statement about where a tap lands. The consumer is what is
+mirrored: **rbp acts at `POINT_LOGICAL_W - 1 - x` of whatever x the record
+carries**, so a shim that writes `lx` straight through puts every tap on the
+mirror of the finger's pixel while getting y exactly right. The symptom is
+precise and was the operator's report on 2026-09-27 — *"i can select certain
+songs but i can't access the icons on the left"* — because the left sidebar
+occupies x 0..100, which under the reflection is the INFO/LOAD column at the far
+right, and **no tap can land on a sidebar cell at all**; the track list, being
+full width, kept working, which is what made it look like a partial failure of
+the touchscreen rather than a coordinate error.
+
+It is rbp's own quirk, not the panel's and not this file's, and the proof is the
+finger in the table above: at raw `(1874,1071)` the whole chain emits logical
+`(1248,792)` — the far corner to the far corner, honest — so the reflection
+happens *after* the transform, inside rbp. It was pinned at five points by
+writing known records into the pipe rbp holds both ways (`work/tap.py`) and
+reading the result off the framebuffer: x `1229` → the cell drawn at 8..50, `90`
+→ deck 2's LOAD at 1152..1272, `42` → INFO at 1180..1275, `50` → fell *through*
+the sidebar column into the list, `200` → fell outside that LOAD button. Slope −1,
+intercept 1279.
+
+It is undone **at the wire, in `tscfake_emit()`** (`tscfake.c`), which is where
+rbp's other two consumer quirks already live — the duplicate suppression and the
+two-frame press burst — for the same reason: they are properties of the consumer,
+not of the device. Reflecting there and not in `point_xform.c` keeps
+`point_xform_abs()` describing the *panel's* axes honestly, and keeps
+`st_cursor_x`, `pointsrc_status()` and the composited arrow meaning "where the
+finger is" rather than "where rbp will act". It applies to the relative path too,
+and that is a property of rbp rather than a choice: an absolute panel and a mouse
+both arrive as records on one pipe, and nothing in a record says which produced
+it — so correcting only the absolute case would leave a mouse's click on the
+mirror of the pixel its arrow points at.
+
+Do not "un-mirror" this from the outside. The record's x is *supposed* to be
+`1279 - lx`, and a reader who reverts it puts every tap back on the opposite side
+of the screen. A tap landing on the wrong side is diagnosed in one line by the
+`POINT_DEBUG` log: raw vs logical tests `point_xform_abs()`, logical vs wire tests
+this quirk.
+
+The *effect* — that tapping a control operates it — **was confirmed by the
+operator's finger on 2026-09-27**, which is S3.3 in
+[13](13-raspberrypi4.md#s32-pointing): the sidebar, deck 2's scrubbing and the
+list rows all act where the finger is. The finger's own records are in
+`/tmp/pointsrc.log` (25 points across logical x 0 → 1251, every one
+`wire = 1279 − logical`), so the aim and the effect are measured by the same
+line.
 
 The keyboard half of the reader **has now run on the Pi**: it is selected by
 `EVDEV_MAP`, which defaults to `kbd` on this target, and a virtual keyboard was

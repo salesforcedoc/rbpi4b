@@ -436,12 +436,60 @@ Two traps that cost time here, both worth knowing before writing another one:
   — and killed the session. Split the kill into its own invocation, or match on
   a pid. This is the same trap `docs/13-raspberrypi4.md` records for
   `pkill -f "/root/pdj/rbp"`.
+* **And it is not only your own `pkill` that does the matching — the launcher
+  does too, on every restart.** A fourth occurrence, 2026-09-27: an SSH one-liner
+  whose text happened to contain the player's path, and which ended in
+  `systemctl restart rblive4`, was killed **mid-script** when the launcher's
+  `cleanup()` ran `pids_matching` over the real command lines and found the
+  session's own `bash -c` string. The tell is a bare `Exit code 255` with no
+  output after the last command that printed. So the rule covers any command
+  that *restarts the unit* as well as one that kills a process: if the command
+  text names the player, the chroot, or a watcher, expect the restart to take
+  your shell with it — put the restart last, or write the path split
+  (`/root/pdj/r''bp`) so the argv bytes never contain it.
+
+**Writing *into* a device, not reading from it.** `vkeyd.py` creates its own
+input device, which is right for keys. For the *pointer* the panel's own node can
+be written to instead: `work/poke.py` writes `struct input_event`s to
+`/dev/input/event3` and the kernel's injection path feeds them to every client of
+that device, so pointsrc's reader receives them and the whole chain runs —
+kernel → pointsrc → `point_xform_abs()` → `tscfake_emit()` → rbp — rather than
+only its last hop. That is what makes a shim-side change measurable without a
+finger, and it is how the x reflection's fix was proven: the *same* injection
+against the old and the new `fbshim.so`, on the same screen, one selecting the
+right pane and the other the sidebar cell under the finger (S3.3 in
+[13](13-raspberrypi4.md#s32-pointing), and [07](07-touch.md#rbp-reflects-x-and-tscfake_emit-undoes-it)).
+It pairs with `work/tap.py`, which writes into the record pipe *downstream* of
+the shim: tap.py is the instrument for "what does rbp do with an x", poke.py for
+"what does the shim write for a finger".
+
+Three things about writing into an evdev node cost time here:
+
+* **A position the device already holds is silently dropped.** The kernel ignores
+  an ABS write whose value equals the current one, so a `touch:` at a point a
+  previous run used injects a tap carrying **no position at all** — rbp then acts
+  wherever the last real finger left the pointer, which reads exactly like "the
+  tap did nothing". Measured 2026-09-27: an injection at raw `(75,209)` reached
+  the shim as `raw=(0,0)` while the device's own state read `(75,209)`. `poke.py`
+  grew `move:` for it (a position with no touch, to prime the value), and it
+  prints back every event it read on the same fd — so an absent `MT_X`/`ABS_X`
+  line means *the position was dropped*, not that rbp ignored a touch. **Read the
+  echo, not the screen alone.**
+* The per-event filter is per **device**, not per client, which is why that echo
+  is a valid self-check even though a client's read queue is private. The struct
+  is 16 bytes on this unit (two 32-bit timeval fields + u16 type + u16 code + s32
+  value) — what a 32-bit reader gets from the 64-bit kernel's compat path, the
+  same layout `pointsrc.c` declares for itself.
+* `work/upsnap.py` takes the before/after framebuffer snapshots for a run driven
+  this way, into `work/unit/` where `uimap.py` and `fbcompose.py` already read
+  `tap.py`'s frames — so both instruments are read by the same tools and their
+  results are comparable.
 
 ## What is temporary on the unit
 
 The measurements — and the verification of the fixes — were taken with overrides
 in `/opt/rblive4/rb.local.conf`, all marked TEMPORARY there and none of them a
-fix. As of 2026-09-26 the file holds:
+fix. As of 2026-09-27 the file holds:
 
 * `RB_MIDI_MAP=flx4` — **this one is now the default in `rb.conf` and the line is
   redundant**; it is kept only so the file records what changed and why. It was
@@ -460,6 +508,15 @@ fix. As of 2026-09-26 the file holds:
   than assumed. Its one open question is note 66, the SHIFT + browse push
   ([15](15-flx4-midi.md)); a real press from the panel settles it, and the dump
   is what makes that a one-press answer instead of an argument.
+* `RB_POINT_DEBUG=1` — **removed again on 2026-09-27, after the pass it was kept
+  for**, so expect to re-add it rather than find it on. It is the pointer path's
+  per-event line, which since this date prints **both ends of the transform**
+  (`logical=` where the finger is, `wire=` what rbp consumes; they differ by
+  `1279 - x` by design,
+  [07](07-touch.md#rbp-reflects-x-and-tscfake_emit-undoes-it)). It was turned on
+  to find the reflection, and kept because the log is the only instrument that
+  reads a *synthetic* touch and a real one the same way — which is exactly what
+  the operator's finger pass on S3.3 needed, and it **passed**.
 
 The dump's first use is also its clearest: it distinguishes **whose** event a
 line is. `seqinject2` sends velocity **100** and the FLX4 sends **127**, so
