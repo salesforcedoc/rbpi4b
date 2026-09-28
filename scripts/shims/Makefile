@@ -119,11 +119,12 @@ $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 # card and no chroot. The deps list is spelled out per object rather than left to
 # the pattern rule, because a header edit that no target depends on is a rebuild
 # that silently does not happen.
-audioshim.so: audioshim.o s24pack.o mirror_policy.o
+audioshim.so: audioshim.o s24pack.o mirror_policy.o master_policy.o
 	$(CC) $(CFLAGS) -shared -o $@ audioshim.o s24pack.o mirror_policy.o \
-	    $(RX3LIB)/libdl.so.2 -lc $(LDFLAGS)
+	    master_policy.o $(RX3LIB)/libdl.so.2 -lc $(LDFLAGS)
 
-audioshim.o: audioshim.c shmstate.h envutil.h s24pack.h mirror_policy.h
+audioshim.o: audioshim.c shmstate.h envutil.h s24pack.h mirror_policy.h \
+             master_policy.h
 s24pack.o: s24pack.c s24pack.h
 
 # mirror_policy.o is the HDMI mirror's decisions (which candidates a device list
@@ -135,6 +136,16 @@ s24pack.o: s24pack.c s24pack.h
 # audioshim.o's deps above as well, because a policy change that no object
 # depends on is a rebuild that silently does not happen.
 mirror_policy.o: mirror_policy.c mirror_policy.h
+
+# master_policy.o is the same split applied to the master: the device chain it
+# walks and what one writei() return on it means. It is the module the -EINVAL
+# wedge came out of -- with no FLX4 the chain ended at the bare name `default`,
+# which OPENS and then refuses every write, and the shim believed it was up
+# because it had a handle. Both halves of that are decisions, so both are pinned
+# in test_audio.c on the host rather than read off a log after a drill on the
+# unit. Pure in the same sense as mirror_policy.c: no ALSA, no allocation, no
+# globals, no clock.
+master_policy.o: master_policy.c master_policy.h
 
 # fbshim.so: the framebuffer lies and the fake touch controller rbp reads.
 #
@@ -223,10 +234,12 @@ pcmprobe: ../../tools/pcmprobe.c
 # test_audio.c pins what the audio path emits byte by byte — the formats, the
 # extremes, the refusals — which is the half of the audio port that is checkable
 # without a DDJ-FLX4 on the other end. It also pins the HDMI mirror's policy
-# (mirror_policy.c), which is the same trick applied to the mirror: its verdicts
-# are arithmetic, so they are checked here rather than read off a log line after
-# a drill. The one part of the mirror NOT covered here is the fill in
-# flush_master(), which lives in the shim; see docs/09-audio.md.
+# (mirror_policy.c) and the master's (master_policy.c), which is the same trick
+# applied to both: their verdicts are arithmetic, so they are checked here rather
+# than read off a log line after a drill. The one part of the mirror NOT covered
+# here is the fill in flush_master(), which lives in the shim; see docs/09-audio.md.
+# The same is true of the master's write site, which uses master_policy.c's
+# verdicts but is itself unreachable from a test.
 # test_midi.c replays a fixture through the real JP21 map, which is the controls
 # port's equivalent: see the comment at the top of it.
 # test_flx4.c is the same discipline against the FLX4 map -- the target's own
@@ -263,9 +276,11 @@ test_point: test_point.c tscfake.c point_xform.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_point.c tscfake.c point_xform.c
 
-test_audio: test_audio.c s24pack.c s24pack.h mirror_policy.c mirror_policy.h
+test_audio: test_audio.c s24pack.c s24pack.h mirror_policy.c mirror_policy.h \
+            master_policy.c master_policy.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
-	    -Wall -Wextra -static -o $@ test_audio.c s24pack.c mirror_policy.c
+	    -Wall -Wextra -static -o $@ test_audio.c s24pack.c mirror_policy.c \
+	    master_policy.c
 
 # test_midi links the PRODUCTION objects -- map_jp21.o, ctrl_map.o, mididump.o,
 # shimutil.o, shmstate.o -- rather than copies of them, so it cannot pass against

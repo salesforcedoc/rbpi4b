@@ -79,6 +79,7 @@
 #include "envutil.h"
 #include "s24pack.h"
 #include "mirror_policy.h"
+#include "master_policy.h"
 
 /* Enforce GLIBC_2.4 versioning for libdl on glibc 2.13 */
 __asm__(".symver dlsym, dlsym@GLIBC_2.4");
@@ -153,7 +154,7 @@ typedef void snd_pcm_info_t;
  * libasound on an `hw:` device, and AUDIO_DEV was `plughw:` until the Pi port,
  * where the old set_format() answered for itself and the number was never used.
  *
- * check_format_constants() below asks libasound to name each of these at startup,
+ * check_alsa_constants() below asks libasound to name each of these at startup,
  * so a wrong number is now one loud log line instead of silent no-audio.
  * tools/pcmprobe.c prints the whole map, measured from libasound rather than
  * transcribed. */
@@ -166,6 +167,20 @@ typedef void snd_pcm_info_t;
  * this one value and rejects S16_LE, S24_LE and S24_3LE with -EINVAL at
  * set_format, so the plug layer converts nothing for it and `hw:` is the route. */
 #define SND_PCM_FORMAT_IEC958_SUBFRAME_LE 18
+
+/* ALSA's snd_pcm_access_t value for the one access this shim can write with.
+ *
+ * 0 is MMAP_INTERLEAVED, 3 is RW_INTERLEAVED, 4 is RW_NONINTERLEAVED — adjacent
+ * numbers with opposite meanings for the write path, which is why this is spelled
+ * out and checked at startup rather than written as a bare 3 in the replay.
+ *
+ * The write path is snd_pcm_writei() and nothing else, and alsa-lib's hw layer
+ * refuses an interleaved write on a stream that was configured any other way:
+ * snd_pcm_hw_writei() answers -EINVAL for every access except RW_INTERLEAVED and
+ * MMAP_INTERLEAVED. So this is not a preference — it is what the code that writes
+ * the frames requires, and it is why the replay asks for it rather than replaying
+ * the recorded value (see replay_negotiation()). */
+#define SND_PCM_ACCESS_RW_INTERLEAVED 3
 
 /* ---- geometry ------------------------------------------------------------- */
 
@@ -211,11 +226,55 @@ static struct {
     int  sched_rt;             /* SCHED_RT: 1 = keep rbp off RT (default) */
 } g_cfg;
 
-/* The device strings to try, in order, NULL-terminated. Built once in
- * load_config() rather than assembled at open time: a fallback chain that is
- * assembled on the failure path is a fallback chain whose last step is the one
- * nobody tested. */
-static const char *g_dev_candidates[4];
+/* The pair map exactly as configured, before resolve_pairs() can clamp it.
+ *
+ * clamp_pair() is destructive on purpose — a pair that does not fit the card is
+ * dropped rather than folded onto a lower one — so resolve_pairs() writes PAIR_NONE
+ * *into the configuration*. That is right for a card that is there, and it is why a
+ * unit booted with no controller cannot recover the cue and booth pairs when one
+ * appears: they were dropped against the 2-channel fallback before the card that
+ * would have carried them existed, so the pristine 2,3 is simply gone.
+ * reopen_try() restores from this copy on a cold-case recovery.
+ *
+ * The better shape — resolve_pairs() writing into a separate struct so clamping can
+ * never destroy configuration — is a bigger change than this one: it moves
+ * flush_master()'s pair reads and three log lines. Deliberately deferred; recorded
+ * here so the next reader does not have to rediscover why a copy exists. */
+static struct {
+    struct pair master;
+    struct pair headphones;
+    struct pair booth;
+    struct pair monitor;
+} g_cfg_map0;
+
+/* The device strings to try, in order, and how many of them there are. Filled by
+ * master_candidates() in load_config() rather than assembled at open time: a
+ * fallback chain that is assembled on the failure path is a fallback chain whose
+ * last step is the one nobody tested. Copied into the array rather than pointed
+ * at, so the chain is one value that cannot drift from the list that was logged.
+ *
+ * There is deliberately no rung naming a device AUDIO_DEV did not name. There used
+ * to be one — the bare name `default` — and on this unit it opened onto card 0
+ * (bcm2835 Headphones) with no FLX4 on the bus, took hw_params, and failed every
+ * write with -EINVAL. See master_policy.h for the measurement and for why a
+ * successful open was never evidence of a working device. */
+static char g_master_cands[MASTER_CAND_MAX][MASTER_NAME_MAX];
+static int g_master_ncands;
+
+/* Which of them actually answered. This is not bookkeeping: a card *is* the device
+ * that opened, not the one that was configured, and when the plughw: twin is what
+ * opened, every line naming g_cfg.dev names a device that is not in use — which is
+ * how a channel-count fault gets reported against a string that had nothing to do
+ * with it. Empty until something opens. */
+static char g_opened_dev[MASTER_NAME_MAX];
+
+/* The device to name in a line about the master's card: the one that actually
+ * opened, or the configured one when nothing has opened yet. Used by every line
+ * that reports a property of the card rather than of the configuration. */
+static const char *master_dev_name(void)
+{
+    return g_opened_dev[0] ? g_opened_dev : g_cfg.dev;
+}
 
 /* AUDIO_DEV's default. The card id must match what /proc/asound/cards reports;
  * see docs/13-raspberrypi4.md for how to check it.
@@ -380,6 +439,7 @@ static snd_pcm_sframes_t (*real_snd_pcm_avail_update)(snd_pcm_t *) = NULL;
 static int (*real_snd_ctl_open)(snd_ctl_t **, const char *, int) = NULL;
 static int (*real_snd_ctl_close)(snd_ctl_t *) = NULL;
 static const char *(*real_snd_pcm_format_name)(int) = NULL;
+static const char *(*real_snd_pcm_access_name)(int) = NULL;
 /* The params allocators, for the reopen only: see replay_negotiation(). rbp's own
  * params objects are unreachable from here, and must not be borrowed — the values
  * inside one are rbp's to own and one of them may live on a frame that has
@@ -389,17 +449,17 @@ static void (*real_snd_pcm_hw_params_free)(snd_pcm_hw_params_t *) = NULL;
 static int (*real_snd_pcm_sw_params_malloc)(snd_pcm_sw_params_t **) = NULL;
 static void (*real_snd_pcm_sw_params_free)(snd_pcm_sw_params_t *) = NULL;
 
-/* Confirm that the hand-rolled SND_PCM_FORMAT_* values above name the formats this
- * shim believes they name, by asking libasound to name them. A mismatch is not
- * cosmetic: set_format() passes the value straight to the card on a hw: device
- * and the card rejects it with -EINVAL, which says nothing about which number was
- * wrong. See the comment on the constants.
+/* Confirm that the hand-rolled SND_PCM_FORMAT_* and SND_PCM_ACCESS_* values above
+ * name what this shim believes they name, by asking libasound to name them. A
+ * mismatch is not cosmetic: set_format() passes the value straight to the card on
+ * a hw: device and the card rejects it with -EINVAL, which says nothing about
+ * which number was wrong. See the comments on the constants.
  *
  * It reports the values it *did* resolve, not just the ones it caught, because a
  * check that is silent both when it passes and when it has been quietly disabled
  * — an unresolved dlsym returns early — is not a check anyone can trust. One
  * line, once per process that touches ALSA. */
-static void check_format_constants(void)
+static void check_alsa_constants(void)
 {
     static const struct { int val; const char *want; } t[] = {
         { SND_PCM_FORMAT_S16_LE,  "S16_LE"  },
@@ -409,6 +469,7 @@ static void check_format_constants(void)
     };
     size_t i;
     int bad = 0;
+    const char *access_name;
 
     if (!real_snd_pcm_format_name) {
         alog("audioshim: cannot verify the format constants: libasound has no "
@@ -430,6 +491,25 @@ static void check_format_constants(void)
              "IEC958_SUBFRAME_LE=%d\n",
              SND_PCM_FORMAT_S16_LE, SND_PCM_FORMAT_S24_LE, SND_PCM_FORMAT_S24_3LE,
              SND_PCM_FORMAT_IEC958_SUBFRAME_LE);
+
+    /* The access constant the same way, and for a sharper reason: it decides
+     * whether the write path is legal at all. 3 read as 4 configures a stream that
+     * answers every snd_pcm_writei() with -EINVAL, and nothing in the log would
+     * connect that to a wrong #define. */
+    access_name = real_snd_pcm_access_name
+                      ? real_snd_pcm_access_name(SND_PCM_ACCESS_RW_INTERLEAVED)
+                      : NULL;
+    if (!access_name)
+        alog("audioshim: cannot verify the access constant: libasound has no "
+             "snd_pcm_access_name\n");
+    else if (strcmp(access_name, "RW_INTERLEAVED") != 0)
+        alog("audioshim: ACCESS CONSTANT WRONG: %d names '%s', not "
+             "'RW_INTERLEAVED' — fix the #define above; the write path answers "
+             "-EINVAL for every block with nothing naming the cause\n",
+             SND_PCM_ACCESS_RW_INTERLEAVED, access_name);
+    else
+        alog("audioshim: access constant verified: RW_INTERLEAVED=%d\n",
+             SND_PCM_ACCESS_RW_INTERLEAVED);
 }
 
 static void init_real_alsa(void)
@@ -475,12 +555,13 @@ static void init_real_alsa(void)
     real_snd_ctl_open = dlsym(lib, "snd_ctl_open");
     real_snd_ctl_close = dlsym(lib, "snd_ctl_close");
     real_snd_pcm_format_name = dlsym(lib, "snd_pcm_format_name");
+    real_snd_pcm_access_name = dlsym(lib, "snd_pcm_access_name");
     real_snd_pcm_hw_params_malloc = dlsym(lib, "snd_pcm_hw_params_malloc");
     real_snd_pcm_hw_params_free = dlsym(lib, "snd_pcm_hw_params_free");
     real_snd_pcm_sw_params_malloc = dlsym(lib, "snd_pcm_sw_params_malloc");
     real_snd_pcm_sw_params_free = dlsym(lib, "snd_pcm_sw_params_free");
 
-    check_format_constants();
+    check_alsa_constants();
 
     alog("audioshim: real ALSA initialized\n");
     initialized = 1;
@@ -568,6 +649,35 @@ static unsigned long g_write_count;
 static int g_big_block_logged;
 static int g_pack_failed_logged;
 
+/* Frames the master handle has actually delivered, for the whole life of the
+ * process — not reset by a loss or by anything else.
+ *
+ * The guard on restoring the pair map in a cold-case recovery. The map's whole job
+ * is to route *delivered* frames, so if none has ever been delivered no index has
+ * ever meant anything, and re-resolving cannot put the cue pair on top of the
+ * master: that danger is a statement about a stream in flight, and here there is
+ * none. The obvious alternative — g_channels_assumed — is the wrong test, because
+ * it is what reopen_try() clears before re-resolving, so it would refuse to fire on
+ * exactly the state that most needs it. */
+static unsigned long long g_master_frames_delivered;
+
+/* snd_pcm_prepare()'s accounting, and the bound on its log line.
+ *
+ * rbp calls prepare once between two failing writes whenever its stream is stuck,
+ * so an unconditional line there is about a megabyte a second: the -EINVAL wedge
+ * put 449 MB into /tmp in eight minutes, on a tmpfs that fills in twenty-five. The
+ * line is the only place the real prepare's result is visible, though — the
+ * interposer always returns 0 — so it is kept and bounded instead of dropped: the
+ * first three calls on a handle, plus every call whose result differs from the
+ * last one logged. A prepare that STARTS failing is news; the fifteen-thousandth
+ * identical res=0 is not. A device that alternated success and failure would print
+ * every call, which the retire above bounds to one second of blocks.
+ *
+ * Reset per handle, in open_real_device()'s success branch. */
+static unsigned long g_prepare_count;
+static unsigned g_prepare_logged;
+static int g_prepare_last_err;
+
 /* Startup mute/fade bookkeeping. Frames are counted on the master stream only:
  * the secondary streams advance on their own clocks, so a single shared counter
  * would not describe them. See the note where the fade is applied. */
@@ -612,6 +722,30 @@ static unsigned long long g_master_absent_ms;   /* 0 = unknown, or a card is ope
 static unsigned long g_reopen_backoff_ms = REOPEN_MIN_MS;
 static unsigned g_reopen_failures;              /* consecutive failed reopen tries */
 static unsigned long g_master_losses;           /* mid-stream card losses */
+
+/* Audio the current handle has failed to consume, in frames, and whether a reopen
+ * is waiting for its first delivered frame.
+ *
+ * Both exist for the same reason: an open that succeeds is not a working device.
+ * The counter retires a handle that only opens and refuses (master_policy.h), and
+ * the flag keeps a recovery provisional until a frame actually lands — a reopen
+ * that never delivers must not reset the backoff, or a device that opens and
+ * refuses every block is re-opened at the 500 ms floor for as long as the process
+ * runs instead of settling at 5 s (see reopen_try()). */
+static unsigned long long g_master_fail_frames;
+static int g_recovery_pending;
+
+/* How many "opened but never carried a frame" losses have been reported.
+ *
+ * Its own counter rather than a share of g_reopen_failures, which is what bounded
+ * this message at first: that one counts failed OPENS, and the cold case produces
+ * three of those before a card ever appears — after which every loss is silent.
+ * Measured on the unit 2026-09-27: a cold-case recovery onto the FLX4 churned
+ * through twelve recoveries with no line explaining any of them, because the
+ * counter was already past three and a recovery that never delivers a frame no
+ * longer resets it (see reopen_try()). Three losses are reported, then silence
+ * until a frame lands, which is what this file's other bounds do too. */
+static unsigned g_master_dead_logged;
 
 /* What rbp asked the card for, recorded as it asked, so that a reopen can ask
  * again.
@@ -764,18 +898,40 @@ static void load_config(void)
     parse_card_id(g_cfg.dev);
 
     /* A hw: device that will not open is nearly always one that needs the plug
-     * chain for format or rate conversion, so its plughw: form gets one attempt
-     * before falling back to 'default'. Both strings are bounded by DEV_MAX here,
-     * which is the only place they are built. */
+     * chain for format or rate conversion, so its plughw: form gets one attempt —
+     * and that is the whole chain. The twin is kept because it is the SAME
+     * physical card, which is the only property that qualifies a fallback here: a
+     * card that will not take our format directly is still the card the pair map
+     * was resolved against, whereas any other device is one whose channel count
+     * gets latched into that map without its indices ever having been resolved
+     * against it. That is the shape of the defect `default` used to cause; see
+     * master_policy.h. Both strings are bounded by DEV_MAX here, which is the only
+     * place they are built; the copy below is bounded by the array. */
     g_cfg.dev_plug[0] = '\0';
     if (strncmp(g_cfg.dev, "hw:", 3) == 0) {
         strcpy(g_cfg.dev_plug, "plughw:");
         strcat(g_cfg.dev_plug, g_cfg.dev + 3);
     }
-    g_dev_candidates[0] = g_cfg.dev;
-    g_dev_candidates[1] = g_cfg.dev_plug[0] ? g_cfg.dev_plug : NULL;
-    g_dev_candidates[2] = "default";
-    g_dev_candidates[3] = NULL;
+    {
+        int dropped = 0;
+        int k;
+
+        g_master_ncands = master_candidates(g_cfg.dev,
+                                            g_cfg.dev_plug[0] ? g_cfg.dev_plug : "",
+                                            g_master_cands, MASTER_CAND_MAX, &dropped);
+        if (dropped)
+            alog("audioshim: %d device candidate(s) were not kept (too long for %u "
+                 "bytes, or no room); the chain is what follows\n",
+                 dropped, (unsigned)MASTER_NAME_MAX);
+        /* Logged unconditionally, including the count of 0 that would mean the
+         * chain is empty: an empty chain is a bug worth seeing, and start-rb.sh
+         * tells the operator this list is in the log. */
+        alog("audioshim: master dev=\"%s\" candidates=%d\n",
+             g_cfg.dev, g_master_ncands);
+        for (k = 0; k < g_master_ncands; k++)
+            alog("audioshim: master candidate %d/%d: %s\n",
+                 k + 1, g_master_ncands, g_master_cands[k]);
+    }
 
     /* 0 means auto. env_int() returns the default for anything unparseable, so
      * rb.conf's literal "auto" lands here as auto, which is the intent. */
@@ -800,6 +956,12 @@ static void load_config(void)
 
     parse_map(env_str("AUDIO_MAP", ""));
     parse_pair("AUDIO_MONITOR_PAIR", env_str("AUDIO_MONITOR_PAIR", ""), &g_cfg.monitor);
+
+    /* Taken here, before resolve_pairs() can clamp anything — see g_cfg_map0. */
+    g_cfg_map0.master = g_cfg.master;
+    g_cfg_map0.headphones = g_cfg.headphones;
+    g_cfg_map0.booth = g_cfg.booth;
+    g_cfg_map0.monitor = g_cfg.monitor;
 
     /* The HDMI mirror. An EMPTY AUDIO_MIRROR_DEV turns it off, and empty is what
      * start-rb.sh exports for a knob rb.conf does not set — so the in-source
@@ -904,7 +1066,8 @@ static void clamp_pair(const char *what, struct pair *p)
         return;
     if (p->a >= (int)g_out_channels || p->b >= (int)g_out_channels) {
         alog("audioshim: %s pair %d,%d is beyond the %u channel(s) %s has; "
-             "dropping that stream\n", what, p->a, p->b, g_out_channels, g_cfg.dev);
+             "dropping that stream\n", what, p->a, p->b, g_out_channels,
+             master_dev_name());
         p->a = p->b = PAIR_NONE;
     }
 }
@@ -921,10 +1084,14 @@ static void resolve_pairs(void)
          * so it cannot be mistaken for a routing bug.
          *
          * This is also the state a unit boots into with the controller unplugged,
-         * and the reason a card that appears later recovers the master pair and
-         * nothing else: everything below clamps against this 2 and drops the cue
-         * and booth pairs for the life of the process. The flag is what lets the
-         * recovery line say so. */
+         * and it is why everything below clamps against this 2 and drops the cue and
+         * booth pairs. Until Step 2 those streams were gone for the life of the
+         * process, because the destructive clamp_pair() writes PAIR_NONE into g_cfg
+         * and a later card could not bring them back. Now a card that appears when no
+         * frame has ever been delivered restores the configured map and clears this
+         * flag (see reopen_try()), so this call runs a second time against the real
+         * count. The flag is still what lets the recovery line say which of the two
+         * happened. */
         g_out_channels = 2;
         g_channels_assumed = 1;
         alog("audioshim: set_channels() was never called; assuming 2 channels\n");
@@ -988,21 +1155,21 @@ static unsigned int negotiate_channels(const snd_pcm_hw_params_t *params)
     }
     if (max > MAX_OUT_CHANNELS) {
         alog("audioshim: %s reports %u channels; using the %d this shim can "
-             "carry\n", g_cfg.dev, max, MAX_OUT_CHANNELS);
+             "carry\n", master_dev_name(), max, MAX_OUT_CHANNELS);
         max = MAX_OUT_CHANNELS;
     }
 
     want = g_cfg.channels ? (unsigned int)g_cfg.channels : max;
     if (want > max) {
         alog("audioshim: AUDIO_CHANNELS=%u exceeds the %u %s has; using %u\n",
-             want, max, g_cfg.dev, max);
+             want, max, master_dev_name(), max);
         want = max;
     }
     if (want < 1)
         want = 1;
 
-    alog("audioshim: negotiating %u channel(s) on %s (%s)\n", want, g_cfg.dev,
-         g_cfg.channels ? "AUDIO_CHANNELS" : "auto");
+    alog("audioshim: negotiating %u channel(s) on %s (%s)\n", want,
+         master_dev_name(), g_cfg.channels ? "AUDIO_CHANNELS" : "auto");
     return want;
 }
 
@@ -1024,12 +1191,30 @@ static unsigned int negotiate_channels(const snd_pcm_hw_params_t *params)
  *   the note there — and a dead pointer handed to a live libasound is a
  *   use-after-free.
  *
- * A ring rather than a set: the number that matters is "at least one", a replug
- * cycle retires at most one, and a handle retired long enough ago to have been
- * overwritten cannot still be in rbp's hands. */
+ * A ring rather than a set: the number that matters is "at least one", and a
+ * replug cycle retires at most one.
+ *
+ * Its justification — "a handle retired long enough ago to have been overwritten
+ * cannot still be in rbp's hands" — is true of every handle this shim retires
+ * except one, and that one is named below. */
 #define RETIRED_MAX 8
 static snd_pcm_t *g_retired[RETIRED_MAX];
 static unsigned g_retired_next;
+
+/* The one real handle rbp itself holds. rbp is handed the master's first
+ * successful open at snd_pcm_open()'s case 0 and keeps that pointer for the
+ * process's life; every recovery after it swaps this shim's own g_real_playback
+ * and leaves rbp writing to the pointer it already has.
+ *
+ * Which is why the ring above cannot be trusted with it. rbp's handle is retired
+ * the first time the card is lost and then *never handed back*, so on the ninth
+ * distinct loss the ring would evict the live pointer, is_master() would stop
+ * recognising it, and rbp's next write would reach snd_pcm_writei()'s last branch
+ * — which forwards an unrecognised pointer to libasound. On a handle that was
+ * closed, that is a use-after-free. It took nine real losses to get there before
+ * this change (this unit has a documented history of USB drops); a handle that is
+ * retired for refusing every block reaches it in about a minute. */
+static snd_pcm_t *g_rbp_master;
 
 static int is_retired(snd_pcm_t *pcm)
 {
@@ -1037,6 +1222,11 @@ static int is_retired(snd_pcm_t *pcm)
 
     if (pcm == NULL)
         return 0;
+    /* rbp's own handle is retired for as long as it is not the live one. Checked
+     * before the ring, so the ring itself only ever holds shim-side handles, where
+     * its own justification does hold. */
+    if (pcm == g_rbp_master && pcm != g_real_playback)
+        return 1;
     for (i = 0; i < RETIRED_MAX; i++)
         if (g_retired[i] == pcm)
             return 1;
@@ -1045,8 +1235,12 @@ static int is_retired(snd_pcm_t *pcm)
 
 static void retire(snd_pcm_t *pcm)
 {
+    /* Idempotent: losing the same handle twice is one loss. This is also what
+     * keeps rbp's own handle out of the ring entirely — master_lost() clears
+     * g_real_playback before it retires, so by the time this runs is_retired() is
+     * already true for that pointer and its slot is never needed. */
     if (pcm == NULL || is_retired(pcm))
-        return;      /* idempotent: losing the same handle twice is one loss */
+        return;
     g_retired[g_retired_next] = pcm;
     g_retired_next = (g_retired_next + 1) % RETIRED_MAX;
 }
@@ -1164,25 +1358,43 @@ static void open_real_device(int mode, int quiet)
     int real_mode = mode & ~2;
     int i, err = -1;
 
-    for (i = 0; g_dev_candidates[i] != NULL; i++) {
+    for (i = 0; i < g_master_ncands; i++) {
         g_in_real_open = 1;
-        err = real_snd_pcm_open(&g_real_playback, g_dev_candidates[i],
+        err = real_snd_pcm_open(&g_real_playback, g_master_cands[i],
                                 SND_PCM_STREAM_PLAYBACK, real_mode);
         g_in_real_open = 0;
         if (err >= 0) {
+            /* The name that answered, for every line that reports on this card. The
+             * precision is what bounds this: a candidate comes from g_master_cands,
+             * which is this size, but -Wformat-truncation cannot see that and is
+             * right not to guess. (Same idiom as the mirror's g_mirror_dev.) */
+            snprintf(g_opened_dev, sizeof g_opened_dev, "%.*s",
+                     (int)sizeof g_opened_dev - 1, g_master_cands[i]);
+            /* A new handle gets a clean slate: no failures counted against it, and
+             * its own three prepare lines. */
+            g_master_fail_frames = 0;
+            g_prepare_count = 0;
+            g_prepare_logged = 0;
+            g_prepare_last_err = 0;
             alog("audioshim: open('%s') mode=%d->%d res=%d handle=%p\n",
-                 g_dev_candidates[i], mode, real_mode, err, g_real_playback);
+                 g_master_cands[i], mode, real_mode, err, g_real_playback);
             return;
         }
         if (!quiet)
             alog("audioshim: open('%s') mode=%d->%d res=%d handle=%p\n",
-                 g_dev_candidates[i], mode, real_mode, err, g_real_playback);
+                 g_master_cands[i], mode, real_mode, err, g_real_playback);
         g_real_playback = NULL;
     }
 
     if (!quiet)
         alog("audioshim: NO OUTPUT DEVICE — rbp will run silent and every stream "
              "will sleep to pace itself\n");
+    /* Nothing is open, so nothing answered: g_opened_dev must stop naming the device
+     * that used to be. It is what every card-property line reports, and a stale name
+     * there would attribute a later fault to a device that had already gone —
+     * master_dev_name() falls back to the configured one, which is the honest answer
+     * for "no card". */
+    g_opened_dev[0] = '\0';
     /* When this process first found itself cardless, which is what the reopen
      * backoff counts from. Left alone on a later failure so the backoff keeps
      * growing instead of restarting at half a second. */
@@ -1222,7 +1434,7 @@ static void open_real_device(int mode, int quiet)
  */
 
 /* s24pack's format as ALSA's own number: the hand-rolled constants at the top of
- * this file, which check_format_constants() has already asked libasound to name. */
+ * this file, which check_alsa_constants() has already asked libasound to name. */
 static int mirror_alsa_format(int fmt)
 {
     if (fmt == AUDIO_FMT_S24_3LE)     return SND_PCM_FORMAT_S24_3LE;
@@ -1669,6 +1881,12 @@ int snd_pcm_open(snd_pcm_t **pcm, const char *name, int stream, int mode)
             open_real_device(mode, 0);
         *pcm = g_real_playback ? g_real_playback : (snd_pcm_t *)&g_h_master;
         alog("audioshim: stream 0 is the master stream (handle=%p)\n", *pcm);
+        /* The handle rbp now holds, recorded so the retired-handle ring can never
+         * evict it: rbp keeps this pointer for the process's life, whatever happens
+         * to g_real_playback afterwards. Only a real one is recorded — a fake
+         * handle is recognised by identity anyway, and is never retired. */
+        if (*pcm != (snd_pcm_t *)&g_h_master)
+            g_rbp_master = *pcm;
         /* The HDMI mirror's first attempt, and the only one made from here: after
          * this it is mirror_retry() on the write path, which respects the backoff.
          * Attempted after the master so the master's open, prepare and first write
@@ -1732,7 +1950,14 @@ int snd_pcm_close(snd_pcm_t *pcm)
     if (ours) {
         /* Clear the global *before* the call: the close re-enters this function
          * for the slave, and that inner call must not mistake itself for the
-         * master's close. */
+         * master's close.
+         *
+         * g_rbp_master is deliberately NOT cleared: it is the pointer rbp was
+         * handed, and with g_real_playback now empty is_retired() already answers
+         * for it, so a write that arrives after the close is absorbed here rather
+         * than forwarded to libasound on a handle that is no longer open. If rbp
+         * opens the master again it goes through case 0, which records the new
+         * pointer. */
         g_real_playback = NULL;
         reset_stream_state();
     }
@@ -2013,7 +2238,17 @@ int snd_pcm_prepare(snd_pcm_t *pcm)
         err = real_snd_pcm_prepare(g_real_playback);
     else if (is_forwardable(pcm) && real_snd_pcm_prepare)
         err = real_snd_pcm_prepare(pcm);
-    alog("audioshim: snd_pcm_prepare(pcm=%p) res=%d\n", pcm, err);
+
+    /* Bounded — see the counters' note. The total goes out on the periodic writei
+     * line, so the bound cannot hide how many there were. */
+    g_prepare_count++;
+    if (g_prepare_logged < 3 || err != g_prepare_last_err) {
+        if (g_prepare_logged < 3)
+            g_prepare_logged++;
+        g_prepare_last_err = err;
+        alog("audioshim: snd_pcm_prepare(pcm=%p) res=%d (call %lu on this "
+             "handle)\n", pcm, err, g_prepare_count);
+    }
     return 0;   /* always succeed: see the sw_params note above */
 }
 
@@ -2026,18 +2261,36 @@ int snd_pcm_link(snd_pcm_t *pcm1, snd_pcm_t *pcm2)
 
 /* ---- the card going away, and coming back ---------------------------------- */
 
+/* Why the master is being retired, which decides the one line that says so and how
+ * the reopen backoff is treated. */
+enum master_loss {
+    /* The card left the bus mid-stream: -ENODEV, or the sustained refusal a handle
+     * that never carried a frame gets. The first is the case this shim has always
+     * handled; the second is new and is what makes a device that OPENS but refuses
+     * every write (the -EINVAL case, master_policy.h) recoverable at all. */
+    MASTER_LOSS_CARD_GONE = 0,
+    /* The handle opened and never delivered a block, so it is not the card leaving
+     * — nothing changed except the shim's opinion of a device it just picked. */
+    MASTER_LOSS_NEVER_WROTE
+};
+
 /* One mid-stream loss of the master handle. Modelled on snd_pcm_close()'s own
  * handling, for the same reason it exists there: the close re-enters this shim
  * for the plugin's slave handle, so the global has to be cleared *before* the
  * call or that inner call mistakes itself for the master.
  *
  * `err` is the negative errno the write failed with. It is not assumed to be one
- * value — it is only *acted* on for -ENODEV, but the line names whatever it was,
- * because "the write failed and we did not handle it" is a different report from
- * "the write failed with a number nobody has seen yet". */
-static void master_lost(int err)
+ * value — it is only *acted* on for -ENODEV without the verdict rule, but the line
+ * names whatever it was, because "the write failed and we did not handle it" is a
+ * different report from "the write failed with a number nobody has seen yet". */
+static void master_lost(int err, enum master_loss why)
 {
     snd_pcm_t *dead = g_real_playback;
+    unsigned long long failed = g_master_fail_frames;
+    /* 0 frames written is not an errno, and strerror(0) is "Success" — which would
+     * put "writei said Success" in the log for the one verdict that reads 0 as a
+     * dead handle. Named instead of printed as an errno in that case. */
+    const char *said = err < 0 ? strerror(-err) : "no frames written";
 
     if (dead == NULL)
         return;
@@ -2057,12 +2310,46 @@ static void master_lost(int err)
      * top of the master. The map is kept and the recovery is logged against it. */
     g_master_losses++;
     g_master_absent_ms = now_ms();
-    g_reopen_backoff_ms = REOPEN_MIN_MS;
-    g_reopen_failures = 0;
-    alog("audioshim: MASTER LOST: the card went away mid-stream (writei said %s, "
-         "after %lu write(s) on that handle). Audio is silent until it is back; "
-         "this shim is now looking for it. The stream map is kept\n",
-         strerror(-err), g_write_count);
+    g_master_fail_frames = 0;
+    g_recovery_pending = 0;
+    /* Note what a recovery prints about the map: g_master_losses is now non-zero, so
+     * reopen_try() takes the unchanged-map branch even for a device that was open and
+     * refusing, and even though no frame was ever delivered on it. That is correct —
+     * resolve_pairs() did run against it, so its indices mean something on this card
+     * — and it is the kind of thing a future reader might "fix" backwards, so:
+     * the cold case is a device that never opened, and only that. */
+    if (why == MASTER_LOSS_CARD_GONE) {
+        /* It was carrying the stream and stopped. The next attempt may well find it
+         * back, so the wait starts over — unchanged from before this change. */
+        g_reopen_backoff_ms = REOPEN_MIN_MS;
+        g_reopen_failures = 0;
+        alog("audioshim: MASTER LOST: the card went away mid-stream (writei said %s, "
+             "after %lu write(s) on that handle). Audio is silent until it is back; "
+             "this shim is now looking for it. The stream map is kept\n",
+             said, g_write_count);
+    } else {
+        /* It never carried a frame, so nothing changed — this attempt simply failed,
+         * and it is accounted for exactly as a failed open is: the wait grows (or a
+         * device that refuses every block would be re-opened at the 500 ms floor for
+         * as long as rbp runs) and the failure count grows with it.
+         *
+         * The message is bounded by its own counter, not by g_reopen_failures: that
+         * one already counts the failed opens of a unit booted without a controller,
+         * so sharing it silenced every loss in exactly the scenario the message was
+         * written for (see g_master_dead_logged). A frame landing clears it. */
+        if (g_reopen_backoff_ms < REOPEN_MAX_MS)
+            g_reopen_backoff_ms *= 2;
+        g_reopen_failures++;
+        if (g_master_dead_logged < 3) {
+            g_master_dead_logged++;
+            alog("audioshim: MASTER LOST: the handle opened but never carried a "
+                 "frame (writei said %s, after %llu frame(s) and %lu write(s) on that "
+                 "handle). A device that opens and refuses every block cannot play, "
+                 "so it is being retired and this shim is looking again; the stream "
+                 "map is kept\n",
+                 said, failed, g_write_count);
+        }
+    }
 }
 
 /* Put a freshly opened handle back into the configuration rbp negotiated on the
@@ -2113,7 +2400,33 @@ static int replay_negotiation(snd_pcm_t *pcm)
     /* rbp's order, as far as the order matters at all: every setter has to be
      * applied to the params object before snd_pcm_hw_params() commits it. */
     snd_pcm_hw_params_any(pcm, hp);
-    snd_pcm_hw_params_set_access(pcm, hp, g_nego.access);
+
+    /* The access is NOT replayed from the record — it is the one this shim's write
+     * path requires. See SND_PCM_ACCESS_RW_INTERLEAVED.
+     *
+     * The record holds rbp's LAST request (see the interposer), and on a unit that
+     * booted with no card that request was answered by the shim's own fake, which
+     * succeeds at everything: there was no card to refuse it and so no fallback to
+     * make. Measured on the unit 2026-09-27, the cold case: with the FLX4 attached
+     * at boot rbp asks for access 4 and then for 3, but a cardless boot records the
+     * 4 alone — and the replay then put RW_NONINTERLEAVED on a real card, which
+     * configures cleanly (real set_channels(4) res=0, real hw_params res=0, prepare
+     * res=0 — every call in this function succeeded) and then answers every
+     * snd_pcm_writei() with -EINVAL, because alsa-lib refuses an interleaved write
+     * on a stream that is not interleaved. Nine recoveries in a row said
+     * `writei said Invalid argument` with nothing in the log naming the access.
+     *
+     * Asking for 3 is right in both cases: on a card that was there all along the
+     * record already says 3 and this is the same request again, and on a cardless
+     * boot it is the value rbp itself fell back to. It is also the only access that
+     * cannot make the write path illegal, which is the property that matters — the
+     * frames are written by snd_pcm_writei() and by nothing else. */
+    snd_pcm_hw_params_set_access(pcm, hp, SND_PCM_ACCESS_RW_INTERLEAVED);
+    if (g_nego.access != SND_PCM_ACCESS_RW_INTERLEAVED)
+        alog("audioshim: replay: the recorded access was %d (rbp asked for it when "
+             "there was no card to answer); asking for %d, RW_INTERLEAVED, because "
+             "that is what snd_pcm_writei needs this stream to be\n",
+             g_nego.access, SND_PCM_ACCESS_RW_INTERLEAVED);
     /* The format argument is ignored by set_format(), which writes AUDIO_FMT's
      * format; S24_LE is passed because that is rbp's own container and the value
      * is only read by a build where the shim is not doing the deciding. */
@@ -2140,13 +2453,37 @@ static int replay_negotiation(snd_pcm_t *pcm)
         snd_pcm_sw_params_set_stop_threshold(pcm, sp, g_nego.stop_threshold);
         snd_pcm_sw_params_get_boundary(sp, &boundary);
         snd_pcm_sw_params(pcm, sp);
-        snd_pcm_prepare(pcm);
 
-        alog("audioshim: replay: access=%d channels=%u rate=%u period=%lu "
-             "periods=%u boundary=%lu — the configuration rbp negotiated, put "
-             "back on a card libasound has just opened\n",
-             g_nego.access, g_out_channels, rate,
-             (unsigned long)period_size, periods, (unsigned long)boundary);
+        /* The REAL prepare, not this shim's own interposer.
+         *
+         * `snd_pcm_prepare(pcm)` here would call the interposer, which always
+         * returns 0 (see its note), so a card that cannot carry the configuration
+         * would look exactly like a card that just did: measured on the unit
+         * 2026-09-27, where a cold-case recovery onto the FLX4 replayed the
+         * 2-channel fallback, was answered with -EIO by the real prepare and then
+         * -EIO by every write, and reported success here — the handle was kept and
+         * the shim churned through twelve recoveries with no line saying why. This
+         * is open_real_device()'s own rule one level deeper: a successful OPEN is
+         * not a working device, and a successful hw_params is not a configured
+         * stream. A failure here becomes "would not configure" in the caller, which
+         * closes the handle and keeps looking — the honest report of a recovery
+         * that did not take. */
+        if (real_snd_pcm_prepare)
+            err = real_snd_pcm_prepare(pcm);
+        if (err < 0) {
+            alog("audioshim: replay: the new handle would not start the stream it "
+                 "had just been given: prepare said %s (channels=%u rate=%u "
+                 "period=%lu periods=%u)\n",
+                 strerror(-err), g_out_channels, rate,
+                 (unsigned long)period_size, periods);
+            bad = 1;
+        } else {
+            alog("audioshim: replay: access=%d channels=%u rate=%u period=%lu "
+                 "periods=%u boundary=%lu — the configuration rbp negotiated, put "
+                 "back on a card libasound has just opened\n",
+                 SND_PCM_ACCESS_RW_INTERLEAVED, g_out_channels, rate,
+                 (unsigned long)period_size, periods, (unsigned long)boundary);
+        }
     }
 
     real_snd_pcm_sw_params_free(sp);
@@ -2168,6 +2505,7 @@ static int replay_negotiation(snd_pcm_t *pcm)
 static void reopen_try(void)
 {
     unsigned long long now;
+    int cold_restore = 0;
     int quiet;
 
     if (g_real_playback || !real_snd_pcm_open)
@@ -2194,12 +2532,48 @@ static void reopen_try(void)
         return;
     }
 
-    g_reopen_failures = 0;
-    g_reopen_backoff_ms = REOPEN_MIN_MS;
-    g_master_absent_ms = 0;
+    /* Provisional: a recovery is complete when a frame has actually landed, not
+     * when an open succeeds. See the reset below.
+     *
+     * That is also why the backoff, the failure count and the absence stamp are
+     * NOT cleared here any more. They used to be, and the cost was a device that
+     * opens and refuses every block: it re-opened at the 500 ms floor forever,
+     * because the very churn it caused reset the wait that was meant to slow it
+     * down. They are cleared by the first write that delivers (flush_master()),
+     * which for a card that actually plays is within a millisecond of this line —
+     * so a hot-swap that works is unchanged, and one that does not backs off to 5 s
+     * and stays there. */
+    g_recovery_pending = 1;
+
+    /* A cold case with a card that turns out to carry more than the fallback: put
+     * the configured map back before the negotiation is replayed, because the replay
+     * is what commits the channel count and resolve_pairs() below clamps against it.
+     *
+     * Only when no master frame has ever been delivered (see
+     * g_master_frames_delivered) — a card that was lost and came back keeps the map
+     * it was routed with, which is what master_lost()'s unchanged-map message is
+     * about. Both conditions matter: the loss count says no handle was ever open,
+     * the frame count says nothing was ever routed. */
+    if (!g_master_losses && g_master_frames_delivered == 0) {
+        g_cfg.master = g_cfg_map0.master;
+        g_cfg.headphones = g_cfg_map0.headphones;
+        g_cfg.booth = g_cfg_map0.booth;
+        g_cfg.monitor = g_cfg_map0.monitor;
+        g_pairs_resolved = 0;
+        g_channels_assumed = 0;
+        /* Zeroed so the replay's own set_channels() derives the count from the card
+         * that has just arrived, rather than from the 2-channel fallback that was
+         * all a cardless unit could resolve. Nothing else runs between here and
+         * resolve_pairs() — this is one thread — so no reader ever sees the 0. */
+        g_out_channels = 0;
+        cold_restore = 1;
+        alog("audioshim: the configuration was resolved with no card present, so the "
+             "pair map is being re-resolved against %s and the channel count comes "
+             "from the card this time\n", master_dev_name());
+    }
 
     alog("audioshim: MASTER RECOVERED: reopened %s%s. Replaying the negotiation "
-         "on the new handle\n", g_cfg.dev,
+         "on the new handle\n", master_dev_name(),
          g_master_losses ? "" : " (it was never open — this is the cold case)");
 
     if (replay_negotiation(g_real_playback) < 0) {
@@ -2210,6 +2584,8 @@ static void reopen_try(void)
         if (real_snd_pcm_close)
             real_snd_pcm_close(bad);
         g_master_absent_ms = now;
+        g_recovery_pending = 0;
+        g_reopen_failures++;
         alog("audioshim: the reopened handle would not configure; closed it "
              "again and will keep trying\n");
         if (g_reopen_backoff_ms < REOPEN_MAX_MS)
@@ -2222,12 +2598,39 @@ static void reopen_try(void)
     g_startup_frames_done = 0;
     g_startup_released = 0;
 
-    if (g_channels_assumed)
-        alog("audioshim: NOTE the channel count was resolved with no device "
-             "present, so it is the 2-channel fallback: only the master pair "
-             "(channels %d,%d) is recovered. %s has %u channel(s) and the cue and "
-             "booth pairs were dropped before it appeared — restart to get them "
-             "back\n", g_cfg.master.a, g_cfg.master.b, g_cfg.dev, g_out_channels);
+    /* The cold case, resolved again now that the replay has committed the count.
+     *
+     * Here rather than at the write path because the replay is what makes the
+     * count real, and this call is what reports it: "resolved N channel(s)" is the
+     * line a cold plug-in is read by, and it has to appear once per resolution —
+     * a second one naming 4 where the first named 2 is the whole of Step 2. For a
+     * mid-stream recovery this does not run: nothing was cleared above, so the map
+     * is the one the stream has been routed with all along, and resolve_pairs()'s
+     * own g_pairs_resolved guard would return immediately anyway. */
+    if (cold_restore)
+        resolve_pairs();
+
+    /* What happened to the map, stated as one of three cases rather than two. The
+     * middle one is Step 2: the card appeared and it carries what the map needs,
+     * so the cue and booth pairs are live again — no restart, and nothing for the
+     * operator to do but plug the controller in. */
+    if (cold_restore && !g_channels_assumed)
+        alog("audioshim: the pair map was resolved again against %s and is complete: "
+             "master=%d,%d headphones=%d,%d booth=%d,%d monitor=%d,%d on %u "
+             "channel(s)\n", master_dev_name(),
+             g_cfg.master.a, g_cfg.master.b, g_cfg.headphones.a, g_cfg.headphones.b,
+             g_cfg.booth.a, g_cfg.booth.b, g_cfg.monitor.a, g_cfg.monitor.b,
+             g_out_channels);
+    else if (g_channels_assumed)
+        /* The configured map needs more than this card reports — either the count
+         * is still the fallback (a card that will not answer), or the card itself is
+         * narrower than the map. Either way the streams below are gone for the life
+         * of the process, which is why it is said plainly. */
+        alog("audioshim: NOTE the channel count is the 2-channel fallback, so only "
+             "the master pair (channels %d,%d) is recovered. %s reports %u "
+             "channel(s) and the cue and booth pairs are dropped — restart with the "
+             "controller attached to get them back\n", g_cfg.master.a, g_cfg.master.b,
+             master_dev_name(), g_out_channels);
     else
         alog("audioshim: the pair map is unchanged: master=%d,%d headphones=%d,%d "
              "booth=%d,%d monitor=%d,%d on %u channel(s)\n",
@@ -2480,13 +2883,57 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
                 real_snd_pcm_prepare(g_real_playback);
             written = real_snd_pcm_writei(g_real_playback, out, size);
         }
-        if (written == -ENODEV)
-            master_lost(-ENODEV);
+        /* Delivered frames, for the pair map's guard (see g_master_frames_delivered).
+         * A short write delivered audio too, so anything positive counts. */
+        if (written > 0)
+            g_master_frames_delivered += (unsigned long long)written;
+
+        if (written == -ENODEV) {
+            /* The card left the bus. Acted on at once, with -ENODEV named as
+             * itself rather than through the verdict rule: this one is not a
+             * judgement call, and its message is the one the drills and the docs
+             * quote. */
+            master_lost(-ENODEV, MASTER_LOSS_CARD_GONE);
+        } else {
+            /* Everything else goes through the same rule the mirror already
+             * follows: an open that succeeded is not a working device, and a handle
+             * that will not carry a block is retired rather than retried for the
+             * life of the process. This is what the -EINVAL wedge needed — it was
+             * handled only for -ENODEV, so a device that OPENS and refuses every
+             * write kept its handle forever and took the whole UI down with it
+             * (master_policy.h).
+             *
+             * The counter advances on this block's FINAL outcome, so the retry
+             * above has already happened: a stream that was prepared and still
+             * would not take the block counts, and one that recovers on the rewrite
+             * does not. It resets on anything that delivered audio, and on a full
+             * ring (-EAGAIN), which is a healthy card that is simply not draining
+             * fast enough — rbp's non-blocking bit survives onto this handle (see
+             * open_real_device), so that is a state that really occurs. */
+            enum master_verdict mv = master_verdict((long)written, (long)size);
+
+            g_master_fail_frames = master_fail_frames_next(g_master_fail_frames,
+                                                           (unsigned long)size, mv);
+            if (master_is_dead(g_master_fail_frames, MASTER_DEAD_FRAMES))
+                master_lost(written, MASTER_LOSS_NEVER_WROTE);
+        }
+        /* A frame landing is what completes a recovery: the reopen's backoff and
+         * failure count are only cleared here, never at the open (reopen_try()). The
+         * loss report is re-armed here too, so a card that comes back and works gets
+         * its three lines again the next time it fails rather than staying quiet for
+         * the life of the process. */
+        if (written > 0 && g_recovery_pending) {
+            g_recovery_pending = 0;
+            g_reopen_failures = 0;
+            g_reopen_backoff_ms = REOPEN_MIN_MS;
+            g_master_absent_ms = 0;
+            g_master_dead_logged = 0;
+        }
         if ((g_write_count % 500) == 1)
             alog("audioshim: writei #%lu frames=%lu bytes=%u written=%ld "
-                 "peak_m=%d mainvol=%.3f\n",
+                 "peak_m=%d mainvol=%.3f prepares=%lu\n",
                  g_write_count, (unsigned long)size, out_bytes, (long)written,
-                 s_peak_master, (double)master_gain);
+                 s_peak_master, (double)master_gain, g_prepare_count);
     } else if (out) {
         pace_without_device(size);
         /* No card: either one was never opened (a unit booted with the controller

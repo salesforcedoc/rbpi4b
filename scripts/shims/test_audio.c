@@ -22,12 +22,21 @@
  * half that is not — the fill inside the shim's per-frame loop — cannot be reached
  * from here at all, and is covered by the drill in docs/13-raspberrypi4.md.
  *
+ * The `test_master_*` cases pin the same two things for the master
+ * (master_policy.c): which devices its chain may contain, and what one writei()
+ * return means. They exist because both halves were wrong on the unit on
+ * 2026-09-27, with no FLX4 attached — the chain ended at a bare `default` that
+ * opened and then refused every write, and the shim believed it was up because it
+ * had a handle. Neither mistake is visible in a log that reads healthy, which is
+ * the whole argument for pinning them here.
+ *
  * Build + run (static, so no rootfs is needed to load it):
  *     make test
  */
 #define _GNU_SOURCE
 #include "s24pack.h"
 #include "mirror_policy.h"
+#include "master_policy.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -651,6 +660,337 @@ static void test_mirror_pad(void)
     CHECK(pads >= 1000 && pads <= 1400, "the pad fired %lu times in 120000 blocks", pads);
 }
 
+/* ---- the master's policy ---------------------------------------------------- */
+
+static void test_master_candidates(void)
+{
+    char got[MASTER_CAND_MAX][MASTER_NAME_MAX];
+    int dropped, n;
+
+    /* The chain the unit has to run on. Two entries — the configured card and its
+     * plug twin — and the second check is the one that matters: this is the ONLY
+     * test that fails if the bare name `default` is ever put back into the chain.
+     * It is not a style check. `default` on this unit is card 0, bcm2835
+     * Headphones, which opens and then refuses every write with -EINVAL; that is
+     * the failure this whole module exists for, and a chain that names it is a
+     * chain that can take the player's UI down with it. */
+    dropped = -1;
+    n = master_candidates("hw:CARD=DDJFLX4,DEV=0", "plughw:CARD=DDJFLX4,DEV=0",
+                          got, MASTER_CAND_MAX, &dropped);
+    CHECK(n == 2, "the shipped device produced %d candidates, not 2", n);
+    CHECK(n == 2 && strcmp(got[0], "hw:CARD=DDJFLX4,DEV=0") == 0,
+          "the configured device is not tried first");
+    CHECK(n == 2 && strcmp(got[1], "plughw:CARD=DDJFLX4,DEV=0") == 0,
+          "the plug twin is not tried second");
+    CHECK(dropped == 0, "the shipped device dropped something");
+
+    /* The device named by AUDIO_DEV is always in the chain, whatever it is. This
+     * is what keeps RB_AUDIO_DEV=default usable as the explicit opt-in it is (and
+     * as the drill's way to stage a refusing device on purpose) — the rule the
+     * chain follows is "only what AUDIO_DEV names", not "never this string". */
+    n = master_candidates("default", "", got, MASTER_CAND_MAX, &dropped);
+    CHECK(n == 1, "an explicitly named default produced %d candidates, not 1", n);
+    CHECK(n == 1 && strcmp(got[0], "default") == 0, "an explicit default was not kept");
+    CHECK(dropped == 0, "an explicit default dropped something");
+
+    /* No twin for a non-hw: device, and none for one already through the plug
+     * layer: a twin of a twin is the same device twice. The caller passes "" for
+     * those, which is also what an absent AUDIO_DEV would produce. */
+    n = master_candidates("plughw:CARD=DDJFLX4,DEV=0", "", got, MASTER_CAND_MAX,
+                          &dropped);
+    CHECK(n == 1, "a plughw: device produced %d candidates, not 1", n);
+    CHECK(n == 1 && strcmp(got[0], "plughw:CARD=DDJFLX4,DEV=0") == 0,
+          "a plughw: device was not kept verbatim");
+
+    /* Nothing to add is not a dropped candidate; two names for one device is. */
+    n = master_candidates("hw:CARD=a,DEV=0", "", got, MASTER_CAND_MAX, &dropped);
+    CHECK(n == 1 && dropped == 0, "an absent twin was counted as a dropped name");
+    n = master_candidates("hw:CARD=a,DEV=0", "hw:CARD=a,DEV=0", got, MASTER_CAND_MAX,
+                          &dropped);
+    CHECK(n == 1, "the same device twice produced %d candidates, not 1", n);
+    CHECK(dropped == 1, "the same device twice dropped %d, not 1", dropped);
+
+    /* An empty or absent AUDIO_DEV is not a candidate — and not a dropped one
+     * either. (load_config() has already replaced an empty one with the default,
+     * so this is the module's own contract; the shim logs `candidates=0`, which is
+     * the shape of a bug worth seeing rather than a name that went missing.) */
+    dropped = -1;
+    CHECK(master_candidates(NULL, NULL, got, MASTER_CAND_MAX, &dropped) == 0,
+          "a NULL device produced a candidate");
+    CHECK(dropped == 0, "an absent device was counted as a dropped name");
+    CHECK(master_candidates("", "", got, MASTER_CAND_MAX, &dropped) == 0,
+          "an empty device produced a candidate");
+    CHECK(dropped == 0, "an empty device was counted as a dropped name");
+
+    /* A name too long for the array is dropped and counted, never truncated: a
+     * truncated device name is a name that does not exist, and the open failure
+     * would read as "the card refused us". Built rather than written out so the
+     * length is a number and not something to count by eye — and checked, so the
+     * test cannot quietly stop testing anything if an edit shortens it. */
+    {
+        char long_name[512];
+        char edge_name[MASTER_NAME_MAX];
+
+        memset(long_name, 'a', sizeof long_name);
+        memcpy(long_name, "hw:CARD=", 8);
+        long_name[8 + 170] = '\0';
+        CHECK(strlen(long_name) >= MASTER_NAME_MAX, "the over-long name is not over-long");
+        n = master_candidates(long_name, "", got, MASTER_CAND_MAX, &dropped);
+        CHECK(n == 0, "an over-long name produced %d candidates", n);
+        CHECK(dropped == 1, "an over-long name dropped %d, not 1", dropped);
+
+        /* One byte shorter is a name, and it is kept whole rather than refused. */
+        memset(edge_name, 'b', sizeof edge_name);
+        edge_name[MASTER_NAME_MAX - 1] = '\0';
+        n = master_candidates(edge_name, "", got, MASTER_CAND_MAX, &dropped);
+        CHECK(n == 1, "a name exactly at the limit produced %d candidates", n);
+        CHECK(n == 1 && strcmp(got[0], edge_name) == 0,
+              "a name exactly at the limit was altered");
+    }
+
+    /* Nowhere to put anything still counts rather than writing: the capacity test
+     * has to come before the store, or this is a buffer overflow. */
+    n = master_candidates("hw:CARD=a,DEV=0", "plughw:CARD=a,DEV=0", got, 0, &dropped);
+    CHECK(n == 0, "a zero-capacity chain stored %d", n);
+    CHECK(dropped == 2, "a zero-capacity chain dropped %d, not 2", dropped);
+
+    /* dropped may be NULL; the shim always passes one, but the contract says so. */
+    CHECK(master_candidates("hw:CARD=a,DEV=0", "", got, MASTER_CAND_MAX, NULL) == 1,
+          "a NULL dropped out-parameter broke the count");
+}
+
+/* What rbp's write on the master means. The errnos are the ones a writei() really
+ * returns, and the measured one is first. */
+static void test_master_verdict(void)
+{
+    /* The measurement this module exists for: `default` (card 0, bcm2835
+     * Headphones) with no FLX4 on the bus answers -EINVAL on every write, and the
+     * shim — which acted only on -ENODEV — kept the handle and spun, taking the
+     * player's UI down with it. Every hard failure must land here. */
+    CHECK(master_verdict(-EINVAL, 64) == MASTER_DOWN, "-EINVAL is not a dead handle");
+    CHECK(master_verdict(-ENODEV, 64) == MASTER_DOWN, "-ENODEV is not a dead handle");
+    CHECK(master_verdict(-EBUSY, 64) == MASTER_DOWN, "-EBUSY is not a dead handle");
+    CHECK(master_verdict(-ENXIO, 64) == MASTER_DOWN, "-ENXIO is not a dead handle");
+    CHECK(master_verdict(-EIO, 64) == MASTER_DOWN, "-EIO is not a dead handle");
+    CHECK(master_verdict(-9999, 64) == MASTER_DOWN, "an unknown errno is not a loss");
+
+    /* Audio landing is what makes a handle live — including a partial block. */
+    CHECK(master_verdict(64, 64) == MASTER_WROTE, "a whole block is not a write");
+    CHECK(master_verdict(32, 64) == MASTER_SHORT, "a partial write is not short");
+    CHECK(master_verdict(1, 64) == MASTER_SHORT, "one frame is not short");
+
+    /* A full ring is NOT a fault and must never be counted as one. rbp's
+     * non-blocking bit survives onto this handle (open_real_device clears only
+     * SND_PCM_ASYNC), so this is a state a healthy card really produces; counting
+     * it would retire the FLX4 on its first full ring. */
+    CHECK(master_verdict(-EAGAIN, 64) == MASTER_FULL, "-EAGAIN is not a full ring");
+    CHECK(master_verdict(-EWOULDBLOCK, 64) == MASTER_FULL,
+          "-EWOULDBLOCK is not a full ring");
+
+    /* A broken stream on a device that is still there: one prepare, one rewrite.
+     * A master_verdict() call sees the FINAL outcome, so what reaches here has
+     * already been retried once — see the counter's comment below. */
+    CHECK(master_verdict(-EPIPE, 64) == MASTER_RETRY, "-EPIPE is not worth a retry");
+    CHECK(master_verdict(-ESTRPIPE, 64) == MASTER_RETRY,
+          "-ESTRPIPE is not worth a retry");
+    CHECK(master_verdict(-EBADFD, 64) == MASTER_RETRY, "-EBADFD is not worth a retry");
+
+    /* More frames than were asked for is not a delivery. */
+    CHECK(master_verdict(128, 64) == MASTER_DOWN,
+          "writing more frames than were asked for is not a write");
+
+    /* Nothing delivered is not a delivery either, and this is the ONE reading that
+     * deliberately differs from mirror_verdict(): the mirror calls 0 a full ring
+     * ("nothing consumed, but nothing is wrong, do not log a write"), while for
+     * the master only a delivered frame proves the handle is carrying the stream.
+     * The two are pinned against each other below so the divergence stays
+     * deliberate rather than becoming a bug. */
+    CHECK(master_verdict(0, 64) == MASTER_DOWN,
+          "writing no frames at all is not a dead handle");
+    CHECK(mirror_verdict(0, 64) == MIRROR_FULL,
+          "the mirror stopped reading 0 as a full ring");
+
+    /* Every verdict has a name, because every one of them reaches the log. */
+    {
+        static const char *names[] = { "wrote", "short", "full", "retry", "down" };
+        int v;
+
+        for (v = 0; v <= 4; v++)
+            CHECK(strcmp(master_verdict_name((enum master_verdict)v), names[v]) == 0,
+                  "verdict %d has the wrong log name", v);
+    }
+
+    /* The cross-check, so an edit made to one classifier and not the other is
+     * caught here. Every errno either of them knows must be classified the same
+     * way, hard-vs-retryable-vs-full; written == 0 is the only case where they
+     * are allowed to disagree, and it is asserted above. */
+    {
+        static const int errnos[] = { EINVAL, ENODEV, EBUSY, ENXIO, EIO, EPIPE,
+                                      ESTRPIPE, EBADFD, EAGAIN, EWOULDBLOCK, 9999 };
+        static const long written[] = { 1, 32, 64, 128 };
+        size_t i;
+
+        for (i = 0; i < sizeof errnos / sizeof errnos[0]; i++) {
+            enum master_verdict m = master_verdict(-errnos[i], 64);
+            enum mirror_verdict r = mirror_verdict(-errnos[i], 64);
+
+            CHECK((m == MASTER_DOWN) == (r == MIRROR_DOWN),
+                  "the two classifiers disagree about -%d as a hard failure",
+                  errnos[i]);
+            CHECK((m == MASTER_RETRY) == (r == MIRROR_RETRY),
+                  "the two classifiers disagree about -%d as retryable", errnos[i]);
+            CHECK((m == MASTER_FULL) == (r == MIRROR_FULL),
+                  "the two classifiers disagree about -%d as a full ring", errnos[i]);
+        }
+        for (i = 0; i < sizeof written / sizeof written[0]; i++) {
+            enum master_verdict m = master_verdict(written[i], 64);
+            enum mirror_verdict r = mirror_verdict(written[i], 64);
+
+            CHECK((m == MASTER_WROTE) == (r == MIRROR_WROTE),
+                  "the two classifiers disagree about %ld frames as a write",
+                  written[i]);
+            CHECK((m == MASTER_SHORT) == (r == MIRROR_SHORT),
+                  "the two classifiers disagree about %ld frames as short",
+                  written[i]);
+            CHECK((m == MASTER_DOWN) == (r == MIRROR_DOWN),
+                  "the two classifiers disagree about %ld frames as a loss",
+                  written[i]);
+        }
+    }
+}
+
+/* The counter that retires a handle which opens and refuses, and what keeps it
+ * from retiring a card that is merely slow. */
+static void test_master_fail_counter(void)
+{
+    unsigned long long n = 0;
+    int i;
+
+    /* Anything that delivered audio — or was consumed by a working ring — clears
+     * the count. This is why a card that delivers one block in seven hundred is
+     * never retired. */
+    CHECK(master_fail_frames_next(4096, 64, MASTER_WROTE) == 0,
+          "a delivered block did not reset the failure count");
+    CHECK(master_fail_frames_next(4096, 64, MASTER_SHORT) == 0,
+          "a partial delivery did not reset the failure count");
+    CHECK(master_fail_frames_next(4096, 64, MASTER_FULL) == 0,
+          "a full ring did not reset the failure count");
+
+    /* A failure counts by the frames it did not carry, not by the attempt. */
+    CHECK(master_fail_frames_next(0, 64, MASTER_DOWN) == 64, "a failed block did not count");
+    CHECK(master_fail_frames_next(64, 64, MASTER_DOWN) == 128, "failures did not accumulate");
+    CHECK(master_fail_frames_next(0, 64, MASTER_RETRY) == 64,
+          "a prepared-and-still-failed block did not count");
+    /* -ENODEV never reaches the counter in the shim (it is acted on immediately),
+     * but it must not be treated as a delivery if it ever does. */
+    CHECK(master_fail_frames_next(0, 64, master_verdict(-ENODEV, 64)) == 64,
+          "-ENODEV reset the failure count");
+
+    /* Saturating, so a failure long enough to overflow comes back as "still dead"
+     * rather than wrapping round to healthy. */
+    CHECK(master_fail_frames_next(~0ULL, 64, MASTER_DOWN) == ~0ULL,
+          "the failure count wrapped instead of saturating");
+    CHECK(master_fail_frames_next(~0ULL - 32, 64, MASTER_DOWN) == ~0ULL,
+          "a near-overflow failure count wrapped");
+
+    /* The limit, and the two ways it is meant to be inert. 0 disables the rule —
+     * the same idiom as an interval of 0 in the mirror's backoff. */
+    CHECK(master_is_dead(0, 44100) == 0, "an untouched handle was dead");
+    CHECK(master_is_dead(44099, 44100) == 0, "a handle one frame short was dead");
+    CHECK(master_is_dead(44100, 44100) == 1, "a handle at the limit was not dead");
+    CHECK(master_is_dead(1000000, 44100) == 1, "a handle past the limit was not dead");
+    CHECK(master_is_dead(999999, 0) == 0, "a disabled limit still retired a handle");
+
+    /* 44100 frames of audio that never landed, in the blocks rbp writes. This is
+     * the measured case's arithmetic: -EINVAL on every block, both attempts, and
+     * the counter runs out on the 690th — 690 x 64 = 44160. */
+    for (i = 1; i <= 2000; i++) {
+        n = master_fail_frames_next(n, 64, MASTER_DOWN);
+        if (master_is_dead(n, MASTER_DEAD_FRAMES))
+            break;
+    }
+    CHECK(i == 690, "the count ran out on block %d, not 690", i);
+    CHECK(n == 44160, "the count ran out at %llu frames, not 44160", n);
+    CHECK(master_is_dead(689 * 64ULL, MASTER_DEAD_FRAMES) == 0,
+          "the 689th failed block retired the handle");
+    CHECK(master_is_dead(690 * 64ULL, MASTER_DEAD_FRAMES) == 1,
+          "the 690th failed block did not retire the handle");
+
+    /* And the false positive this whole design is arranged to avoid: a card that
+     * is slow or briefly stuck, but is still delivering. Half a limit of failures,
+     * one block delivered, half a limit again — nowhere near dead. A counter that
+     * did not reset would have retired it on the 690th of the second run. */
+    n = 0;
+    for (i = 0; i < 300; i++)
+        n = master_fail_frames_next(n, 64, MASTER_DOWN);
+    n = master_fail_frames_next(n, 64, MASTER_WROTE);
+    for (i = 0; i < 300; i++) {
+        n = master_fail_frames_next(n, 64, MASTER_DOWN);
+        CHECK(!master_is_dead(n, MASTER_DEAD_FRAMES),
+              "a delivering card was retired after %d failed blocks", i + 1);
+    }
+    CHECK(n == 300 * 64ULL, "the delivered block did not reset the count cleanly");
+}
+
+/* How often a device that opens and refuses every block is re-opened, in the
+ * shim's own accounting: one cycle is an open, then a second of audio that never
+ * lands, then the retire — after which the next open waits g_reopen_backoff_ms.
+ *
+ * The failing blocks are absorbed at the rate the unit measured (~29k a second
+ * during the -EINVAL wedge), so the 690 blocks that reach MASTER_DEAD_FRAMES cost
+ * about 24 ms of wall clock; the wait is what dominates, and the wait is the only
+ * thing that changes between the two callers below.
+ *
+ * `reset_on_open` is the caller's behaviour and the whole point of the exercise:
+ * 1 is the bug the shim had (the wait and the failure count were cleared the
+ * moment the open returned, before any frame had landed), 0 is what it does now
+ * (they are cleared by the first DELIVERED frame, which a refusing device never
+ * produces). master_policy.c cannot tell the two apart — only a caller can — so
+ * the caller is what is modelled. The floor and the ceiling (500, 5000,
+ * REOPEN_MIN_MS/REOPEN_MAX_MS in the shim) are literals here because audioshim.o
+ * is deliberately not linkable. */
+static int master_count_opens(int ms_total, int reset_on_open)
+{
+    const int dead_ms = 24;
+    const unsigned long ceiling = 5000;
+    unsigned long backoff = 500;
+    int t = 0, opens = 0;
+
+    while (t < ms_total) {
+        opens++;
+        if (reset_on_open)
+            backoff = 500;
+        t += dead_ms + (int)backoff;
+        if (backoff < ceiling) {
+            backoff *= 2;
+            if (backoff > ceiling)
+                backoff = ceiling;
+        }
+    }
+    return opens;
+}
+
+static void test_master_reopen_backoff(void)
+{
+    int fixed = master_count_opens(60000, 0);
+    int buggy = master_count_opens(60000, 1);
+
+    /* A minute of a device that opens and refuses: 500 ms, 1 s, 2 s, 4 s, then the
+     * 5 s ceiling — about fifteen opens, and the cost of each on rbp's audio
+     * thread stays bounded. */
+    CHECK(fixed >= 10, "the backoff stopped retrying altogether (%d opens)", fixed);
+    CHECK(fixed <= 20, "the backoff retried far more often than it allows (%d opens)",
+          fixed);
+
+    /* The frozen-floor caller, pinned so the reason this test is a loop is on the
+     * record: clearing the wait at the open means every cycle costs the same
+     * 500 ms, and the same device is opened and closed about eight times as often
+     * for as long as the player runs. That is defect 5 of the change this test
+     * came with, and it is invisible to every check above. */
+    CHECK(buggy > 100, "the frozen-floor caller this test exists to catch did not churn");
+    CHECK(buggy > 4 * fixed, "clearing the wait at the open cost nothing at all");
+}
+
 int main(void)
 {
     test_parse_and_sizes();
@@ -665,6 +1005,10 @@ int main(void)
     test_mirror_candidates();
     test_mirror_backoff();
     test_mirror_pad();
+    test_master_candidates();
+    test_master_verdict();
+    test_master_fail_counter();
+    test_master_reopen_backoff();
 
     printf("test_audio: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
