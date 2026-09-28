@@ -87,8 +87,26 @@ something is already wrong is a step nobody has tested:
 2. if it starts with `hw:`, the same string as `plughw:` — the plug layer's
    conversion is a genuine fallback for a card that will not take our format
    directly;
-3. `default`;
-4. nothing — silent, sleep-paced, one loud log line.
+3. nothing — silent, sleep-paced, one loud log line.
+
+There were four rungs until 2026-09-27 and the third was the bare name `default`.
+It is gone, and the measurement that removed it is the reason: with no FLX4 on the
+bus `default` resolves to card 0 `bcm2835 Headphones`, which **opens**
+(`res=0`) and takes `hw_params` — so it was not a rung that fails, it was one that
+*succeeds* at opening and then refuses every write with `-EINVAL`. The shim
+therefore believed the master was up and never took rung 4, and rbp's recovery
+spun prepare → write(-22) at ~29k times a second: 13M failures, 449 MB into
+`/tmp` in eight minutes, and — the symptom the operator reported — a player that
+read touch and keyboard and painted nothing. The rule that now stands in its
+place, and the reason the chain is built only from names the configuration
+supplies, is in `scripts/shims/master_policy.h`: *the chain may only name the card
+`AUDIO_DEV` names*, because anything else is a device whose channel count gets
+latched into the pair map, which the map's indices were never resolved against.
+
+`AUDIO_DEV=default` is still honoured if you ask for it by name — that is the
+escape hatch the drill uses to stage the failure deliberately (`RB_AUDIO_DEV`,
+`docs/13-raspberrypi4.md`), and it puts `default` in the chain because the
+configuration named it, not because the code did.
 
 `RB_AUDIO_FMT` names the format the **shim** packs into, and on this target it is
 the normal path rather than an escape hatch: with a `hw:` device nothing converts
@@ -555,8 +573,12 @@ lsusb | grep 2b73:0045                                        # the FLX4 itself
 ```
 
 `-ENODEV` on the configured device means the card is absent, not misconfigured —
-and the fallbacks below it (`plughw:`, `default`) then fail too, which is how a
-missing controller turns into `NO OUTPUT DEVICE`.
+and with `default` out of the chain, both candidates report it and the no-device
+path takes over, which is how a missing controller turns into `NO OUTPUT DEVICE`.
+This paragraph said something else until 2026-09-27: that `plughw:` *and* `default`
+fail too. On this unit `default` did not fail. It opened onto card 0 and refused
+every write, and that is the whole of the defect described in
+[13](13-raspberrypi4.md#s42-no-sound-at-all--written-22-on-every-write).
 
 **Two different `-19`s, and only one of them is a startup problem.** The `open()`
 above is the card being absent when the shim starts. The other is `written=-19`
@@ -586,16 +608,50 @@ predicate edits:
 In the write path `-ENODEV` calls `master_lost()`, which clears the global before
 closing (so a re-entrant inner call cannot mistake itself for the master), retires
 the pointer, closes it and logs **one** `MASTER LOST` line for the whole outage
-rather than one per block. Recovery runs from the write path itself under a
+rather than one per block.
+
+`-ENODEV` is not the only reason to retire a handle, and the other one is the
+defect that produced this section. A device that **opens and refuses every block**
+reports nothing so specific: measured on the unit, `default` → card 0 opened with
+`res=0` and then every write returned `-EINVAL`. So the classifier at the write
+site counts the frames that never landed — the verdicts are pure functions in
+`scripts/shims/master_policy.h`, with their own tests — and a handle that has
+failed to consume `MASTER_DEAD_FRAMES` = 44100 (a second of audio) is retired
+exactly as `-ENODEV` retires one, with `MASTER LOST: the handle opened but never
+carried a frame …` rather than the card-gone wording. Only *delivered* frames reset
+that counter, so a merely slow card cannot trip it: the FLX4's ring is 64 frames ×
+2 periods (2.9 ms) and a healthy write is absorbed in 1.45 ms, so it is reachable
+only by both attempts on a block failing over and over. A full ring answers
+`-EAGAIN` and is **not** a fault — rbp's `SND_PCM_NONBLOCK` survives onto the
+handle, so that state really occurs.
+
+Two things about that classifier are worth naming, because both were latent until
+it existed. The handle **rbp holds** is pinned and excluded from the retired ring:
+the ring's own justification — that a handle retired long enough ago to have been
+overwritten cannot still be in rbp's hands — is false for the one handle rbp keeps
+for the process's life, so on the 9th distinct loss the pointer left the ring,
+`is_master()` stopped recognising it, and rbp's write forwarded a stale pointer to
+libasound. And a recovery is complete only once a frame lands: the backoff and
+failure counters are cleared by the first *delivered* frame rather than by a
+successful open, so a device that opens and refuses everything backs off 500 ms →
+5 s instead of re-opening at the floor forever. `snd_pcm_prepare()`'s own log line
+is bounded with it — the first three per handle, plus every change of the result,
+with the total on the periodic line as `prepares=%lu`; unbounded it was the 1 MB/s
+that filled `/tmp` while this was happening.
+
+Recovery runs from the write path itself under a
 500 ms → 5 s backoff, and the new handle has the negotiation **replayed** through
 the shim's own interposed setters — format, channel count and rate, i.e. exactly
 what the pair indices were resolved against, logged as a `replay:` line followed by
 `the pair map is unchanged: …`. Two consequences worth knowing:
 
-* **The stream map is deliberately not reset.** `g_cfg.*` has already been clamped
-  against the real channel count, and clearing the channel count would silently
-  change what the pair indices mean — the cue pair would come back on top of the
-  master. Losing the card costs the audio, not the map.
+* **The stream map is deliberately not reset** *when frames have been delivered*.
+  `g_cfg.*` has already been clamped against the real channel count, and clearing
+  the channel count would silently change what the pair indices mean — the cue pair
+  would come back on top of the master. Losing the card costs the audio, not the
+  map. The one case that re-resolves is the cold one, where no frame has ever been
+  delivered and no index has ever meant anything; see the cold-case paragraph
+  below.
 * **A reopen re-arms the startup mute**, because the card thumps on a reopen just
   as it does on an open — so `startup mute released` after a `MASTER RECOVERED`
   line is expected and costs 1.8 s of silence, not a new defect. (Before this,
@@ -603,13 +659,60 @@ what the pair indices were resolved against, logged as a `replay:` line followed
   never proved a card was open. After a recovery it is preceded by the recovery
   line, which is what makes it unambiguous.)
 
-**The cold case is the same mechanism, with one honest limit.** A unit booted with
-no FLX4 already ran the no-device path (`g_real_playback == NULL`), so being absent
-at startup and being lost mid-session are the same state and only the *return* was
-missing. But in the cold case `resolve_pairs()` had already latched the 2-channel
-fallback and dropped the headphones and booth pairs, so plugging a controller in
-after boot recovers **master-pair audio only**, and the recovery line says so and
-says to restart.
+**The cold case: the pair map is re-resolved against the card that appears.** A unit
+booted with no FLX4 already ran the no-device path (`g_real_playback == NULL`), so
+being absent at startup and being lost mid-session are the same state. What differs
+is what the *map* can mean: in the cold case `resolve_pairs()` had latched the
+2-channel fallback and `clamp_pair()` had destructively written `PAIR_NONE` into the
+headphones and booth pairs, so for a long time a controller plugged in after boot
+recovered **master-pair audio only** — the pair's own `2,3` was gone, so
+"re-resolve" was not even possible — and the recovery line said so and said to
+restart.
+
+That is fixed (2026-09-27, measured on the unit). `load_config()` keeps a pristine
+copy of the map (`g_cfg_map0`), and a recovery that has never delivered a master
+frame (`g_master_frames_delivered == 0`) restores it, clears the
+resolved/assumed flags, and re-resolves against the new card *before* arming the
+startup mute — so the cue pair comes back inside the same 1.8 s window rather than
+at the next restart. The guard is on delivered frames rather than on
+`g_channels_assumed` because the pair map exists only to route frames that have
+actually been written: if none ever has, no index has ever meant anything, and
+re-resolving cannot put the cue pair "on top of" a stream that does not exist. The
+three outcomes are three distinct sentences in the log — re-resolved and complete,
+re-resolved against a card that really is 2-channel (that case keeps the note and
+the "restart" advice), or unchanged. The measured sequence, from a boot with the
+card absent and the card attached afterwards:
+
+```
+replay: access=3 channels=4 rate=44100 period=64 periods=2 …
+resolved 4 channel(s): master=0,1 headphones=2,3 booth=-1,-1 monitor=-1,-1
+the pair map was resolved again against hw:CARD=DDJFLX4,DEV=0 and is complete …
+startup mute released after 79424 frames
+writei #47501 frames=64 bytes=768 written=64 peak_m=0 mainvol=1.000 prepares=1
+```
+
+**The replay asks for RW_INTERLEAVED whatever the negotiation recorded.** The
+recorded access is rbp's *last* request, and on a boot with no card there is nothing
+to refuse it: the shim's fake answers every `set_access` with success, so rbp never
+takes the fallback it takes against a real card (`set_access req=4` then `req=3` —
+visible in any working log). The record therefore ends at **4 =
+`SND_PCM_ACCESS_RW_NONINTERLEAVED`**, and a replay that put 4 on the real card had
+its failure ignored: this card refuses that access, so the params stayed on the
+`hw_params_any` default (`0`, `MMAP_INTERLEAVED`), `hw_params` and `prepare` both
+returned 0, and then every `snd_pcm_writei()` returned `-EINVAL`. Nothing in that
+sequence reports a fault at configure time; the writes were the only evidence. The
+replay now asks for `SND_PCM_ACCESS_RW_INTERLEAVED` unconditionally, and says so when
+the recorded value differed. Measured against the card itself with `tools/pcmprobe`
+(`… 32 nonblock 4 4`): `set_access` → `-EINVAL`, the object left on
+`0 (MMAP_INTERLEAVED)`, `hw_params` ok, `prepare` ok, then **every write `-EINVAL`**
+— the same shape, from an instrument that shares no code with the shim. The same
+probe at `… 32 nonblock 3 4` writes 4631 frames. **Which layer answers `-EINVAL` to
+the write is not yet isolated**: the refused `set_access` never reaches the card, so
+the probe's run is really an access-`MMAP_INTERLEAVED` one and it fails exactly as
+the shim's replay did; reading `snd_pcm_hw_params_current()` from the handle is what
+would name the committed access authoritatively. The rule the shim follows is the
+empirical one — `RW_INTERLEAVED` is the only access this card has been observed to
+carry frames on.
 
 **One hole, deliberately not fixed:** `snd_ctl_open` hands rbp a real `snd_ctl_t`
 for the card, which is just as stale after a re-enumeration, and nothing recovers

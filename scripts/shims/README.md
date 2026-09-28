@@ -39,7 +39,7 @@ rbp-facing half — see [08 — Controls](../../docs/08-controls.md).
 |---|---|---|
 | `fb_shim.c` + `tscfake.c` + `pointsrc.c` + `point_xform.c` → `fbshim.so` | fb ioctl shim (1280×800 RGB565 logical fb, 60 fps pacing) + the fake `/dev/tsc2007_2-0048` rbp reads. `fb_shim` owns the interposed libc symbols; `tscfake` is rbp ABI; `pointsrc` finds an evdev pointer and `point_xform` maps its coordinates | discovery and geometry, via `POINT_*` |
 | `ctrlshim.c` + `ctrl_map.c` + `map_flx4.c` + `map_jp21.c` + `map_kbd.c` + `evdev_io.c` + `rbp_bridge.c` + `rbp_led.c` + `rbp_vu.c` + `midi_io.c` + `mididump.c` + `shimutil.c` → `knobshim.so` | control surface → rbp keycodes, plus panel LED and VU output. `midi_io` is the sequencer, `evdev_io` the non-MIDI source (`/dev/input/event*`), `rbp_bridge` everything that resolves into `rbp`, `ctrlshim` the front end, `map_*.c` the surfaces | `flx4` (the Pi's own surface, the default), `jp21` (SC Live 4) and `kbd` (keyboard, no controller needed). **`flx4`'s note/CC tables are written from Pioneer's published MIDI list and are unverified** — see [`map_flx4.c`](map_flx4.c)'s provenance block and [15 — DDJ-FLX4 MIDI](../../docs/15-flx4-midi.md) |
-| `audioshim.c` + `s24pack.c` → `audioshim.so` | presents rbp's three 2-channel S24_LE 44.1 kHz streams as one real ALSA stream on a configurable card, channel map and format | card/map/format, via `AUDIO_*` |
+| `audioshim.c` + `s24pack.c` + `mirror_policy.c` + `master_policy.c` → `audioshim.so` | presents rbp's three 2-channel S24_LE 44.1 kHz streams as one real ALSA stream on a configurable card, channel map and format; the two policy modules are its master device chain and its HDMI mirror's decisions | card/map/format, via `AUDIO_*` |
 | `crashcatch.c` → `crashcatch.so` | SIGSEGV `pc`/`lr` → `/tmp/crash.log` | diagnostic |
 | `seqinject2.c` → `seqinject2` | static helper: inject MIDI into the shim's sequencer port | diagnostic |
 | `udplog.c` → `udplog` | static UDP listener for rbp's DebugLog | diagnostic |
@@ -57,6 +57,19 @@ always in play: `AUDIO_DEV` is a `hw:` device, so nothing between the shim and t
 card converts, and `AUDIO_FMT` (default `s24_3le`, which is what the FLX4 accepts)
 is the format `s24pack()` produces. It is only bypassed when `AUDIO_DEV` names a
 plug device, where the plug chain does the packing instead.
+
+`mirror_policy.c` and `master_policy.c` are the same split applied to the two
+decisions the shim cannot be trusted to get right by reading it: which device
+candidates a configured device name yields, what one `snd_pcm_writei()` return
+means, and when a device that has stopped carrying the stream may be retired —
+`mirror_policy.c` for the HDMI mirror, `master_policy.c` for the master.
+`audioshim.c` cannot be linked into a test at all, so anything left inside it is
+only checkable by a drill on a Pi; both modules are pure in the same sense
+`s24pack.c` is, which is what lets `test_audio` pin the verdicts on the host. The
+master's chain is the one that matters most: it may name the card `AUDIO_DEV`
+names and nothing else, because a fallback device is one whose channel count gets
+latched into the stream→pair map without any index having been resolved against
+it — see [09 — Audio](../../docs/09-audio.md).
 
 See [08 — Controls](../../docs/08-controls.md) and
 [09 — Audio](../../docs/09-audio.md).

@@ -345,16 +345,37 @@ is what makes it unambiguous, where before it could have been the silent path
 **The cold case is the same mechanism**, which is the pleasant part: a unit booted
 with no FLX4 already had `g_real_playback == NULL` and ran the no-device path, so
 being *absent* at startup and being *lost* mid-session are the same state — only
-the return was missing. One honest limit: in the cold case `resolve_pairs()` had
-already latched the 2-channel fallback and dropped the headphones and booth pairs,
-so plugging in a controller after boot recovers **master-pair audio only**, and
-the recovery line says so and says to restart.
+the return was missing. The *map* was not the same: `resolve_pairs()` had latched
+the 2-channel fallback and `clamp_pair()` had written `PAIR_NONE` over the
+headphones pair, so plugging a controller in after boot recovered **master-pair
+audio only**, and the recovery line said so and said to restart.
 
-**Still unverified on the unit, and one hole that is deliberately not fixed.**
-The on-unit sequence is in [13](13-raspberrypi4.md) S8.6: pull the FLX4 mid-play,
-expect `MASTER LOST` **once** rather than per block, then on replug
-`MASTER RECOVERED` and `written=64` with a non-zero `peak_m`. Until that has been
-seen, this is code that passes its tests and has never met a card. Separately,
+**That is fixed** (2026-09-27, measured on the unit). The pristine copy of the map
+is kept and re-resolved against the card that appears, before the startup mute is
+re-armed, so the cue pair comes back inside the same 1.8 s window rather than at
+the next restart:
+
+```
+replay: access=3 channels=4 rate=44100 period=64 periods=2 …
+resolved 4 channel(s): master=0,1 headphones=2,3 booth=-1,-1 monitor=-1,-1
+the pair map was resolved again against hw:CARD=DDJFLX4,DEV=0 and is complete …
+startup mute released after 79424 frames
+writei #47501 frames=64 bytes=768 written=64 peak_m=0 mainvol=1.000 prepares=1
+```
+
+`access=3` there is the second half of it: the replay asks for `RW_INTERLEAVED`
+whatever the negotiation recorded, because a boot with no card has nothing to
+refuse rbp's request and the record can therefore hold `RW_NONINTERLEAVED` — an
+access this card refuses, leaving the handle configured and refusing every write.
+Both are in [09](09-audio.md). The note and its "restart" advice survive for the
+one case they are true in — a card that really is 2-channel.
+
+**The cold half is measured; the mid-play pull is still owed, and there is one hole
+that is deliberately not fixed.** The cardless boot and the late plug-in were run
+on the unit on 2026-09-27 (S4.10/S4.11 in [13](13-raspberrypi4.md)) and the
+sequence quoted above is that run's. S8.6 — pull the FLX4 **mid-play**, expect
+`MASTER LOST` **once** rather than per block, then on replug `MASTER RECOVERED` and
+`written=64` with a non-zero `peak_m` — is the row that remains unrun. Separately,
 `snd_ctl_open` hands rbp a real `snd_ctl_t` for the card, which is just as stale;
 nothing recovers it, and `snd_ctl_pcm_info` never forwards, so if rbp re-probes
 the control interface it may learn nothing. A `grep -c snd_ctl_open` after a
@@ -406,6 +427,15 @@ shim logged `NO OUTPUT DEVICE` with `open('hw:CARD=DDJFLX4,DEV=0') res=-19`
 (-ENODEV), and there were **zero** `writei #` lines, which is the only line that
 means a real device is being fed ([09 — Audio](09-audio.md) has the recipe for
 telling the two apart).
+
+The cardless drill of 2026-09-27 shows the trap from both sides at once, in one
+file: `startup mute released after 79424 frames` appears **twice**, at line 255 of
+the run's log with no card (and no `writei #` line anywhere before it) and again at
+line 542, immediately after the replay that put a real card under the stream. Both
+lines are byte-identical. The thing that distinguishes them is not the mute line at
+all — it is what precedes it: the second is preceded by `MASTER RECOVERED` and the
+`replay:` line, and the first by `NO OUTPUT DEVICE`. So the rule stands as written,
+with a sharper edge: **count `writei #` lines, not mute releases**.
 
 So "no pop" on a restart is not evidence of anything until `writei #` is
 appearing. Listen for the pop with the FLX4 connected and the card open.

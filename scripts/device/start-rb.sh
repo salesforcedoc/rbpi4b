@@ -215,7 +215,11 @@ echo "start-rb: AUDIO_DEV=$AUDIO_DEV MIDI_MAP=$MIDI_MAP POINT_KIND=$POINT_KIND"
 # honest reading of the empty value that disables it — it must not be mistakable
 # for a device name — and the fmt fallback shown is what s24pack_parse() makes of
 # an empty string, not the shim's in-source default. The shim logs the list it
-# actually resolved, one candidate per line, in /tmp/audioshim.log.
+# actually resolved, one candidate per line, in /tmp/audioshim.log. The master
+# logs its chain in the same shape, and that line is worth reading on any unit
+# whose audio misbehaves: `master dev="…" candidates=2` is the configured device
+# and its plughw twin and nothing else, so any third name there — `default` above
+# all — means a fallback the configuration did not ask for has come back.
 echo "start-rb: AUDIO_MIRROR_DEV=${AUDIO_MIRROR_DEV:-<off>} fmt=${AUDIO_MIRROR_FMT:-<s24_le>}"
 
 # --- 7. start the EDB daemon inside the chroot ------------------------------

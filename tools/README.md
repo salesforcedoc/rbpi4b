@@ -10,7 +10,7 @@ Two kinds of tool live here:
 | [`fit-crosscheck.sh`](fit-crosscheck.sh) | workstation | shell + C | prove the driver's copy and the shim's copy of the fit rule still agree |
 | [`fbdump.c`](fbdump.c) | **the Pi** | C | dump `/dev/fb0` geometry/format + say what it means for the present path |
 | [`evdevdump.c`](evdevdump.c) | **the Pi** | C | enumerate input devices; find the pointer and its axis algebra |
-| [`pcmprobe.c`](pcmprobe.c) | **inside the chroot on the Pi**, or a workstation under `qemu-arm` | C | name ALSA's `snd_pcm_format_t` values, and list a card's accepted formats by name |
+| [`pcmprobe.c`](pcmprobe.c) | **inside the chroot on the Pi**, or a workstation under `qemu-arm` | C | name ALSA's `snd_pcm_format_t` values, list a card's accepted formats by name, and run the whole open→configure→write sequence against a named device, access and channel count |
 | [`aseqdump2dump.py`](aseqdump2dump.py) | the Pi or a workstation | Python | turn an `aseqdump` capture into a replayable MIDI dump, and print the inventory and arithmetic a controller map is written from |
 | [`pi-bringup/`](pi-bringup/) | **the Pi** | Python / shell | drive the input path on the unit: a virtual keyboard with a chosen hold time, a raw evdev reader, a state probe, a key-and-capture harness |
 
@@ -50,15 +50,18 @@ test binaries come from one place.
 ```bash
 docker build -t rblive4-build tools/build-toolchain/
 docker run --rm -v "$PWD:/src" -w /src rblive4-build \
-    make -C scripts/shims RX3=extracted/XDJRX3-rootfs test
+    make -C scripts/shims RX3=/src/extracted/XDJRX3-rootfs test
 ```
 
 Both commands work on a fresh clone — the context is the Dockerfile's own
 directory and nothing is `COPY`ed, so the image needs no repository content at
-all. The native equivalent is the same two packages from your distribution's
-archive (`gcc-arm-linux-gnueabi`, `libc6-dev-armel-cross`, plus `qemu-user`),
-which is what the `RUN` line installs; Docker is a convenience, not a
-requirement, and it is the only route that needs nothing on the host.
+all. Note the **absolute** `RX3=` path in the second one: `make -C scripts/shims`
+changes directory before it reads the variable, so a path relative to the
+repository root resolves against `scripts/shims/` and the build stops on a
+missing `libdl.so.2`. The native equivalent is the same two packages from your
+distribution's archive (`gcc-arm-linux-gnueabi`, `libc6-dev-armel-cross`, plus
+`qemu-user`), which is what the `RUN` line installs; Docker is a convenience, not
+a requirement, and it is the only route that needs nothing on the host.
 
 There is deliberately **no `libasound2-dev`** in the image: no shim includes
 `<alsa/…>` — every `snd_*` call is resolved with `dlsym(RTLD_DEFAULT, …)` — and
@@ -202,6 +205,38 @@ the shim dlopens, the same plug device offers **exactly one** format
 mode is what settles it: it links the chroot's libasound and reports the same
 mask the shim's own open would see. The HDMI mirror's device and format defaults
 in `rb.conf` come from that run ([09](../docs/09-audio.md#the-hdmi-mirror)).
+
+Two more arguments follow the `nonblock` one: a fifth sets the **access** mode
+explicitly, and a sixth sets the **channel count** (default 2, clamped to 1..8).
+Both exist because of one measurement. `set_access()` can be *refused* and the
+sequence carries on anyway — that is the point, not a bug in the tool — so the
+write loop's verdict is only meaningful if the channel count is one the card can
+actually run. The FLX4 is opened at 4 channels, so the two runs that settle it
+are:
+
+```bash
+pcmprobe hw:CARD=DDJFLX4,DEV=0 32 nonblock 3 4   # set_access ok  → writes 4631 frames
+pcmprobe hw:CARD=DDJFLX4,DEV=0 32 nonblock 4 4   # set_access FAILS → every write -EINVAL
+```
+
+Measured on the unit, 2026-09-27, with the second of those: `set_access(4)` returns
+`-EINVAL`, and that return value is the **only** sign of it. The sequence proceeds
+regardless, the params commit **succeeds**, `hw_params` and `prepare` both return
+`0`, and then **every** `writei` returns `-EINVAL`. The negotiated line shows the
+object left on `0 (MMAP_INTERLEAVED)` — the value `hw_params_any` starts from, which
+a refused `set_access()` does not change. The first run, the same binary and the same
+card one argument apart, writes 4631 frames.
+
+That pair is why `replay_negotiation()` now asks for `RW_INTERLEAVED`
+unconditionally instead of replaying the access the first negotiation recorded: on
+this card it is the only access observed to carry frames, and it is what the shim's
+write path — `snd_pcm_writei()` on an interleaved buffer — needs. What the probe
+does **not** settle is which layer answers `-EINVAL` to the write. The refused
+`set_access(4)` never reaches the card, so the second run above is really an
+access-`MMAP_INTERLEAVED` run, and it fails exactly as the shim's cold-plugin replay
+did. Reading `snd_pcm_hw_params_current()` from the handle, rather than the params
+object, is what would name the committed access authoritatively; until that is done,
+the rule the shim follows is the empirical one.
 
 ## `aseqdump2dump` — turning a capture into a fixture and a table
 
