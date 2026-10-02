@@ -42,11 +42,18 @@ void seq_setup(void);
  * plugged in after the shim starts is picked up. */
 void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev));
 
-/* Panel output: three-byte Note On/Off and control change, and the query that
- * makes the panel report its current absolute values. */
-int midi_note(int midi_ch, int note, int vel);
+/* Panel output: three-byte Note On and control change, and the query that makes
+ * the panel report its current absolute values. Every note goes out as a Note On
+ * -- velocity 0 is OFF, not a Note Off, because the FLX4's LEDs ignore a real
+ * Note Off (measured; see midi_io.c). */
+int midi_note(int midi_ch, int note, int val);
 int midi_cc(int midi_ch, int cc, int val);
-void led_query_absolute(void);
+/* 1 if the query actually went out (only the rawmidi route carries it, and only
+ * a JP21-protocol panel answers), 0 if this surface cannot be asked where its
+ * absolute controls are. The 0 is load-bearing: rbp's mixer builds with its
+ * channel faders at zero, so a surface that cannot answer leaves rbp silent
+ * until something seeds them -- see rbp_vu.c's vu_thread. */
+int led_query_absolute(void);
 
 /* 1 once some route to the surface exists. The LED and meter threads wait for
  * this instead of for a device node, because which device (if any) is the route

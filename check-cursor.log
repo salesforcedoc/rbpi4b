@@ -1,0 +1,12 @@
+make: Entering directory '/w/scripts/shims'
+== GLIBC symbol versions ==
+-- knobshim.so
+   GLIBC_2.4
+   GLIBC_2.7
+-- audioshim.so
+   GLIBC_2.4
+-- fbshim.so
+   GLIBC_2.4
+-- crashcatch.so
+   GLIBC_2.4
+make: Leaving directory '/w/scripts/shims'

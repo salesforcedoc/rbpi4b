@@ -46,6 +46,7 @@ Thumbs.db
 
 # built diagnostic binaries
 /tools/touchdump
+/scripts/shims/pcmprobe
 /scripts/shims/seqinject2
 /scripts/shims/udplog
 /scripts/device/timeout

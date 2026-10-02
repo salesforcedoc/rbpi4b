@@ -47,20 +47,49 @@
 #include "shimutil.h"
 
 #define LOG_PATH "/tmp/knobshim.log"
+
+/* The log's fd, opened once and kept.
+ *
+ * klog() used to open, write and close the file on EVERY call -- three syscalls
+ * per line, and a per-event line can be called thousands of times a second. The
+ * syscalls were not the only cost: the close is a full release of the file, so
+ * two threads logging at once could not interleave, which sounds like a benefit
+ * until the line is one the input thread has to get out of the way of.
+ *
+ * It is deliberately never closed. This lives in a process that runs until rbp
+ * exits, so there is nothing to close it for.
+ *
+ * `log_fd == -1` means "not open yet", so a failed open is retried on the next
+ * line rather than silencing the shim for good -- /tmp being momentarily
+ * unwritable must not cost the log of whatever went wrong next.
+ *
+ * Every thread in this shim logs, and two of them finding -1 at the same moment
+ * will both open the file, leaking one fd. That is the whole of the race: each
+ * write() is a single call with a buffer that is already complete, so lines from
+ * two threads cannot interleave or be lost, and one leaked fd on a path that can
+ * run at most once per process is not worth a lock on the log. */
+static int log_fd = -1;
+
 void klog(const char *fmt, ...)
 {
      char buf[256];
      va_list ap;
+     int n;
+
      va_start(ap, fmt);
-     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+     n = vsnprintf(buf, sizeof(buf), fmt, ap);
      va_end(ap);
-     if (n > 0) {
-          int fd = real_open(LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
-          if (fd >= 0) {
-               (void)write(fd, buf, (size_t)(n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1));
-               real_close(fd);
-          }
-     }
+     if (n <= 0)
+          return;
+
+     if (log_fd < 0)
+          log_fd = real_open(LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
+     if (log_fd < 0)
+          return;
+     /* real_write and not write: a shim that ever interposed write() would send
+      * its own log line into itself. */
+     (void)real_write(log_fd, buf,
+                      (size_t)(n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1));
 }
 
 /* The words that mean yes. Case-insensitive, because rb.conf is written by hand

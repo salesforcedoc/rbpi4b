@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "ctrl_map.h"
+#include "shimutil.h"   /* klog, for map_none's one line */
 
 struct note_ctrl note_map[CTRL_NKEYS];
 int note_map_n = 0;
@@ -38,7 +39,16 @@ void add_note(int rch, int note, int key, int sch)
      note_map[note_map_n].key = key;
      note_map[note_map_n].sch = sch;
      note_map[note_map_n].pressed = 0;
+     note_map[note_map_n].repeat = 0;
      note_map_n++;
+}
+
+void add_note_repeat(int rch, int note, int key, int sch)
+{
+     if (note_map_n >= CTRL_NKEYS)
+          return;
+     add_note(rch, note, key, sch);
+     note_map[note_map_n - 1].repeat = 1;
 }
 
 void add_abs(int rch, int cc, int key, int sch)
@@ -59,3 +69,32 @@ void ctrl_abs_invalidate(void)
      for (i = 0; i < abs_map_n; i++)
           abs_map[i].last = -1;
 }
+
+/* ---- map_none ------------------------------------------------------------
+ *
+ * The selection that means "no surface here". It lives in this file, beside the
+ * tables, rather than in a map_none.c of its own, because it is the absence of a
+ * surface: there is no table for it to fill and nothing for it to read, and a
+ * file whose whole content is a NULL initialiser would read as a surface that
+ * had failed to load.
+ *
+ * Its build() logs, and that is the reason it has one at all. A silent "none"
+ * and a shim that never started the side it was asked to start are the same
+ * observation from the log, and the one thing this map exists to prevent is
+ * exactly that confusion -- so it says so, once, at the moment it is selected. */
+static void none_build(void)
+{
+     klog("knobshim2: none: no surface on this side; nothing built "
+          "(this is a selection, not a failure)\n");
+}
+
+const struct ctrl_map map_none = {
+     "none",
+     none_build,
+     NULL,   /* startup(): rbp is told nothing on behalf of nothing */
+     NULL,   /* event(): no sequencer events are consumed */
+     NULL,   /* tick(): nothing is about time */
+     NULL,   /* devices(): no non-MIDI source wanted */
+     NULL,   /* input(): ditto */
+     NULL,   /* leds: no surface, so nothing to illuminate */
+};

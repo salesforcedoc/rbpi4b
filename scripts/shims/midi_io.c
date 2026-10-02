@@ -321,6 +321,9 @@ void seq_setup(void)
 void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev))
 {
      struct snd_seq_event ev;
+     /* Rate limit for the "this fd is not usable" line below. Static rather than
+      * automatic because it has to survive the round it was set in. */
+     static unsigned long long seq_bad_next_ms;
 
      for (;;) {
           struct pollfd pfd;
@@ -346,6 +349,22 @@ void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev))
                on_event(&ev);
           else if (n < 0 && errno == EINTR)
                continue;
+          else if (n < 0) {
+               /* Not EINTR: poll() said there was something to read and the read
+                * failed. A sequencer fd the kernel has given up on answers
+                * POLLNVAL -- with a POSITIVE count, so the idle branch above is
+                * skipped, read() fails immediately, and the loop spins at 100%
+                * CPU for as long as rbp runs. This shim never reopens the
+                * sequencer, so there is nothing to fix here; what there is to do
+                * is stop the spin, keep the surface work below running, and say
+                * so once every five seconds rather than once per turn. */
+               if (shim_now_ms() >= seq_bad_next_ms) {
+                    seq_bad_next_ms = shim_now_ms() + 5000;
+                    klog("knobshim2: seq read: %s; this fd is not usable"
+                         " (poll said there was data)\n", strerror(errno));
+               }
+               usleep(100000);
+          }
      }
 }
 
@@ -400,11 +419,28 @@ static int out_write(const unsigned char *m)
      return 0;
 }
 
+/* One LED. Velocity 0 means OFF, and it goes out as a Note On with velocity 0 --
+ * never as a Note Off (0x80).
+ *
+ * MEASURED ON THE FLX4, 2026-10-01, and it is the whole of "the LEDs stay lit
+ * when I turn the cue off": the panel's LED hardware IGNORES a real Note Off.
+ * Deck 1's channel CUE LED lit, `90 54 00` put it out; with that LED lit again,
+ * `80 54 00` left it on. Same channel, same note, the status byte the only
+ * difference. This function used to build off as `0x80 | ch`, so every LED the
+ * map lit stayed lit -- the wire carried the off and the panel did not act on it.
+ *
+ * Note On with velocity 0 is also the safer encoding in general, which is why
+ * there is no per-surface switch here: the MIDI spec defines Note On velocity 0
+ * as a Note Off, so a conforming surface must accept it, while a surface that
+ * special-cases its LEDs on Note On (this one) requires it. The previous target
+ * drove its LEDs through this same function and read the Note Off; nothing about
+ * that surface can be measured from this rig, and the spec-equivalent form is
+ * the one that satisfies both. */
 int midi_note(int midi_ch, int note, int vel)
 {
      unsigned char m[3];
 
-     m[0] = (unsigned char)((vel > 0 ? 0x90 : 0x80) | (midi_ch & 0x0f));
+     m[0] = (unsigned char)(0x90 | (midi_ch & 0x0f));
      m[1] = (unsigned char)(note & 0x7f);
      m[2] = (unsigned char)(vel & 0x7f);
      return out_write(m);
@@ -428,8 +464,12 @@ int midi_cc(int midi_ch, int cc, int val)
  * This is a JP21 protocol message, and the sequencer route carries only the
  * three-byte LED/meter messages, so it goes out on rawmidi or not at all. A
  * surface matched by name (the FLX4) has no absolute controls to report and no
- * meters to light, so "not at all" is the correct outcome there. */
-void led_query_absolute(void)
+ * meters to light, so "not at all" is the correct outcome there.
+ *
+ * Returns whether the query went out, which is a different question from
+ * whether the panel will answer: rbp_vu.c reads the 0 as "nobody is going to
+ * tell rbp where the faders are", which is the case it has to seed them for. */
+int led_query_absolute(void)
 {
      static const unsigned char sysex[10] = {
           0xF0, 0x00, 0x02, 0x0B, 0x7F, 0x12, 0x04, 0x00, 0x00, 0xF7
@@ -446,7 +486,8 @@ void led_query_absolute(void)
                klog("knobshim2: absolute-value query not sent: the rawmidi route "
                     "is what carries it (sequencer route in use)\n");
           }
-          return;
+          return 0;
      }
      (void)write(led_fd, sysex, sizeof(sysex));
+     return 1;
 }

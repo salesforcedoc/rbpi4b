@@ -71,4 +71,35 @@ void point_xform_abs(const struct point_xform *x, int raw_x, int raw_y,
 void point_xform_rel(const struct point_xform *x, int dx, int dy,
                      int *cursor_x, int *cursor_y);
 
+/* Where a logical_w x logical_h surface lands in a fb_w x fb_h framebuffer.
+ * Aspect-fit unless `stretch`, then both axes are filled; either way the
+ * rectangle is centred.  Its size comes back in *dw and *dh, its top-left in
+ * *bx and *by.  (Spelled out rather than as a slash-joined pair, because two
+ * names around a slash open a nested comment and gcc says so.)
+ *
+ * THIS IS A SECOND COPY OF ONE RULE.  The original is fbdev_present_fit() in
+ * work/dfb-src/systems/fbdev/fbdev.c, which decides where the DirectFB present
+ * path blits the UI; this one decides where the cursor draws on top of it.  They
+ * are in different builds -- the driver is cross-built for the target, this is
+ * part of an LD_PRELOAD shim -- and cannot share a header, so *a change to one
+ * is a change to both*.  A drift is not silent: the driver logs its rectangle in
+ * the one-shot PRESENT: line (/tmp/dfbdig9.log) and fb_cursor.c logs this one,
+ * so the two reports disagreeing on the unit is the tell.
+ *
+ * The arithmetic is 16.16.  The scale factor is FLOORED, which is what bounds
+ * the rectangle: s <= (fb_w << 16) / logical_w and s <= (fb_h << 16) / logical_h,
+ * so logical_w * s <= fb_w << 16 and logical_h * s <= fb_h << 16 hold, and
+ * *dw <= fb_w / *dh <= fb_h hold for any final rounding that adds less than 65536.
+ * The final shift therefore ROUNDS TO NEAREST (+32768) rather than down: the
+ * step is already floored, so flooring again loses a whole row and column on
+ * every inexact fit (1280x800 into 1280x720 gives 1151x719 floored, 1152x720
+ * rounded).  On a fb that matches the logical size this returns dw==fb_w,
+ * dh==fb_h, bx==by==0, so the caller's mapping is the identity it has always
+ * been.
+ *
+ * Pure: no env, no I/O, no state -- same rule as the rest of this header, and
+ * the reason it lives here is that test_point links this file directly. */
+void point_fit(int logical_w, int logical_h, int fb_w, int fb_h, int stretch,
+               int *dw, int *dh, int *bx, int *by);
+
 #endif /* RBLIVE4_POINT_XFORM_H */

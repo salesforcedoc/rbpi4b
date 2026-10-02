@@ -2,10 +2,12 @@
  * rbp_bridge.c -- the shim's side of the boundary with rbp.
  *
  * Everything that resolves one of rbp's objects or calls into one: the
- * KeyManager and the keycode send path, the MixerEngine singletons (cue,
- * headphone split, master cue), the beat-loop entry points, and the meter hook
- * that patches rbp's own getLedValue prologue so we can read its meter values
- * instead of guessing at level units.
+ * MixerEngine singletons (cue, headphone split, master cue), the beat-loop entry
+ * points, and the meter hook that patches rbp's own getLedValue prologue so we
+ * can read its meter values instead of guessing at level units.
+ *
+ * The KeyManager and the keycode send path used to live here and are now in
+ * rbp_key.c, which fbshim also links -- see that file's header for why.
  *
  * All of rbp's addresses and offsets live in rbp_abi.h; this file is the code
  * that uses them. The exported functions here are the shim's internal API --
@@ -38,71 +40,13 @@
 
 #include "shimutil.h"
 #include "rbp_abi.h"
+#include "rbp_key.h"
 #include "rbp_bridge.h"
 
-/* ---- rbp integration ---- */
-int is_rbp_process(void)
-{
-     char cmd[128];
-     int fd;
-     ssize_t n;
-     fd = real_open("/proc/self/cmdline", O_RDONLY, 0);
-     if (fd < 0)
-          return 0;
-     n = real_read(fd, cmd, sizeof(cmd) - 1);
-     real_close(fd);
-     if (n <= 0)
-          return 0;
-     cmd[n] = '\0';
-     for (ssize_t i = 0; i < n; i++)
-          if (cmd[i] == '\0')
-               cmd[i] = ' ';
-     return strstr(cmd, "rbp") != NULL;
-}
-static int is_rbp_checked = -1;
-
-void *get_key_manager(void)
-{
-     void **p;
-     void *mgr;
-     if (is_rbp_checked < 0)
-          is_rbp_checked = is_rbp_process();
-     if (!is_rbp_checked)
-          return NULL;
-     p = (void **)UI_OBJ_MGR_GLOBAL;
-     if (!p)
-          return NULL;
-     mgr = *p;
-     if (!mgr)
-          return NULL;
-     return *(void **)((char *)mgr + KEY_MANAGER_OFF);
-}
-
-typedef void (*sendkey_fn)(void *km, int keycode, int op, int ch,
-                           long param, float f, long l);
-
-void send_rx_key_fl(int keycode, int op, int ch, long param,
-                           float fval, long lval)
-{
-     void *km = get_key_manager();
-     if (!km)
-          return;
-     void **vt = *(void ***)km;
-     sendkey_fn fn = (sendkey_fn)vt[SENDKEY_VTABLE_WORD];
-     if (!fn)
-          return;
-     fn(km, keycode, op, ch, param, fval, lval);
-}
-
-void send_rx_key_f(int keycode, int op, int ch, long param, float fval)
-{
-     send_rx_key_fl(keycode, op, ch, param, fval, 0);
-}
-
-void send_rx_key(int keycode, int op, int ch, long param)
-{
-     send_rx_key_fl(keycode, op, ch, param, 0.0f, 0);
-}
+/* The key path -- is_rbp_process(), get_key_manager() and send_rx_key*() -- is
+ * in rbp_key.c, because fbshim needs it too (the on-screen QUANTIZE tap) and
+ * this object carries the meter hook, which must not exist in two copies. See
+ * rbp_key.h. rbp_bridge.h includes it, so every declaration is unchanged here. */
 
 /* ---------- generic helpers ---------- */
 
@@ -112,6 +56,16 @@ int cc_to_10bit(int v)
      if (v < 0) v = 0;
      if (v > 127) v = 127;
      return (v << 3) | (v >> 4);
+}
+
+int rbp_beatfx_type(void)
+{
+     /* A plain function in rbp's text (map_jp21.c has called it this way since
+      * the rotary was bound), so the only state it can be missing is rbp's:
+      * the guard is the process, not a handle. */
+     if (!is_rbp_process())
+          return -1;
+     return ((int (*)(void *))ADDR_GET_BFX_TYPE)(NULL);
 }
 
 void *mixer_engine(void)
@@ -217,11 +171,22 @@ static void scan_plinn(void)
 {
      FILE *f;
      char line[256];
-     static int scans;
+     static unsigned long long last;
+     unsigned long long now;
      if (g_plinn[0] && g_plinn[1])
           return;
-     if (scans++ > 4)
-          return;                       /* don't rescan on every turn */
+     /* A deck that is not built yet keeps its slot NULL, so the scan has to stay
+      * retryable for as long as the process lives. It used to be a hard cap of
+      * five attempts (`if (scans++ > 4)`), and the cost of that is measured:
+      * 2026-10-01 the log read `deck1=0xcde07280 deck2=(nil)`, so deck 2 had no
+      * innards for the rest of the run and every plinn(1) went quiet for good --
+      * which for hotcue_delete() is a SHIFT + pad on deck 2 that does nothing.
+      * Time-limited instead: the scan walks every writable mapping, so it is
+      * worth avoiding on every knob turn, but not worth giving up on. */
+     now = shim_now_ms();
+     if (now - last < 1000)
+          return;
+     last = now;
      f = fopen("/proc/self/maps", "r");
      if (!f)
           return;
@@ -241,14 +206,28 @@ static void scan_plinn(void)
                if (*(volatile unsigned int *)a != PVTABLE_PLAYERINNARDS)
                     continue;
                chan = *(volatile unsigned char *)(a + PLAYERINNARDS_CHAN_OFF);
+               /* +0x74 discriminates the struct but is NOT the pad mode the UI
+                * displays: measured 2026-09-30 to stay 0 through all four pad-mode
+                * keycodes while rbp's grid verifiably switched.  Logged by its
+                * offset, not by a name it has not earned. */
                mode = *(volatile unsigned char *)(a + PLAYERINNARDS_MODE_OFF);
                eng = *(volatile unsigned int *)(a + 0x30);
-               if ((chan != 2 && chan != 3) || mode > 3 || eng < 0x80000000u)
+               /* The channel byte is 1-based -- deck 1 is 1, deck 2 is 2 -- and
+                * it matches the ui::Player's own channel byte at the same
+                * offset.  This test used to read (chan != 2 && chan != 3) with
+                * `d = chan - 2`, and the cost of that is measured (2026-10-01):
+                * deck 1's innards carries 1, so it was rejected outright, deck
+                * 2's carries 2 and was filed as deck 1, and g_plinn[1] stayed
+                * NULL for the life of the process.  The log said so plainly --
+                * `deck1=0xcbaaa780 deck2=(nil)` -- where 0xcbaaa780 is
+                * `[player[1]+0x138]`, deck 2's innards.  Every write through
+                * plinn() therefore landed on the wrong deck. */
+               if ((chan != 1 && chan != 2) || mode > 3 || eng < 0x80000000u)
                     continue;
-               d = chan - 2;
+               d = chan - 1;
                if (!g_plinn[d]) {
                     g_plinn[d] = (void *)a;
-                    klog("knobshim2: PlayerInnards deck%d @%p (padmode=%d)\n",
+                    klog("knobshim2: PlayerInnards deck%d @%p (+0x74=%d)\n",
                          d + 1, (void *)a, mode);
                }
           }
@@ -266,14 +245,117 @@ void *plinn(int deck)
      return g_plinn[deck];
 }
 
+/* The ui::Player for `deck` (0..1): rbp's own player array, walked exactly the
+ * way IUiObjManager::getPlayer() does it (rbp_abi.h's UIOBJ_* constants).
+ * UiObject::Channel is 1-based, so the deck index is the array index. */
+static void *ui_player(int deck)
+{
+     void *holder, *players;
+     int n;
+
+     if (!is_rbp_process())
+          return NULL;
+     holder = *(void **)UIOBJ_HOLDER_GLOBAL;
+     if (!holder)
+          return NULL;
+     players = *(void **)((char *)holder + UIOBJ_PLAYERS_OFF);
+     n = *(int *)((char *)holder + UIOBJ_NPLAYERS_OFF);
+     if (!players || n <= 0 || n > 8 || deck < 0 || deck >= n)
+          return NULL;
+     return *(void **)((char *)players + 4 * deck);
+}
+
+/* Delete one HOT CUE -- the gesture the FLX4 spells SHIFT + pad, and the one
+ * thing on this surface rbp has no keycode for.
+ *
+ * THIS IS A DIRECT CALL, and that is not the first thing tried.  The smaller
+ * route was to keep sending the pad key the map already sends and set the
+ * selector on the deck's PlayerInnards for the duration: K_PAD1+p does reach
+ * Player::onHotCueEvent, and only a selector of 3 takes its delete arm.  That
+ * was built, deployed and measured on the unit (2026-10-01) -- and it does not
+ * work.  Writing 7 to [innards+0x38], sending one plain K_PAD1 key and reading
+ * the word back gives 0: rbp clears it on the key path before the handler looks
+ * at it, so nothing written from outside survives the dispatch.
+ *
+ * So this calls ui::Player::onHotCueDeleteEvent(pad) directly.  It is a plain
+ * concrete symbol (rbp_abi.h's ADDR_HOTCUE_DELETE), the pad number is the whole
+ * argument, and the function guards itself at every step -- pad range, that
+ * pad's own has-cue flag, a live TrackInfo, seacheHotCue() finding the cue, and
+ * a per-pad state byte -- so an empty pad is a no-op rather than a stray write.
+ *
+ * It lives here rather than in the map because every address does: a map never
+ * learns an RBP offset.  See memory `rbp-hot-cue-delete-route`.
+ *
+ * THE DELETE IS TWO HALVES, and the operator found the seam (2026-10-01): "the
+ * light does go off though" -- the FLX4 pad darkens, which is rbp's own cue list
+ * and DB agreeing the cue is gone, and yet the pad cell kept drawing.  That call
+ * is the UI and DB half only.  The engine half is a second direct call
+ * (rbp_abi.h's ADDR_ENGINE_CLEAR_HOTCUE), made below, and both are needed. */
+int hotcue_delete(int deck, int pad)
+{
+     void *p;
+     void *inn, *eng = NULL;
+
+     if (pad < 1 || pad > 8)
+          return -1;
+     p = ui_player(deck);
+     if (!p) {
+          /* Never silent: a -1 that prints nothing is the failure that reads as
+           * "the gesture is not bound" and sends the next session looking at the
+           * map. */
+          klog("knobshim2: hotcue delete deck%d pad%d: no ui::Player yet\n",
+               deck + 1, pad);
+          return -1;
+     }
+
+     ((void (*)(void *, int))ADDR_HOTCUE_DELETE)(p, pad);
+
+     /* The SECOND half, and the one whose absence was visible on the glass: the
+      * UI call above never touches the engine, so the engine kept the cue and
+      * the pad grid kept drawing it -- a delete that looked like it had failed
+      * while every other witness said it had worked.  rbp_abi.h's
+      * ADDR_ENGINE_CLEAR_HOTCUE carries the derivation, including why the pad
+      * number is passed as-is and why the channel is the 0-based deck index.
+      *
+      * rbp gates its own clear on isRegisteredHotCue(ch, pad), and this does not:
+      * it asks and logs the answer instead.  The pad we most need to clear is the
+      * one the UI half has already forgotten, and a gate that answers 0 for
+      * exactly that pad would leave the ghost standing with nothing in the log to
+      * say why -- the failure mode this whole route exists to avoid.  Clearing a
+      * cue the engine does not hold is a no-op there, not a stray write: both
+      * clearCuePosition @0x65f6c and backHotCueGate @0x66bf8 range-check first.
+      *
+      * Skipped only when the innards scan has not found this deck, which is
+      * logged rather than passed over in silence. */
+     inn = plinn(deck);
+     if (inn)
+          eng = *(void **)((char *)inn + PLAYERINNARDS_ENGINE_OFF);
+     if (eng) {
+          int reg = ((int (*)(void *, int, int))ADDR_ENGINE_IS_REGHOTCUE)
+                         (eng, deck, pad);
+          ((void (*)(void *, int, int))ADDR_ENGINE_CLEAR_HOTCUE)(eng, deck, pad);
+          klog("knobshim2: hotcue delete deck%d pad%d @%p inn=%p eng=%p reg=%d\n",
+               deck + 1, pad, p, inn, eng, reg);
+     } else {
+          klog("knobshim2: hotcue delete deck%d pad%d @%p: no engine yet -- the "
+               "cue is gone from rbp's data but the pad grid will keep drawing "
+               "it\n", deck + 1, pad, p);
+     }
+     return 0;
+}
+
 /* Put rbp into AUTO pad mode with [0x7a]=0, which selects the sensible
  * beat-loop size table (4, 2, 1, 1/2, 1/4, 1/8, 1/16, 1/32 beats).
  *
- * We tried driving this with the K_ALOOP key first, but rbp ignored it (the
- * mode byte stayed 0 through 200 ms of polling) and execAutoBeatLoop then
- * returns immediately without starting a loop.  Writing the two bytes rbp
- * itself reads ([0x74] = pad mode, [0x7a] = table select) is deterministic, and
- * the UI reads the same bytes for its pad LEDs, so it stays consistent. */
+ * CORRECTED 2026-09-30: K_ALOOP is NOT ignored - rbp acts on it, and its pad
+ * grid visibly changes mode (measured one button per capture: note 27 -> HOT CUE,
+ * note 30 -> BEAT LOOP, note 32 -> BEAT JUMP).  What was wrong is this file's
+ * reading of the result: +0x74 is measured NOT to track the displayed pad mode
+ * (polled 1.1 M times across all four mode buttons while the grid verifiably
+ * switched, it never left 0).  So "the mode byte stayed 0 through 200 ms" never
+ * meant the mode did not change, and the byte written below is not the mode rbp's
+ * UI is reading.  Writing it still sticks, which is why the beat-loop path has
+ * appeared to work; it is not, however, a way to *select* a mode. */
 static void force_auto_padmode(void *p)
 {
      int before = *(volatile unsigned char *)((char *)p + PLAYERINNARDS_MODE_OFF);
@@ -294,7 +376,15 @@ int aloop_is_looping(int deck)
  * WARNING: only meaningful while rbp is actually in its AUTO/LOOPS pad mode.
  * rbp's UI re-asserts its own pad mode, so forcing the byte is not enough -
  * the pad key then fires a HOT CUE instead of a beat loop, which is
- * destructive.  Until that is solved this is gated behind BEATLOOP=1. */
+ * destructive.  Until that is solved this is gated behind BEATLOOP=1.
+ *
+ * CORRECTED 2026-09-30: "forcing the byte is not enough" is right, but for a
+ * reason this comment did not have - the byte is not the mode (measured, see
+ * force_auto_padmode above), so the write cannot put rbp into AUTO at all.  The
+ * proven way to select a pad mode is to SEND ITS KEYCODE: K_HOTCUE / K_ALOOP /
+ * K_BEATJUMP / K_SLIPLOOP each visibly switch rbp's grid.  A repair for this
+ * path therefore starts by sending the mode key and then the pad, not by
+ * writing +0x74.  Still gated behind BEATLOOP=1 until that is done. */
 int aloop_enabled = -1;
 
 void aloop_apply(int deck, void *p, int idx)

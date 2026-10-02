@@ -10,10 +10,16 @@ monitor and a DDJ-FLX4.
 ## 0. Prerequisites
 
 * **Workstation (Linux, or WSL):** `arm-linux-gnueabi-gcc`,
-  `libc6-dev-armel-cross`, `python3`, `tar`, plus the DirectFB build tools (see
+  `libc6-dev-armel-cross`, `python3`, `tar`, plus the DirectFB build tools —
+  which include the **`flux` IDL compiler**, a separate package because
+  DirectFB fetched from git does not ship the source files it generates (see
   [tools/build-directfb](tools/build-directfb/README.md)). The shim build can
   be run in the repo's Docker image if the float-ABI toolchain is awkward to
-  install; the DirectFB build needs a native or emulated ARM toolchain.
+  install — that image is
+  [`tools/build-toolchain/Dockerfile`](tools/build-toolchain/Dockerfile), and
+  building it needs nothing on the host but Docker (see
+  [tools/README.md](tools/README.md#build-toolchain)); the DirectFB build needs
+  a native compiler *and* a cross one.
 * **Extracted assets:** an `XDJRX3-rootfs/`, the GUI assets and `rbp-audio`
   (stock `rbp` + the shared patches). See
   [docs/04](docs/04-firmware-assets.md).
@@ -21,11 +27,17 @@ monitor and a DDJ-FLX4.
   ```sh
   ssh pi@<host>
   ```
-  Confirm the image before anything else — a 64-bit install breaks every shim:
+  Confirm the image before anything else. What matters is that the kernel can
+  execute 32-bit ARM ELF — **not** that its name says `armv7l`, because current
+  Pi OS 32-bit images ship a 64-bit `-v8` kernel:
   ```sh
-  uname -m                     # armv7l
-  dpkg --print-architecture    # armhf
+  getconf LONG_BIT                     # 32   (userland)
+  dpkg --print-architecture            # armhf
+  dmesg | grep -c '32-bit EL0 Support' # 1    (the kernel can run it)
   ```
+  `install.sh` prints the same two facts and then tests the chroot for real, so
+  if this looks different from the above, read what it says rather than the
+  `uname` line.
   Then follow [docs/13](docs/13-raspberrypi4.md) for the `cmdline.txt` recipe
   (it is what makes the HDMI mode, and therefore the display, deterministic) and
   reboot before continuing.
@@ -107,12 +119,12 @@ else.
 
 | Check | Expectation |
 |---|---|
-| `tools/fbdump` (after the `cmdline.txt` recipe + reboot) | the geometry you asked for, or the monitor's native mode — which is a letterbox trigger, not a failure |
+| `tools/fbdump` (after the `cmdline.txt` recipe + reboot) | **measured: 1280×800, 16 bpp RGB565, `line_length` 2560, `smem_len` 2048000 (one page)** — the panel takes a `video=` mode its EDID never advertised, so the fb matches `rbp`'s surface exactly and the verdict line reads `geometry MATCHES`. `110 x 60 mm` means the EDID is still unread, i.e. the mode is forced, not negotiated. If a sink does refuse the timings you get 1280×720 back instead — then read [docs/06](docs/06-display.md) before assuming the display path is broken |
 | UI on the monitor | rekordbox UI, full-screen ([docs/06](docs/06-display.md)) |
 | `tools/evdevdump --list`, then point at the screen | rb reacts; see the four-corner procedure in [docs/07](docs/07-touch.md) |
 | `speaker-test` on the FLX4, then load + play | master out on the RCA, cue on the headphone jack ([docs/09](docs/09-audio.md)) |
 | `aseqdump -l`, then PLAY / CUE / faders / jog | messages arrive, and the deck responds — the map is written and fixture-tested, but its note/CC tables are unverified until a dump confirms them ([docs/15](docs/15-flx4-midi.md)) |
-| `RB_MIDI_MAP=kbd` in `rb.conf` (or the environment), restart, then load a track with `1` and press `space` | deck 1 plays; `↑`/`↓` scroll the list, `Esc`/`Backspace`/right-click leave a screen. This is the keyboard fallback: no controller, no MIDI, no `/dev/snd/seq` needed ([docs/08](docs/08-controls.md#the-keyboard-map-rb_midi_mapkbd)) |
+| load a track with `1` and press `space` | deck 1 plays; `↑`/`↓` scroll the list, `Esc`/`Backspace`/right-click leave a screen. The keyboard and mouse need no configuration — they run alongside the controller (`EVDEV_MAP=kbd`, the default) and need no MIDI, no controller and no `/dev/snd/seq` ([docs/08](docs/08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)) |
 | Insert a rekordbox USB stick | shows as **USB 1** with the label/track count ([docs/10](docs/10-usb.md)) |
 
 ## 7. Restart / restore
@@ -139,11 +151,14 @@ again by the line above.
   table is silence from a whole section rather than a wrong button — run with
   `RB_KNOB_VERBOSE=1` and read the unmapped lines in `/tmp/knobshim.log`.
 * The way to drive `rbp` without one is the **keyboard fallback**,
-  `RB_MIDI_MAP=kbd` ([docs/08](docs/08-controls.md#the-keyboard-map-rb_midi_mapkbd)):
-  keyboard and mouse, no MIDI and no controller. It is written, cross-compiled
-  and fixture-tested, but it has **never been run with real input devices** on
-  the Pi, and the direction its selector turns for `↑`/`↓` is the one thing
-  about it that only hardware can settle.
+  `EVDEV_MAP=kbd`, which is the default
+  ([docs/08](docs/08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)):
+  keyboard and mouse, live alongside the controller rather than instead of it, no
+  MIDI needed for them. It is written, cross-compiled and fixture-tested, and it
+  has since been driven on the Pi. `RB_MIDI_MAP=kbd` additionally selects it as
+  the *controller* map, which is how to stop the shim looking for one at all. The
+  direction its selector turns for `↑`/`↓` is still the one thing about it that
+  only hardware — a screen with a list in it — can settle.
 * Booth output is dropped: the FLX4 has two output pairs ([docs/09](docs/09-audio.md)).
 * DJ FX parameter/layer encoders, TrackSkip, BeatJump and some SHIFT-actions are
   not mapped ([docs/08](docs/08-controls.md)).

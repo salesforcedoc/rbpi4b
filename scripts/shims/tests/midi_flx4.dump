@@ -54,17 +54,47 @@
 0.016000 NOTEOFF ch=0 note=77 vel=0
 0.017000 NOTEON ch=0 note=27 vel=127
 0.018000 NOTEOFF ch=0 note=27 vel=0
-# pads: base 0 (HOT CUE) pad 1, then base 32 (BEAT JUMP) pad 8 on the same deck.
+# The other three pad-mode buttons, in the unit's own order. The KEYCODES are the
+# RX3's by POSITION, not this unit's labels: its 2nd button (PAD FX 1) lands where
+# the RX3 keeps BEAT LOOP, its 3rd (BEAT JUMP) where the RX3 keeps SLIP LOOP, and
+# its 4th (SAMPLER) where the RX3 keeps BEAT JUMP. All are full press/release
+# pairs, like HOT CUE's above -- a mode button that reported only a press would
+# latch in the map and then work exactly once, so both edges are asserted here
+# rather than assumed from the list.
+0.018100 NOTEON ch=0 note=30 vel=127
+0.018200 NOTEOFF ch=0 note=30 vel=0
+0.018300 NOTEON ch=0 note=34 vel=127
+0.018400 NOTEOFF ch=0 note=34 vel=0
+# pads: one in each of the four bases this map binds, on the deck's pad channel --
+# base 0 (HOT CUE) pad 1, base 32 pad 8, base 16 (the unit's PAD FX 1) pad 1, and
+# base 48 (the unit's SAMPLER) pad 8. The bases are the UNIT's and follow its own
+# labels; which rbp MODE each one's pads act in follows the positional rebind
+# above (base 32 -> SLIP BEAT LOOP, base 48 -> BEAT JUMP). All four send the same
+# K_PAD1..8, because rbp's pad keycodes mean whatever rbp's current mode says.
 0.019000 NOTEON ch=7 note=0 vel=127
 0.020000 NOTEOFF ch=7 note=0 vel=0
 0.021000 NOTEON ch=7 note=39 vel=127
 0.022000 NOTEOFF ch=7 note=39 vel=0
+0.022100 NOTEON ch=7 note=16 vel=127
+0.022200 NOTEOFF ch=7 note=16 vel=0
+0.022300 NOTEON ch=7 note=55 vel=127
+0.022400 NOTEOFF ch=7 note=55 vel=0
 0.023000 NOTEON ch=0 note=32 vel=127
 0.024000 NOTEOFF ch=0 note=32 vel=0
-# Two pads that must produce NOTHING: the +SHIFT pad layer (a second channel per
-# deck) and a mode rbp has no equivalent for (base 96, BEAT LOOP).
+# Pads that must produce no KEYCODE: a mode rbp has no equivalent for (base 96,
+# BEAT LOOP), and the base immediately past the last bound one (base 64,
+# KEYBOARD) -- the boundary of what the four rows above bind, so a fifth base
+# cannot creep in without this line going quiet.
+#
+# The first of the three is the one pad row that reaches rbp WITHOUT a keycode:
+# deck 1's shifted pad channel (ch 8 = CH_PADS1S), pad 1, which the map turns
+# into a hot-cue DELETE. rbp has no keycode for that gesture, so it produces
+# nothing here and the assertion lives in test_flx4.c's check_state() -- but a
+# row that fired for the wrong pad would delete the wrong cue, so the pairing is
+# pinned there rather than left implicit.
 0.025000 NOTEON ch=8 note=0 vel=127
 0.026000 NOTEON ch=7 note=96 vel=127
+0.026100 NOTEON ch=7 note=64 vel=127
 # CH CUE: no rbp keycode at all -- the mixer engine call is the whole effect, and
 # the toggle is decided from the engine's own state (asserted in the test).
 0.027000 NOTEON ch=0 note=84 vel=127
@@ -75,10 +105,13 @@
 0.031000 NOTEON ch=0 note=92 vel=127
 # Log-only controls: known to the table, no rbp keycode behind them.
 0.032000 NOTEON ch=0 note=63 vel=127
+# 81 is NOT one of them any more: it is BACK, bound below like any other button.
+# 32 and 34 are not either -- they are the two positional pad modes further up,
+# with both edges. 81's lonely NOTEON is deliberate -- the press is the whole
+# assertion there, and the two call buttons appear together so that 83 going quiet
+# while 81 speaks is one row of difference rather than two files.
 0.033000 NOTEON ch=0 note=81 vel=127
 0.034000 NOTEON ch=0 note=83 vel=127
-0.035000 NOTEON ch=0 note=30 vel=127
-0.036000 NOTEON ch=0 note=34 vel=127
 # And one the table does not have at all: PLAY while SHIFT is held (note 14).
 0.037000 NOTEON ch=0 note=14 vel=127
 
@@ -128,6 +161,9 @@
 0.066000 NOTEOFF ch=1 note=27 vel=0
 0.067000 NOTEON ch=9 note=3 vel=127
 0.068000 NOTEOFF ch=9 note=3 vel=0
+# The same gesture on deck 2 -- its shifted pad channel (ch 10 = CH_PADS2S),
+# pad 4 -- so the mapping is exercised on both decks and at a pad other than the
+# first: one lucky index could otherwise pass the check above.
 0.069000 NOTEON ch=10 note=3 vel=127
 0.070000 CONTROLLER ch=1 cc=19 val=127
 0.071000 CONTROLLER ch=1 cc=34 val=65
@@ -140,6 +176,12 @@
 # ---- mixer / browse / LOAD, all on list ch 7 ----
 0.077000 NOTEON ch=6 note=65 vel=127
 0.078000 NOTEOFF ch=6 note=65 vel=0
+# SHIFT + browse push (note 66): rbp's SOURCE screen, and the row the port had
+# no way to reach the USB stick without. It is a table row like any other, so it
+# is a press and a release -- and the shift note itself (63, above) sends
+# nothing, which is why holding SHIFT is not a state this map has to track.
+0.078500 NOTEON ch=6 note=66 vel=127
+0.078600 NOTEOFF ch=6 note=66 vel=0
 0.079000 CONTROLLER ch=6 cc=64 val=1
 0.080000 CONTROLLER ch=6 cc=64 val=127
 # The browse encoder's direction split: 63 is clockwise, 64 is anticlockwise.
@@ -152,6 +194,17 @@
 0.085000 NOTEOFF ch=6 note=70 vel=0
 0.086000 NOTEON ch=6 note=71 vel=127
 0.087000 NOTEOFF ch=6 note=71 vel=0
+# SHIFT + LOAD 1 / 2. Published-only note numbers, never yet seen on the wire:
+# the same position note 66 was in before a press settled it, and the same
+# one-gesture answer. They are here because the binding and the note number are
+# separate questions and this fixture settles the first (docs/15-flx4-midi.md).
+# 104 on the deck channels is SHIFT + CUE; here it is ch 6, which is the whole of
+# the separation. LOAD 1 needs the extra edge (rbp_abi.h's OP_REPEAT), LOAD 2
+# does not -- that asymmetry is the point of having both rows in one fixture.
+0.087100 NOTEON ch=6 note=104 vel=127
+0.087200 NOTEOFF ch=6 note=104 vel=0
+0.087300 NOTEON ch=6 note=122 vel=127
+0.087400 NOTEOFF ch=6 note=122 vel=0
 0.088000 NOTEON ch=6 note=99 vel=127
 0.089000 NOTEOFF ch=6 note=99 vel=0
 0.090000 CONTROLLER ch=6 cc=31 val=127
@@ -174,17 +227,19 @@
 0.102000 NOTEOFF ch=4 note=71 vel=0
 0.103000 NOTEON ch=5 note=71 vel=127
 0.104000 NOTEOFF ch=5 note=71 vel=0
-0.105000 NOTEON ch=4 note=99 vel=127
-0.106000 NOTEOFF ch=4 note=99 vel=0
-0.107000 NOTEON ch=4 note=99 vel=127
+# FX SELECT's stepping run is the last block in this file, so that the seeded
+# press and everything that follows it can be read as one sequence.
 0.108000 NOTEON ch=4 note=74 vel=127
 0.109000 NOTEON ch=4 note=75 vel=127
 # LEVEL/DEPTH on both candidate channels: the vendor table's Channel column and
 # its status byte disagree (see the map's table comment).
 0.110000 CONTROLLER ch=4 cc=2 val=64
 0.111000 CONTROLLER ch=5 cc=2 val=0
-# The lever: CH1 (leg A), then CH2 (leg B), then CH1&CH2 (no rbp equivalent),
-# then back to leg B alone -- which is where it already is, so nothing is sent.
+# The lever: CH1 (leg A), then CH2 (leg B), then CH1&CH2 -- which rbp has no
+# value of its own for and is therefore told MASTER -- then back to leg B alone.
+# That last one is a real move even though it returns to a leg it has already
+# been on, because the position in between was CH1&CH2, so target 1 is sent a
+# second time. The group's last two lines name no position and send nothing.
 0.112000 NOTEON ch=4 note=16 vel=127
 0.113000 NOTEOFF ch=4 note=16 vel=0
 0.114000 NOTEON ch=5 note=17 vel=127
@@ -196,3 +251,32 @@
 # The channel CUE button pressed a second time: the engine still has deck 1
 # cued, so this press is the OFF edge.
 0.119000 NOTEON ch=0 note=84 vel=127
+
+# ---- FX SELECT: the seeded press, both directions, and both wraps --------
+#
+# rbp's effect switch has 14 positions and the unit's FX SELECT is a button, so
+# the map keeps the position and steps it. The cursor is seeded once, on the
+# first press below, from the type rbp is already playing -- which on a replay
+# is test_flx4.c's rbp_beatfx_type() stub, answering 7, and rbp_abi.h's table
+# makes that switch position 3. So the first press steps to 4, not to 0: the
+# button carries on from the effect that is playing.
+#
+# Note 99 is FX SELECT and steps forward; note 100 is SHIFT+FX SELECT and steps
+# backward. Every press is one step, a release is not a step, and the switch
+# wraps at both ends.
+0.120000 NOTEON ch=4 note=99 vel=127
+0.121000 NOTEOFF ch=4 note=99 vel=0
+0.122000 NOTEON ch=4 note=99 vel=127
+0.123000 NOTEOFF ch=4 note=99 vel=0
+# Six backward presses from the 5 the forward pair left the cursor on: five walk
+# it down to 0, the sixth wraps it to 13, and the forward press after them wraps
+# 13 back to 0. Those last two rows are what say the switch wraps rather than
+# clamping.
+0.124000 NOTEON ch=4 note=100 vel=127
+0.125000 NOTEOFF ch=4 note=100 vel=0
+0.126000 NOTEON ch=4 note=100 vel=127
+0.127000 NOTEON ch=4 note=100 vel=127
+0.128000 NOTEON ch=4 note=100 vel=127
+0.129000 NOTEON ch=4 note=100 vel=127
+0.130000 NOTEON ch=4 note=100 vel=127
+0.131000 NOTEON ch=4 note=99 vel=127

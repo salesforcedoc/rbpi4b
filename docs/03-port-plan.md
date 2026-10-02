@@ -32,13 +32,53 @@ a rewrite; they are also the expensive parts. See
 The SC Live 4's panel was a fixed 800×1280 portrait 32 bpp fb, so the patch
 could commit to one transform. A Pi drives whatever monitor is attached, so the
 driver has to *decide* what to do from the geometry and format it finds:
-`off` (no conversion), `convert` (565→8888), `letterbox` (1:1, centred, bars) and
-the old `rotate`, selected by `RB_DFB_PRESENT`.
+`off` (no conversion), `convert` (565→8888), `letterbox` (1:1, centred, bars),
+`crop` (1:1, truncated), `scale` (uniform resample, centred, bars) and the old
+`rotate`, selected by `RB_DFB_PRESENT`.
 
-**As of this tree, only the rotation path is installed.** The generalization is
-written up in [06 — Display](06-display.md) and deliberately gated on two
-measurements nobody has taken yet (`tools/fbdump` after the `cmdline.txt`
-recipe) — because at 1280×800×16 the Pi may need none of it.
+**As of this tree the generalization is installed**, not just written up. The
+measurements it was gated on have been taken, and they close the geometry
+question outright. The format needs no work (16 bpp RGB565 is `rbp`'s native
+format), and after the `cmdline.txt` recipe the fb is **1280×800 with a stride
+of 2560** — the same width, height and stride as `rbp`'s surface. The connector's
+mode list offered nothing above 1280×720, but a `video=` mode is programmed
+whether or not the list names it, and the panel took it: so `crop`, `scale`,
+`letterbox` and `convert` are all dead **on this panel**, and `RB_DFB_PRESENT`
+never needs to leave `off` here.
+
+That last sentence is about the sink, not the code, and the distinction is the
+one this port now turns on. A monitor that is not 1280×800 is a different
+monitor, not a different build: `scale` is written, the driver **upgrades `off`
+to it by itself** when the real fb disagrees with the shim's logical geometry
+(under `off` the layer surface *is* the fb page, so a mismatch is a sheared image
+on a larger fb and no UI at all on a smaller one — deterministic, not cosmetic),
+and a software scaler needs a frame budget because it runs on rbp's `SCHED_FIFO
+98` render thread. `display-watch.sh` handles the other half of the operator's
+request — a monitor swapped for one of a different size mid-session — by
+comparing the framebuffer's geometry against the one rbp was launched with and
+restarting the unit when it changes. **The display half of that is no longer only
+design: S10.1–S10.4 ran on 2026-09-26**, and a 1280×720, a 960×600, an 800×600 and
+a 1920×1080 panel each came up with the whole UI, correctly placed, the last
+without anyone selecting anything — at 1.1–3.4 ms of a 16.67 ms frame, which is
+why the shipped budget stands. What those rows also found is a **downscale**
+losing single-pixel rules and thin glyph strokes at 0.75× and 0.625× (S10.2), which
+is not fixed and is a decision rather than a defect. **The hot-swap half and the
+two remaining modes have not been run**: S10.0, S10.5–S10.10 in
+[13](13-raspberrypi4.md#s10--the-display-drills) are still the rows that settle
+those, and
+[06](06-display.md#a-mismatch-selects-the-rung-by-itself) is the design.
+
+What the target did need was **not** a transform but a page decision. The fb has
+a **single page** (`yres_virtual == yres`, `smem_len == 2560 × 800`) while the
+driver forced `DLBM_TRIPLE`, and the guard that would normally catch that keys on
+`ypanstep == 0` — which this fb does not report. So `yres_virtual` tripled to
+2400, `dfb_fbdev_test_mode()`'s `need_mem` came out at 6,144,000 against a
+`smem_len` of 2,048,000, `DFB_LIMITEXCEEDED` was returned, and the primary region
+test failed: no UI, with a framebuffer-memory shortfall in the log. The patch now
+decides the buffer mode from the **page count**, giving a single `FRONTONLY`
+buffer whose `need_mem` equals `smem_len` exactly.
+[13 — Raspberry Pi 4](13-raspberrypi4.md) carries the diagnosis and the bring-up
+step (**S2.2**) that confirms it on the unit.
 
 What is *not* optional: the per-flip `fopen`/`fwrite` of the whole triple buffer
 to `/tmp/rot_surface.dump`, and the per-pointer-event `/tmp/dfbdig*.log`
@@ -80,23 +120,34 @@ that entry kind and `ctrl_map.h` is unchanged. The other device fact did hold,
 and it removed the shim's hardcoded sequencer client id and `/dev/snd/midiC0D0`:
 the controller is found by name — `QUERY_NEXT_CLIENT` / `QUERY_NEXT_PORT` with
 `MIDI_IN_MATCH` / `MIDI_OUT_MATCH` — with rawmidi kept only as a runtime
-fallback. That part is **in the tree but unexercised**: nothing in this repo has
-been run with an FLX4 attached. The FLX4 tables are written from that published
-list and are `flx4`'s own map, which is now `RB_MIDI_MAP`'s default; the
-unverified parts are marked as such in the map and listed in
-[15](15-flx4-midi.md). Details:
+fallback. **That discovery now runs against the unit**: the shim logs
+`subscribed to 28:0 'DDJ-FLX4 MIDI 1' (match 'FLX4')`, and an `aseqdump` capture
+taken alongside it (S5.1) is what turned the map's largest guess — the jog's
+counts per revolution — into a measurement. What is still not verified against
+the hardware is the map's *tables*: nothing has yet pressed a control and watched
+rbp react, so every keycode in `map_flx4.c` rests on Pioneer's published list.
+Those parts are marked in the map and listed in [15](15-flx4-midi.md). Details:
 [08 — Controls](08-controls.md) and the FLX4 runbook
 [15 — DDJ-FLX4 MIDI](15-flx4-midi.md).
 
 ### 2.4 Audio — negotiated instead of hardcoded
 
-`hw:1,0` with 8 JP21 channels becomes `plughw:CARD=DDJFLX4,DEV=0`, with the
-channel count read from the real handle and the stream→pair assignment in
+`hw:1,0` with 8 JP21 channels becomes `hw:CARD=DDJFLX4,DEV=0`, with the channel
+count negotiated from the real card and the stream→pair assignment in
 `RB_AUDIO_MAP`. `rbp`'s side of the contract is untouched: three 2-channel
 S24_LE 44.1 kHz playback streams plus a dummy capture, opened in a fixed order.
-`plughw` is what lets ALSA's plug chain do the sample-format packing and the
-44.1→48 kHz conversion, which is why the FLX4's actual native format does not
-matter to the shim. Details: [09 — Audio](09-audio.md).
+
+The plan was `plughw:` here, on the reasoning that ALSA's plug chain would do the
+S24_LE ↔ S24_3LE packing and the 44.1 → 48 kHz conversion for free. **That was
+wrong, and it is worth keeping the reason:** the map names *hardware* channel
+indices, so the shim has to learn the card's real channel count, and a plug device
+reports what the plug layer will accept instead — 10000 channels against the card's
+4. The shim therefore negotiated 8 logical channels onto a 4-channel card and every
+write failed `-EINVAL`. Measured afterwards: the FLX4 takes **44100 natively** and
+accepts `S24_3LE` directly, so the plug chain was not needed for either. The shim's
+own `s24pack()` does the packing, `RB_AUDIO_FMT` selects it, and `plughw:` survives
+only as the fallback candidate for a card that refuses our format.
+Details: [09 — Audio](09-audio.md).
 
 ### 2.5 Launcher — no vendor OS to get out of the way
 
@@ -138,18 +189,20 @@ target this project has run on.
    you actually need. ([06](06-display.md), [13](13-raspberrypi4.md))
 4. **Pointing** — evdev discovery + the tsc2007 protocol. ([07](07-touch.md))
 5. **Audio** — device, channels and pair map. ([09](09-audio.md))
-6. **Controls** — the keyboard fallback first (`MIDI_MAP=kbd`, no hardware
-   needed), then the FLX4 map: written from Pioneer's published MIDI list, and
+6. **Controls** — the keyboard fallback first (`EVDEV_MAP=kbd`, no hardware
+   needed — and it is the default, so it needs no configuration either), then the
+   FLX4 map: written from Pioneer's published MIDI list, and
    corrected from a dump off the hardware.
    ([08](08-controls.md), [15](15-flx4-midi.md))
 7. **USB** — `usb-watch.sh` + DeviceSQL import of `export.pdb`. ([10](10-usb.md))
 8. **Launcher** — `start-rb.sh`. ([11](11-runtime-launcher.md))
 
 Steps 5 and 6 can be worked with nothing but a keyboard attached, which is
-deliberate: it keeps a missing controller from blocking the rest of the port. Its
-first half is now written — `MIDI_MAP=kbd` needs no controller, no MIDI and no
-`/dev/snd/seq`, so the surface half of step 6 can be exercised before the FLX4
-tables are measured.
+deliberate: it keeps a missing controller from blocking the rest of the port.
+That is now the *architecture* rather than a workaround — `EVDEV_MAP` and
+`MIDI_MAP` are independent selections, so the keyboard is live whether or not a
+controller is, and `EVDEV_MAP=kbd` needs no controller, no MIDI and no
+`/dev/snd/seq`.
 
 ## 4. Working commands
 

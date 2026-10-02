@@ -474,11 +474,12 @@ static void handle_pitch(int ch, int cc, int val)
           klog("knobshim2: pitch ch%d (deck %d) pos=%d -> tempo norm=%.3f v10=0x%03x\n",
                ch, sch, pos, (double)norm, v10);
 }
-/* inverse of the switch table above: internal type -> switch position */
-static const signed char bfx_type_to_pos[15] = {
-     -1, 5, 9, 10, 6, 1, 0, 3, 12, 7, 8, 13, 11, 2, 4
-};
-
+/* g_fx_type_pos is the position rbp's SW_BFX_TYPE switch is on. It is seeded
+ * from rbp's own type through rbp_abi.h's bfx_type_to_pos[] -- shared with
+ * map_flx4.c, so the two maps cannot disagree about which position holds which
+ * effect. The read below still calls ADDR_GET_BFX_TYPE rather than
+ * rbp_bridge.h's rbp_beatfx_type() because this gesture is not in the JP21
+ * fixture (its header says why), so the bridge would buy nothing here. */
 static int g_fx_type_pos = -1;         /* current SW_BFX_TYPE position */
 static volatile int g_bfxch_user_set;  /* user moved the assign knob */
 
@@ -699,11 +700,78 @@ static void *bfx_init_thread(void *arg)
      return NULL;
 }
 
+/* The SC Live 4's panel LEDs. These numbers were read off the hardware and are
+ * the same notes the map's buttons send (which is why they look like the input
+ * rows above), moved here verbatim from rbp_led.c -- that file used to carry
+ * them, which put one surface's notes in a bridge. Nothing about them changed in
+ * the move, so the previous target's LED behaviour is byte-for-byte what it was.
+ *
+ * Which rbp state lights each of these is rbp_led.c's business and is not
+ * recorded here; this is only what the panel is called. */
+static const struct led_notes jp21_leds = {
+     .deck_ch = 4,             /* deck LEDs go out on channel 4 + deck */
+     .n_sync = 8, .n_cue = 9, .n_play = 10,
+     .n_keylock = 34, .n_vinyl = 35, .n_slip = 36,
+     .n_loopin = 37, .n_loopout = 38, .n_autoloop = 39,
+
+     /* No pad-mode LEDs are sent here, and -1 is spelled out rather than left
+      * to zero-init: `0` is a legal note, so an omitted array would light notes
+      * 0..3 on the panel. The SC Live 4's own four pad-mode buttons have never
+      * been measured, and a neighbouring surface's numbers are never
+      * substituted -- the same rule as every other unmeasured LED in this
+      * struct. */
+     .n_mode = { -1, -1, -1, -1 },
+
+     /* The pads sit on the channels after the deck LEDs (deck 1 on 4, deck 2 on
+      * 5) and are notes 15..22 -- ONE base, not four, because this surface's
+      * pads keep their notes across pad modes. That is what the single
+      * `n_pad_first = 15` this replaced asserted, so filling all four entries
+      * with it restates the old claim rather than making a new one: the SC Live
+      * 4's per-mode pad bases have never been measured, and if they turn out to
+      * move the way the FLX4's do, this row is where it would be corrected. */
+     .pad_ch = 4,
+     .pad_ch2 = 5,
+     .n_pad_base = { 15, 15, 15, 15 },
+     .pad_enc = LED_ENC_PRIME_6BIT,
+
+     .strip_ch_first = 0,      /* strip m's CUE LED is channel m, note 13 */
+     .strip_count = 2,
+     .n_strip_cue = 13,
+
+     .master_ch_first = 2,     /* the master CUE LED is on the strips 3/4 send */
+     .master_ch_count = 2,
+     .n_master_cue = 13,
+
+     .fx_ch = 15,              /* the global FX group is on channel 15 */
+     .n_fx = {
+          [LED_FX_BFX_ONOFF]   = 26,
+          [LED_FX_CFX_FILTER]  = 21,
+          [LED_FX_CFX_DUBECHO] = 22,
+          [LED_FX_CFX_NOISE]   = 23,
+          [LED_FX_CFX_SWEEP]   = 24,
+     },
+
+     /* The meter, as rbp_vu.c has always driven it -- these four numbers are the
+      * values that were hardcoded in that file before it read a table, so this
+      * row is a transcription and not a change. The Prime's meter is POST-fader
+      * (rbp's is not, which is why meter_pre_fader is what tells rbp_vu.c to
+      * attenuate by the channel fader) and it takes a segment bitmask rather
+      * than a level. Master is the FX channel's CC 32/33 pair; this surface has
+      * no separate master meter note. */
+     .meter_ch_first = 0,      /* decks 1/2 -> channels 0/1 */
+     .n_meter_cc = 10,
+     .meter_enc = METER_ENC_PRIME_SEGMENTS,
+     .meter_pre_fader = 0,
+     .meter_master_ch = 15,
+     .n_meter_master_l = 32,
+     .n_meter_master_r = 33,
+};
+
 static void jp21_build(void)
 {
-     /* A map switch is a rebuild, not an append -- and build() must be safe to
-      * run twice because the tables are shared storage, not this map's. */
-     ctrl_bindings_reset();
+     /* ADDITIVE, deliberately -- see the note on ctrl_bindings_reset() in
+      * ctrl_map.h. The front end clears the shared tables once, before either
+      * selection is built; a reset here would wipe the other surface's. */
 
      /* The map's own calibration. Read here, by value, so an empty export from
       * start-rb.sh's SHIM_VARS loop means "use the default" rather than 0 --
@@ -869,4 +937,7 @@ const struct ctrl_map map_jp21 = {
      jp21_startup,
      jp21_event,
      jp21_tick,
+     NULL,            /* devices(): a MIDI surface, so no evdev reader */
+     NULL,            /* input(): ditto -- never sees an evdev triple */
+     &jp21_leds,
 };

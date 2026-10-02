@@ -45,10 +45,26 @@ modprobe vfat exfat nls_cp437 nls_iso8859-1 nls_utf8 2>/dev/null
 # /tmp matters as much as the rest: rbp and the shims exchange runtime state
 # through files and FIFOs in it (see the USB section below), and both sides must
 # see the same /tmp — one inside the chroot, one outside.
-umount "$RB_CHROOT/dev" 2>/dev/null
-rm -rf "$RB_CHROOT/dev"
+#
+# There used to be an `rm -rf "$RB_CHROOT/dev"` here, behind an unchecked
+# umount. $RB_CHROOT/dev is a bind mount of the HOST's /dev, so when the umount
+# failed -- which it does whenever something still holds the chroot's /dev open,
+# i.e. whenever rbp is running, i.e. every time install.sh runs this script on a
+# live unit -- the rm -rf ran *through* the bind and deleted the host's device
+# nodes. It did exactly that on 2026-09-27: /dev lost /dev/null (which any later
+# `>/dev/null` then recreated as a regular file), /dev/ptmx, and the devpts
+# instance's own ptmx inode, after which no SSH login could allocate a pty and
+# every shell came up non-interactive and promptless. The directory's contents do
+# not need clearing in the first place: the bind below covers whatever is there,
+# and a stale mount is shadowed rather than fought. So the umount is checked, its
+# failure is survivable, and nothing is deleted.
+if mountpoint -q "$RB_CHROOT/dev"; then
+    umount "$RB_CHROOT/dev" || \
+        echo "fix-dev: WARNING: $RB_CHROOT/dev is in use and could not be unmounted; binding over it." >&2
+fi
 mkdir -p "$RB_CHROOT/dev"
-mount --bind /dev "$RB_CHROOT/dev"
+mount --bind /dev "$RB_CHROOT/dev" || \
+    echo "fix-dev: WARNING: could not bind /dev onto $RB_CHROOT/dev; rbp will see no devices." >&2
 for d in proc sys tmp; do
     mountpoint -q "$RB_CHROOT/$d" || mount --bind "/$d" "$RB_CHROOT/$d"
 done

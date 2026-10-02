@@ -37,24 +37,45 @@ rbp-facing half — see [08 — Controls](../../docs/08-controls.md).
 
 | File | Role | Target-specific? |
 |---|---|---|
-| `fb_shim.c` + `tscfake.c` + `pointsrc.c` + `point_xform.c` → `fbshim.so` | fb ioctl shim (1280×800 RGB565 logical fb, 60 fps pacing) + the fake `/dev/tsc2007_2-0048` rbp reads. `fb_shim` owns the interposed libc symbols; `tscfake` is rbp ABI; `pointsrc` finds an evdev pointer and `point_xform` maps its coordinates | discovery and geometry, via `POINT_*` |
+| `fb_shim.c` + `tscfake.c` + `pointsrc.c` + `point_xform.c` + `touch_zone.c` + `fb_cursor.c` + `cursor_paint.c` + `menu_zone.c` + `menu_paint.c` + `menu_font.h` + `menu_draw.c` → `fbshim.so` | fb ioctl shim (1280×800 RGB565 logical fb, 60 fps pacing) + the fake `/dev/tsc2007_2-0048` rbp reads. `fb_shim` owns the interposed libc symbols; `tscfake` is rbp ABI; `pointsrc` finds an evdev pointer and `point_xform` maps its coordinates; `touch_zone` is the one part of rbp's screen the pointer path acts on by itself (the deck QUANTIZE boxes) and `rbp_key` sends the keycode for it. The two compositors are pure image work plus a driver each: `cursor_paint`/`fb_cursor` draw the mouse arrow (relative pointers only), `menu_paint`/`menu_font`/`menu_draw` the swipe-down top menu and its witness thread | discovery and geometry, via `POINT_*`; the menu's strip, panel and buttons are literals in `menu_zone.c` |
 | `ctrlshim.c` + `ctrl_map.c` + `map_flx4.c` + `map_jp21.c` + `map_kbd.c` + `evdev_io.c` + `rbp_bridge.c` + `rbp_led.c` + `rbp_vu.c` + `midi_io.c` + `mididump.c` + `shimutil.c` → `knobshim.so` | control surface → rbp keycodes, plus panel LED and VU output. `midi_io` is the sequencer, `evdev_io` the non-MIDI source (`/dev/input/event*`), `rbp_bridge` everything that resolves into `rbp`, `ctrlshim` the front end, `map_*.c` the surfaces | `flx4` (the Pi's own surface, the default), `jp21` (SC Live 4) and `kbd` (keyboard, no controller needed). **`flx4`'s note/CC tables are written from Pioneer's published MIDI list and are unverified** — see [`map_flx4.c`](map_flx4.c)'s provenance block and [15 — DDJ-FLX4 MIDI](../../docs/15-flx4-midi.md) |
-| `audioshim.c` + `s24pack.c` → `audioshim.so` | presents rbp's three 2-channel S24_LE 44.1 kHz streams as one real ALSA stream on a configurable card, channel map and format | card/map/format, via `AUDIO_*` |
+| `rbp_key.c` → linked into **both** shims | rbp's key path on its own — are we rbp, where is its `KeyManager`, `send_rx_key*()`. Both shims need it (`fbshim` for the pointer path's keycodes) and it is a leaf, so neither pulls in `rbp_bridge.o` and its meter hook twice — see [`rbp_key.h`](rbp_key.h) |
+| `audioshim.c` + `s24pack.c` + `mirror_policy.c` + `master_policy.c` + `pace_policy.c` → `audioshim.so` | presents rbp's three 2-channel S24_LE 44.1 kHz streams as one real ALSA stream on a configurable card, channel map and format; the three policy modules are its master device chain, its HDMI mirror's decisions, and (with no card open) the playback deadline that keeps rbp at real time rather than a third of it | card/map/format, via `AUDIO_*` |
 | `crashcatch.c` → `crashcatch.so` | SIGSEGV `pc`/`lr` → `/tmp/crash.log` | diagnostic |
 | `seqinject2.c` → `seqinject2` | static helper: inject MIDI into the shim's sequencer port | diagnostic |
 | `udplog.c` → `udplog` | static UDP listener for rbp's DebugLog | diagnostic |
-| `test_point.c` → `test_point` | unit test for the record stream and the coordinate transform | not deployed |
+| `test_point.c` → `test_point` | unit test for the record stream and the coordinate transform, including the stream a swallowed strip tap is replayed as — the burst, the reflection, and that the pair leaves the wire released | not deployed |
 | `test_audio.c` → `test_audio` | unit test for the output byte layout: `s24pack()` per format, the extremes, the refusals | not deployed |
 | `test_midi.c` → `test_midi` | unit test for the MIDI path: a recorded dump, replayed through the real JP21 map | not deployed |
 | `test_flx4.c` → `test_flx4` | the same discipline against the real FLX4 map, over a **hand-written** fixture — so its assertions pin the map's own tables rather than the unit's behaviour | not deployed |
 | `test_kbd.c` → `test_kbd` | unit test for the keyboard fallback: synthetic evdev triples through the real keyboard map | not deployed |
+| `test_cursor.c` → `test_cursor` | unit test for the arrow's glyph and its compositing rule: idempotent paint, conditional restore, a third party's pixels surviving | not deployed |
+| `test_cursor_dev.c` → `test_cursor_dev` | the driver seam for the arrow: the shim's geometry lie, the real ioctls, the thread's tick and its witness | not deployed |
+| `test_evdev.c` → `test_evdev` | the non-MIDI reader: discovery, re-enumeration, and a hot-unplug that must not eat held keys | not deployed |
+| `test_menu.c` → `test_menu` | the swipe-down menu: the gesture's clauses, the button geometry including the mirror, the baked font table and its ink band, the panel's paint/restore rules, and the damage witness's sample points being glyph-free | not deployed |
+| `bake_menu_font.py` | **build-time only**, not compiled: rasterises the device's own `decker.ttf` (Decker Bold, in `extracted/`, gitignored) into the committed `menu_font.h` — the 8-bit coverage atlas and the per-glyph metrics the panel's labels are drawn from. `python3 scripts/shims/bake_menu_font.py [px]`; needs Python, Pillow and the ttf, none of which a **build** needs — a build reads the committed header and never opens a font file | not deployed |
 | `gpioshim.c`, `tscshim.c`, `fbshim16.c` | earlier standalone implementations, kept for reference | not deployed |
 
 `s24pack.c` is a separate object from `audioshim.c` for one reason: it is pure —
 no ALSA, no allocation, no globals — so the part of the audio path that is
-checkable without a card can be checked without a card. `audioshim` only calls it
-when `AUDIO_FMT` names a format other than the `S24_LE` container rbp already
-writes.
+checkable without a card can be checked without a card. On this target it is
+always in play: `AUDIO_DEV` is a `hw:` device, so nothing between the shim and the
+card converts, and `AUDIO_FMT` (default `s24_3le`, which is what the FLX4 accepts)
+is the format `s24pack()` produces. It is only bypassed when `AUDIO_DEV` names a
+plug device, where the plug chain does the packing instead.
+
+`mirror_policy.c` and `master_policy.c` are the same split applied to the two
+decisions the shim cannot be trusted to get right by reading it: which device
+candidates a configured device name yields, what one `snd_pcm_writei()` return
+means, and when a device that has stopped carrying the stream may be retired —
+`mirror_policy.c` for the HDMI mirror, `master_policy.c` for the master.
+`audioshim.c` cannot be linked into a test at all, so anything left inside it is
+only checkable by a drill on a Pi; both modules are pure in the same sense
+`s24pack.c` is, which is what lets `test_audio` pin the verdicts on the host. The
+master's chain is the one that matters most: it may name the card `AUDIO_DEV`
+names and nothing else, because a fallback device is one whose channel count gets
+latched into the stream→pair map without any index having been resolved against
+it — see [09 — Audio](../../docs/09-audio.md).
 
 See [08 — Controls](../../docs/08-controls.md) and
 [09 — Audio](../../docs/09-audio.md).

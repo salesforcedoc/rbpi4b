@@ -36,17 +36,45 @@ echo "start-rb: chroot      $RB_CHROOT"
 # mounting the media stick before usb-watch.sh can bind it into the chroot (two
 # mounts of one device, and rbp ends up reading a path the kernel has already
 # given away).
+#
+# Every call below is GUARDED BY A READ-ONLY CHECK, and that is not tidiness.
+# Each systemctl MUTATION triggers a full systemd manager reload, measured at
+# 1.8-3.6 s per call on this unit — 9.84 s of a 15.4 s launcher, spent re-masking
+# an already-masked udisks2 and "stopping" three units that are not installed
+# (journalctl -o short-monotonic, boot 229cfdd9; the reloads were that slow
+# partly because cloud-init's config/final stages were running at the same
+# moment, which is the other half of this trim — see boot-trim.sh). A read-only
+# is-enabled/is-active is 31-40 ms and reloads nothing.
+#
+# The mutations stay, because the launcher has to keep working on a target where
+# install.sh has not run. install.sh now applies all of it persistently, so the
+# steady-state path here is the read-only branch; the mutations are for a target
+# where something un-masked a unit behind us.
+rb_mask_if_needed() {
+    [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && return 0
+    systemctl mask "$1" 2>/dev/null
+}
 for s in ${RB_STOP_SERVICES:-}; do
-    systemctl stop "$s" 2>/dev/null
+    # Not installed, or not running: nothing to stop, and no reload to pay for.
+    systemctl is-active --quiet "$s" 2>/dev/null && systemctl stop "$s" 2>/dev/null
 done
 for s in ${RB_MASK_SERVICES:-}; do
-    systemctl mask "$s" 2>/dev/null
+    rb_mask_if_needed "$s"
 done
 if [ "${RB_DISABLE_GETTY:-0}" = "1" ]; then
     # The local console must never draw over the UI. cmdline.txt's fbcon=map:1 is
     # the primary mechanism; this removes the second way text reaches the screen.
     # It does not affect SSH, which is how the launcher is run.
-    systemctl disable --now getty@tty1 2>/dev/null
+    #
+    # Guarded on is-enabled, NOT is-active. `Conflicts=` does not disable: getty
+    # that is enabled but momentarily INACTIVE is exactly the state that must be
+    # caught, or the enablement symlink stays, getty.target starts it near
+    # multi-user, the bidirectional conflict stops rblive4, and Restart=always
+    # undoes that ten seconds at a time. Never MASK it either — masking breaks
+    # the documented console-recovery idiom `systemctl start getty@tty1`.
+    if [ "$(systemctl is-enabled getty@tty1 2>/dev/null)" != "disabled" ]; then
+        systemctl disable --now getty@tty1 2>/dev/null
+    fi
 fi
 
 # --- 2. kill stale processes -------------------------------------------------
@@ -58,7 +86,8 @@ fi
 for p in $(pids_matching "$RB_PLAYER" strace) \
          $(pids_matching edb_streamd) \
          $(pids_matching gdbserver) \
-         $(pids_matching usb-watch.sh); do
+         $(pids_matching usb-watch.sh) \
+         $(pids_matching display-watch.sh); do
     kill -9 "$p" 2>/dev/null
 done
 sleep 1
@@ -103,7 +132,25 @@ rm -f /tmp/guard_LocalDBServer /tmp/req_LocalDBServer
 # truncated by the writer rather than by us.
 rm -f /tmp/knobshim.log /tmp/audioshim.log
 rm -f /tmp/dfbdig*.log /tmp/rot_surface.dump
-rm -f "$RBP_LOG" "$EDB_LOG"
+# The display watcher's baseline goes first, and it is written again below
+# immediately before the launch it describes. Between those two points there is
+# no baseline on disk, which is the truth: this script exits early on a failed
+# fix-dev.sh or a player that never came up, and in that state a surviving
+# baseline would describe an rbp that is no longer running — which is exactly
+# the situation in which someone starts the watcher by hand to find out why.
+#
+# Its restart counter (/tmp/displaywatch.fires) is deliberately NOT cleared here.
+# This script runs once per RESTART under Restart=always, so clearing it would
+# reset the very counter whose job is to bound those restarts; the watcher bounds
+# itself per boot instead, by recording the boot id beside the count.
+rm -f /tmp/displaywatch.geom
+# Rotated, not deleted. Under systemd's Restart=always a crash-loop relaunches
+# this script every 10 s, and `rm -f` would therefore destroy the previous
+# cycle's cause before anyone could read it -- the one artifact that says why rbp
+# died would be erased on a 10-second timer. One cycle back is enough to break
+# the loop, and `.prev` cannot grow without bound.
+[ -f "$RBP_LOG" ] && mv -f "$RBP_LOG" "$RBP_LOG.prev"
+[ -f "$EDB_LOG" ] && mv -f "$EDB_LOG" "$EDB_LOG.prev"
 
 # --- 6. the shim environment -------------------------------------------------
 #
@@ -132,14 +179,17 @@ rm -f "$RBP_LOG" "$EDB_LOG"
 # name directly, which reaches rbp because nothing here uses `env -i`.
 SHIM_VARS="
 DFB_PRESENT DFB_ROTATE PAN_PACER_MS FB_DEV
+DFB_PRESENT_AUTO DFB_PRESENT_FIT DFB_PRESENT_SKIP DFB_PRESENT_PX_BUDGET
 POINT_KIND POINT_DEV POINT_DEBUG POINT_MIN_DWELL_MS POINT_MOUSE_SPEED
-POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y
+POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y POINT_CURSOR POINT_CURSOR_MS
+POINT_QUANTIZE_TAP POINT_MENU POINT_MENU_MOUSE
 AUDIO_DEV AUDIO_CHANNELS AUDIO_MAP AUDIO_FMT AUDIO_MONITOR_PAIR
+AUDIO_MIRROR_DEV AUDIO_MIRROR_FMT AUDIO_MIRROR_REOPEN_MS AUDIO_MIRROR_BOOST_DB
 STARTUP_MUTE_MS STARTUP_FADE_MS SCHED_RT
-MIDI_MAP MIDI_IN_MATCH MIDI_OUT_MATCH MIDI_DUMP MIDI_REPLAY
+MIDI_MAP EVDEV_MAP MIDI_IN_MATCH MIDI_OUT_MATCH MIDI_DUMP MIDI_REPLAY
 MIDI_REPLAY_SPEED KBD_DEV
 LED_VU LED_VU_SEGMENTS LED_PADS LED_DISABLE PAD_BRIGHT JOG_PPR
-JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV
+JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV MIRROR_GAIN_MID
 KNOB_VERBOSE JOG_VERBOSE TEMPO_VERBOSE LED_VERBOSE
 SHMSTATE_STRICT
 "
@@ -161,6 +211,17 @@ done
 echo "start-rb: LD_PRELOAD=$RB_LD_PRELOAD"
 echo "start-rb: DFB_PRESENT=${DFB_PRESENT:-<unset>} DFB_ROTATE=${DFB_ROTATE:-<off>}"
 echo "start-rb: AUDIO_DEV=$AUDIO_DEV MIDI_MAP=$MIDI_MAP POINT_KIND=$POINT_KIND"
+# The mirror is the second output device, and the device list is long enough that
+# putting it on the line above would make that line hard to read. `<off>` is the
+# honest reading of the empty value that disables it — it must not be mistakable
+# for a device name — and the fmt fallback shown is what s24pack_parse() makes of
+# an empty string, not the shim's in-source default. The shim logs the list it
+# actually resolved, one candidate per line, in /tmp/audioshim.log. The master
+# logs its chain in the same shape, and that line is worth reading on any unit
+# whose audio misbehaves: `master dev="…" candidates=2` is the configured device
+# and its plughw twin and nothing else, so any third name there — `default` above
+# all — means a fallback the configuration did not ask for has come back.
+echo "start-rb: AUDIO_MIRROR_DEV=${AUDIO_MIRROR_DEV:-<off>} fmt=${AUDIO_MIRROR_FMT:-<s24_le>}"
 
 # --- 7. start the EDB daemon inside the chroot ------------------------------
 #
@@ -176,10 +237,19 @@ sh "$HERE/usb-watch.sh" stop 2>/dev/null
 
 # --- 9. start rbp -----------------------------------------------------------
 #
+# The display watcher's baseline is recorded as the LAST thing before the launch,
+# and deliberately not after rbp is confirmed up: a monitor that changed during
+# rbp's own bring-up would otherwise be written down as the geometry it launched
+# with, and that change would never fire. Every path that can still abort this
+# script has run by here, so a baseline on disk now means an rbp was launched at
+# that geometry. The watcher reads the file back and restarts the unit when the
+# real geometry stops matching it.
+#
 # `env` runs INSIDE the chroot, so LD_PRELOAD and PATH are in effect for ld.so
 # and rbp only — never for the host process doing the chroot. The player is
 # started through the chroot's loader rather than by exec because it is non-PIE,
 # soft-float, and linked against glibc 2.13.
+echo "start-rb: display baseline: $(sh "$HERE/display-watch.sh" baseline 2>/dev/null)"
 echo "start-rb: launching rbp (log: $RBP_LOG)"
 nohup chroot "$RB_CHROOT" env \
       "PATH=/bin:/sbin:/usr/bin:/usr/sbin" \
@@ -205,17 +275,51 @@ if [ -z "$RBP" ]; then
     exit 1
 fi
 
-# --- 10. USB watcher, then wait ---------------------------------------------
+# --- 10. the two watchers, then wait ----------------------------------------
 sh "$HERE/usb-watch.sh" start 2>/dev/null
+# Said again here, distinctly: both watchers print the byte-identical
+# "started pid N" (usb-watch.sh:246, display-watch.sh:326), so a boot report
+# grepping the journal cannot tell which started when. These two lines are what
+# boot-trim.sh report reads, and they are the only reason it can.
+echo "start-rb: usb-watch started"
+# The display watcher starts here rather than beside the baseline for two
+# reasons. It reads its baseline once, at start, so the file has to exist by
+# now — it does, written just above. And it refuses to fire while rbp is not
+# running, because systemd's Restart=always is already relaunching rbp during
+# bring-up; starting it earlier would only ever produce those refusals.
+sh "$HERE/display-watch.sh" start 2>/dev/null
+echo "start-rb: display-watch started"
+
+# --- 11. cleanup, on every exit path ----------------------------------------
+#
+# Defined before the wait loop and installed as a signal handler, because
+# `systemctl stop`/`restart` sends SIGTERM to THIS shell: without the trap the
+# shell dies where it stands and everything it started -- rbp, edb_streamd, the
+# watcher, and the media mounts -- is left running. The unit would then be
+# "stopped" with a live player on screen, and the next start would fight it.
+# This also makes docs/11's existing claim ("Ctrl-C the launcher") true, which it
+# has not been: a Ctrl-C killed the shell and orphaned rbp the same way.
+cleanup() {
+    sh "$HERE/usb-watch.sh" stop 2>/dev/null
+    # Same trap, same reason as the USB watcher above, and it is what makes
+    # "no watcher is left behind" true — which is the thing S10.6 checks. When
+    # the exit IS the restart this watcher asked for, the request has already
+    # reached systemd, so stopping it here cancels nothing.
+    sh "$HERE/display-watch.sh" stop 2>/dev/null
+    for p in $(pids_matching "$RB_PLAYER") $(pids_matching edb_streamd); do
+        kill -9 "$p" 2>/dev/null
+    done
+}
+# `exit 0` and not the signal's default status: a stop is a successful stop, and
+# a non-zero exit here would make systemd record a failure for a deliberate
+# `systemctl stop`. Under Restart=always the exit status does not decide whether
+# we relaunch, but it does decide what `systemctl status` reports afterwards.
+trap 'cleanup; exit 0' TERM INT
 
 # Sleep while rbp lives, so the launching shell does not redraw over the UI.
 while kill -0 "$RBP" 2>/dev/null; do
     sleep 2
 done
 
-# --- 11. cleanup ------------------------------------------------------------
-sh "$HERE/usb-watch.sh" stop 2>/dev/null
-for p in $(pids_matching "$RB_PLAYER") $(pids_matching edb_streamd); do
-    kill -9 "$p" 2>/dev/null
-done
+cleanup
 echo "start-rb: rbp exited (see $RBP_LOG)"

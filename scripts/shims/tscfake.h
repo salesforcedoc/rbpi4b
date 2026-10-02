@@ -53,6 +53,13 @@ int tscfake_is_fd(int fd);
 ssize_t tscfake_read(int fd, void *buf, size_t count);
 int tscfake_close(int fd);
 
+/* The x that goes on the wire for a logical x: `POINT_LOGICAL_W - 1 - x`.  This
+ * is the reflection tscfake_emit() applies (see its comment below), exposed so
+ * that pointsrc's POINT_DEBUG line can print both ends of the transform -- the
+ * value the shim computed and the value rbp actually consumes.  Pure, like
+ * tscfake_record(). */
+int tscfake_wire_x(int x);
+
 /* The tsc2007 ioctls. Returns 1 when the request was one of ours and was
  * answered, 0 when the caller should pass it to the real kernel. `arg` may be
  * NULL, which the read directions tolerate. */
@@ -62,7 +69,7 @@ int tscfake_ioctl(unsigned long request, void *arg);
  * pipe, a thread or a device. */
 void tscfake_record(int down, int x, int y, unsigned char out[TSC_RECORD_LEN]);
 
-/* Publish a pointer state to rbp. Applies rbp's two quirks, both properties of
+/* Publish a pointer state to rbp. Applies rbp's three quirks, all properties of
  * the *consumer* and therefore kept here rather than in pointsrc:
  *
  *  - duplicates are suppressed, because a stream of identical records makes
@@ -71,6 +78,12 @@ void tscfake_record(int down, int x, int y, unsigned char out[TSC_RECORD_LEN]);
  *    rbp's TouchAdValueHysteresis() discards the first frame after a gap as
  *    debounce. Sending one frame would make the first tap of every gesture
  *    invisible.
+ *  - **x is reflected**: rbp acts at `POINT_LOGICAL_W - 1 - x` of whatever this
+ *    writes, so the record carries the reflection of the position the pointer is
+ *    at and rbp lands where the finger is. Measured, and against a shim whose own
+ *    transform was measured honest in the same session -- see the quirk block in
+ *    tscfake.c. Anything that "un-mirrors" this puts every tap back on the
+ *    opposite side of the screen.
  */
 void tscfake_emit(int down, int x, int y);
 

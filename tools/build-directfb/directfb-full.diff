@@ -1,3 +1,74 @@
+diff --git a/lib/direct/Makefile.am b/lib/direct/Makefile.am
+--- a/lib/direct/Makefile.am
++++ b/lib/direct/Makefile.am
+@@ -79,6 +79,7 @@ libdirect_la_SOURCES = \
+ libdirect_la_SOURCES = \
+ 	$(ppcasm_sources)	\
+ 	$(armasm_sources)	\
++	compat_shim.c		\
+ 	clock.c			\
+ 	conf.c			\
+ 	debug.c			\
+diff --git a/lib/direct/compat_shim.c b/lib/direct/compat_shim.c
+new file mode 100644
+--- /dev/null
++++ b/lib/direct/compat_shim.c
+@@ -0,0 +1,55 @@
++/*
++ * compat_shim.c -- fstat() for a glibc 2.13 target built with modern headers.
++ *
++ * Why this exists
++ * ---------------
++ * The build compiles against the toolchain's own glibc 2.36 headers, because
++ * the XDJ-RX3 rootfs ships no /usr/include at all.  It links against the
++ * target's libc 2.13 instead (see the -L flags and "The link search path" in
++ * tools/build-directfb/README.md), so almost every reference resolves at its
++ * GLIBC_2.4 version and loads fine in the chroot.  fstat() is the one that
++ * cannot: glibc 2.33 added a real fstat@GLIBC_2.33, and 2.13 -- like every
++ * glibc before 2.33 -- only ever exported __fxstat()/__fxstat64(), which is
++ * what its own headers emit for an fstat() call.  The reference is therefore
++ * left unresolved, and the target's loader will not satisfy it
++ * ("undefined symbol: fstat") when the call is finally reached.
++ *
++ * Why syscall() is byte-exact here
++ * --------------------------------
++ * On ARM, glibc's struct stat is the kernel's struct stat, and glibc's own
++ * fstat() does no translation: it passes the caller's buffer straight to the
++ * kernel (a tail call into fstatat() with AT_EMPTY_PATH; sys_fstat and
++ * sys_fstatat share cp_new_stat()).  So syscall(SYS_fstat, fd, buf) fills
++ * exactly the bytes glibc would have filled, st_rdev included -- which is what
++ * systems/fbdev/vt.c reads out of it.  syscall() itself is GLIBC_2.4.
++ *
++ * fcntl() needs no shim: 2.13 exports fcntl@GLIBC_2.4, and our one call site
++ * (systems/fbdev/fbdev.c, F_SETFD/FD_CLOEXEC) carries no struct, so it never
++ * reaches for fcntl64().
++ *
++ * Duplicated on purpose
++ * ---------------------
++ * systems/fbdev/compat_shim.c holds the same forward.  DirectFB calls fstat()
++ * from three files in three build units -- lib/direct/stream.c, the
++ * src/media/idirectfbfont.c in libdirectfb, and systems/fbdev/vt.c -- and this
++ * copy in libdirect fixes its own reference while exporting the symbol for
++ * libdirectfb to bind against.  The module keeps its own so that it does not
++ * depend on load order to resolve.  Keep the two files in step.
++ *
++ * This is not part of upstream DirectFB 1.4.16.
++ */
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE     /* guarded: the build also passes -D_GNU_SOURCE on the
++                           command line, and an unguarded define makes the
++                           preprocessor warn "_GNU_SOURCE redefined" -- the one
++                           warning these two files would otherwise add */
++#endif
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++int
++fstat (int fd, struct stat *buf)
++{
++     return syscall (SYS_fstat, fd, buf);
++}
 diff --git a/lib/direct/modules.c b/lib/direct/modules.c
 --- a/lib/direct/modules.c
 +++ b/lib/direct/modules.c
@@ -190,6 +261,46 @@ diff --git a/systems/fbdev/Makefile.am b/systems/fbdev/Makefile.am
  	agp.c			\
  	fbdev.c			\
  	fbdev_surface_pool.c	\
+diff --git a/systems/fbdev/compat_shim.c b/systems/fbdev/compat_shim.c
+new file mode 100644
+--- /dev/null
++++ b/systems/fbdev/compat_shim.c
+@@ -0,0 +1,35 @@
++/*
++ * compat_shim.c -- fstat() for a glibc 2.13 target built with modern headers.
++ *
++ * Our headers are glibc 2.36 (the target rootfs ships no /usr/include), so
++ * fstat() compiles into a reference on fstat@GLIBC_2.33; the target's libc
++ * 2.13 only ever exported __fxstat()/__fxstat64().  syscall(SYS_fstat) fills
++ * the caller's buffer exactly as glibc would -- on ARM the struct is the
++ * kernel's, passed straight through (glibc's fstat() is a tail call into
++ * fstatat() with AT_EMPTY_PATH) -- and syscall() is GLIBC_2.4.  vt.c reads
++ * sbf.st_rdev out of that struct, so "exactly as glibc would" is the whole
++ * requirement.
++ *
++ * Identical to lib/direct/compat_shim.c, which covers libdirect's own fstat()
++ * reference (stream.c) and exports the symbol for libdirectfb
++ * (src/media/idirectfbfont.c).  This copy exists so the dlopen'd fbdev module
++ * resolves its own reference without depending on load order.  Keep the two in
++ * step; see tools/build-directfb/README.md for the measurements.
++ *
++ * This is not part of upstream DirectFB 1.4.16.
++ */
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE     /* guarded: the build also passes -D_GNU_SOURCE on the
++                           command line, and an unguarded define makes the
++                           preprocessor warn "_GNU_SOURCE redefined" -- the one
++                           warning these two files would otherwise add */
++#endif
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++int
++fstat (int fd, struct stat *buf)
++{
++     return syscall (SYS_fstat, fd, buf);
++}
 diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 --- a/systems/fbdev/fbdev.c
 +++ b/systems/fbdev/fbdev.c
@@ -201,23 +312,70 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
  #include <stdio.h>
  #include <stdlib.h>
  #include <errno.h>
-@@ -116,6 +117,109 @@ static int fbdev_ioctl( int request, void *arg, int ar
+@@ -83,6 +84,12 @@
+ #include <direct/signals.h>
+ #include <direct/system.h>
+ #include <direct/util.h>
++#include <direct/clock.h>       /* direct_clock_get_micros(): the frame-budget
++                                   measurement.  Deliberately NOT clock_gettime --
++                                   on this glibc that lives in librt, nothing
++                                   else in the DirectFB tree references it, and a
++                                   first reference would be a link-time surprise
++                                   inside the chroot. */
+ 
+ #include <misc/conf.h>
+ #include <misc/util.h>
+@@ -115,7 +122,458 @@ static int fbdev_ioctl( int request, void *arg, int ar
+ static int fbdev_ioctl( int request, void *arg, int arg_size );
  
  #define FBDEV_IOCTL(request,arg)   fbdev_ioctl( request, arg, sizeof(*(arg)) )
- 
++
 +extern FBDev *dfb_fbdev;   /* defined further below */
 +
++/* The one-shot frame-budget line.  The first presents of a run carry rbp's own
++ * bring-up rather than the blit this measures, so the line reports the average
++ * AFTER PRESENT_WARMUP and is emitted at PRESENT_REPORT_AT.  Both measured on
++ * the unit: whole-window averages ran up to ~2 ms above the warm ones, and at
++ * skip > 1 the equality-based one-shot fired eight times (present_done stalls
++ * at the trigger between presents).  See FBDevShared's present_* comment. */
++#define PRESENT_WARMUP     60
++#define PRESENT_REPORT_AT  300
++
 +/*
-+ * ROTATION (Prime GO): software-rotate the logical layer surface into the
-+ * physical framebuffer layout.
++ * PRESENTATION: copy the logical layer surface into the physical framebuffer.
++ * Every mode except PRESENT_OFF comes through here; OFF copies nothing at all,
++ * because the layer surface *is* the fb page.
 + *
-+ *   src  : logical surface buffer, sw x sh pixels, spitch bytes/row
-+ *   dst  : physical fb buffer, fw x fh pixels, fpitch bytes/row
-+ *   deg  : 90 = left (CCW), 270 = right (CW), 180 = upside down
++ *   src   : logical surface buffer, sw x sh pixels, spitch bytes/row, sbpp Bpp
++ *   dst   : physical fb buffer, fw x fh pixels, fpitch bytes/row, dbpp Bpp
++ *   mode  : PRESENT_CONVERT / LETTERBOX / CROP / ROTATE
++ *   deg   : PRESENT_ROTATE's angle: 90 = left (CCW), 270 = right (CW), 180
++ *   dx,dy : where the surface starts inside the fb (PRESENT_LETTERBOX)
 + *
-+ * Uses the process-global scratch buffer (shared->rot_scratch) so the
-+ * in-place rotation is safe. 32bpp only.
++ * The fast paths are the point on a target that presents at 60 fps: a 1280x800
++ * frame is 2 MB, so a per-pixel loop carrying a format test in it cannot do a
++ * frame every 16 ms.
++ *
++ * The scratch buffer is needed only by PRESENT_ROTATE, which rotates in place.
++ * The other modes read src and write dst directly -- and those are always two
++ * different buffers, because under every mode except OFF the layer draws into
++ * rot_surface in system memory (see fbdevLock()).
 + */
++
++static const char *
++fbdev_present_name( int mode )
++{
++     switch (mode) {
++          case PRESENT_CONVERT:   return "convert";
++          case PRESENT_LETTERBOX: return "letterbox";
++          case PRESENT_CROP:      return "crop";
++          case PRESENT_SCALE:     return "scale";
++          case PRESENT_ROTATE:    return "rotate";
++     }
++
++     return "off";
++}
++
 +/* convert RGB565 -> RGB32 (single pixel) */
 +static inline unsigned int
 +rgb565_to_rgb32( unsigned int px )
@@ -231,15 +389,221 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 +     return 0xff000000 | (r << 16) | (g << 8) | b;
 +}
 +
-+static void
-+fbdev_rotate_primary( unsigned char *src, int sw, int sh, int spitch,
-+                      unsigned char *dst, int fw, int fh, int fpitch,
-+                      int deg )
++/* convert RGB32 -> RGB565 (single pixel): the inverse of the above */
++static inline unsigned short
++rgb32_to_rgb565( unsigned int px )
 +{
-+     FBDevShared *shared = dfb_fbdev->shared;
++     unsigned int r = (px >> 19) & 0x1f;
++     unsigned int g = (px >> 10) & 0x3f;
++     unsigned int b = (px >> 3)  & 0x1f;
++
++     return (unsigned short)((r << 11) | (g << 5) | b);
++}
++
++/*
++ * Where a sw x sh surface lands in an fw x fh fb.
++ *
++ * ONE helper, called by both the blit and the one-shot PRESENT: line, so the
++ * logged rectangle and the drawn one cannot disagree.
++ *
++ * Aspect-fit unless `stretch`, in which case both axes are filled.  Returns the
++ * destination size in *dw and *dh and its top-left in *dx and *dy, centred.
++ *
++ * The scale factor is 16.16 and the STEP is floored, which is what bounds the
++ * rectangle: s <= (fw << 16) / sw and s <= (fh << 16) / sh, so sw * s <= fw << 16
++ * and sh * s <= fh << 16 hold, and *dw <= fw / *dh <= fh therefore hold for any
++ * final rounding that adds less than 65536.  That is the invariant the old
++ * `dx + sw > fw` guard was compensating for, and it is why PRESENT_SCALE cannot
++ * hit that hole by construction.
++ *
++ * The final shift ROUNDS TO NEAREST (+32768), not down, and the difference is
++ * measurable rather than cosmetic: the step is already floored, so flooring
++ * again loses a whole row AND column on every inexact fit -- 1280x720 came out
++ * 1151x719 and 1920x1080 came out 1727x1079, each leaving a one-pixel bar on two
++ * edges and none on the other two.  Nearest keeps the invariant and lands on the
++ * exact fit (1152x720, 1728x1080).
++ *
++ * point_fit() in scripts/shims/point_xform.c transcribes this for the cursor,
++ * which is an LD_PRELOAD shim in a different build, so a change to one is a
++ * change to both.
++ */
++static void
++fbdev_present_fit( int sw, int sh, int fw, int fh, int stretch,
++                   int *dw, int *dh, int *dx, int *dy )
++{
++     if (sw <= 0 || sh <= 0 || fw <= 0 || fh <= 0) {
++          *dw = *dh = *dx = *dy = 0;
++          return;
++     }
++
++     if (stretch) {
++          *dw = fw;
++          *dh = fh;
++     }
++     else {
++          unsigned long long s = ((unsigned long long)fw << 16) / (unsigned)sw;
++          unsigned long long t = ((unsigned long long)fh << 16) / (unsigned)sh;
++
++          if (t < s)
++               s = t;                             /* whichever axis binds */
++
++          *dw = (int)(((unsigned long long)sw * s + 32768) >> 16);
++          *dh = (int)(((unsigned long long)sh * s + 32768) >> 16);
++          if (*dw < 1)
++               *dw = 1;
++          if (*dh < 1)
++               *dh = 1;
++     }
++
++     *dx = (fw - *dw) / 2;
++     *dy = (fh - *dh) / 2;
++}
++
++/*
++ * PRESENT_SCALE: nearest-neighbour resample of the sw x sh logical surface into
++ * the dw x dh rectangle at (dx,dy) of the physical fb.
++ *
++ * One output pixel is one accumulator add, one shift, one source load and one
++ * destination store; ARM's scaled-index addressing folds the <<1 of the 16-bit
++ * cases into the load, so the inner loop is lsr / ldrh / strh / add / cmp.
++ *
++ * The row index is hoisted out of the x loop, and a DOWNSCALE revisits the same
++ * source row for several output rows -- which is why the source rows stay hot in
++ * L1/L2 across the repeat.
++ *
++ * Both accumulators start at half a step, so a sample lands at the CENTRE of the
++ * destination pixel's footprint instead of at its left/top edge.  Half a pixel
++ * of bias is the difference between ragged and acceptable bitmap text on a
++ * downscale.
++ *
++ * stepx is the FLOOR of sw<<16/dw, which is what guarantees the index can never
++ * reach sw even with the half-step offset:
++ *     (dw - 1/2) * floor((sw<<16)/dw)  <  (dw - 1/2) * (sw<<16)/dw  <  sw<<16
++ * so there is no clamp in the inner loop and none is needed.
++ */
++static void
++fbdev_present_scale( const unsigned char *src, int sw, int sh, int spitch, int sbpp,
++                     unsigned char *dst, int fpitch, int dbpp,
++                     int dx, int dy, int dw, int dh )
++{
++     unsigned int stepx = (unsigned int)(((unsigned long long)sw << 16) / (unsigned)dw);
++     unsigned int stepy = (unsigned int)(((unsigned long long)sh << 16) / (unsigned)dh);
++     unsigned int accy  = stepy >> 1;
++     int          y;
++
++     for (y = 0; y < dh; y++) {
++          const unsigned char *srow = src + (size_t)(accy >> 16) * spitch;
++          unsigned char       *drow = dst + (size_t)(y + dy) * fpitch + (size_t)dx * dbpp;
++          unsigned int         acc  = stepx >> 1;
++          int                  x;
++
++          switch ((sbpp << 2) | dbpp) {
++          case (2 << 2) | 2: {                    /* 565 -> 565: the Pi's case */
++               const unsigned short *s = (const unsigned short *)srow;
++               unsigned short       *d = (unsigned short *)drow;
++
++               for (x = 0; x < dw; x++) {
++                    *d++ = s[acc >> 16];
++                    acc += stepx;
++               }
++               break;
++          }
++          case (2 << 2) | 4: {                    /* 565 -> 8888: the expensive one */
++               const unsigned short *s = (const unsigned short *)srow;
++               unsigned int         *d = (unsigned int *)drow;
++
++               for (x = 0; x < dw; x++) {
++                    *d++ = rgb565_to_rgb32( s[acc >> 16] );
++                    acc += stepx;
++               }
++               break;
++          }
++          case (4 << 2) | 2: {
++               const unsigned int *s = (const unsigned int *)srow;
++               unsigned short     *d = (unsigned short *)drow;
++
++               for (x = 0; x < dw; x++) {
++                    *d++ = rgb32_to_rgb565( s[acc >> 16] );
++                    acc += stepx;
++               }
++               break;
++          }
++          case (4 << 2) | 4: {
++               const unsigned int *s = (const unsigned int *)srow;
++               unsigned int       *d = (unsigned int *)drow;
++
++               for (x = 0; x < dw; x++) {
++                    *d++ = s[acc >> 16];
++                    acc += stepx;
++               }
++               break;
++          }
++          default:
++               return;                             /* no conversion for this pair */
++          }
++
++          accy += stepy;
++     }
++}
++/* fill one row span [x0,x1) with black, in the fb's own pixel format */
++static void
++fbdev_fill_span( unsigned char *row, int x0, int x1, int dbpp )
++{
++     if (dbpp == 2) {
++          unsigned short *p = (unsigned short *)row + x0;
++
++          while (x0++ < x1)
++               *p++ = 0;                                   /* RGB565 black */
++     }
++     else {
++          unsigned int *p = (unsigned int *)row + x0;
++
++          while (x0++ < x1)
++               *p++ = 0xff000000;                          /* XRGB8888 black */
++     }
++}
++
++/*
++ * PRESENT_LETTERBOX: fill the bars around a sw x sh surface at (dx,dy) in an
++ * fw x fh fb.  Only the bars are written -- clearing the whole fb first would
++ * be a full-frame memset on top of the copy, for the same result.
++ */
++static void
++fbdev_fill_bars( unsigned char *dst, int fw, int fh, int fpitch, int dbpp,
++                 int dx, int dy, int sw, int sh )
++{
++     int y;
++
++     for (y = 0; y < dy && y < fh; y++)                     /* above the surface */
++          fbdev_fill_span( dst + y * fpitch, 0, fw, dbpp );
++
++     for (; y < dy + sh && y < fh; y++) {                   /* beside it */
++          unsigned char *row = dst + y * fpitch;
++
++          fbdev_fill_span( row, 0, dx, dbpp );
++          fbdev_fill_span( row, dx + sw, fw, dbpp );
++     }
++
++     for (; y < fh; y++)                                    /* below it */
++          fbdev_fill_span( dst + y * fpitch, 0, fw, dbpp );
++}
++
++/*
++ * PRESENT_ROTATE (Prime GO): the portrait-panel path.  The loops below are the
++ * original ones, unchanged -- the generalization was to the modes around them,
++ * not to the angle arithmetic.  They write 32bpp pixels unconditionally, which
++ * is why fbdev's init refuses ROTATE on a fb that is not 32bpp.
++ *
++ * The process-global scratch buffer makes the in-place rotation safe.
++ */
++static void
++fbdev_rotate_rows( unsigned char *src, int sw, int sh, int spitch,
++                   unsigned char *dst, int fw, int fh, int fpitch,
++                   int deg, int src_bpp )
++{
++     FBDevShared   *shared  = dfb_fbdev->shared;
 +     unsigned char *scratch = shared->rot_scratch;
 +     unsigned int   x, y;
-+     int src_bpp = (shared->rot_src_bpp >= 2) ? shared->rot_src_bpp : 4;
 +
 +     if (!scratch || !src || !dst)
 +          return;
@@ -273,7 +637,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 +          }
 +          return;
 +     }
-+
+ 
 +     switch (deg) {
 +     case 90: /* left / counter-clockwise: dst(y, sw-1-x) = src(x,y) */
 +          for (y = 0; y < (unsigned)sh; y++) {
@@ -308,10 +672,161 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 +     }
 +}
 +
++static void
++fbdev_present_primary( unsigned char *src, int sw, int sh, int spitch, int sbpp,
++                       unsigned char *dst, int fw, int fh, int fpitch, int dbpp,
++                       int mode, int deg, int dx, int dy, int dw, int dh )
++{
++     int x, y, rows, cols;
++
++     if (!src || !dst || sw <= 0 || sh <= 0 || spitch <= 0 || fw <= 0 || fh <= 0)
++          return;
++
++     if (mode == PRESENT_ROTATE) {
++          fbdev_rotate_rows( src, sw, sh, spitch, dst, fw, fh, fpitch, deg, sbpp );
++          return;
++     }
++
++     /* PRESENT_SCALE resamples into its own rectangle, which fbdev_present_fit()
++        computed at open; this only has to sanity-check it.  The fit's floor step
++        makes dx+dw <= fw and dy+dh <= fh hold by construction, so a violation is
++        a caller bug and drawing nothing is the safe answer. */
++     if (mode == PRESENT_SCALE) {
++          if (dw <= 0 || dh <= 0 || dx < 0 || dy < 0 || dx + dw > fw || dy + dh > fh)
++               return;
++
++          /* An exact fit is not a resample.  A fb of the same geometry wants the
++             1:1 path below -- one memcpy per row rather than a per-pixel walk
++             doing 1:1 arithmetic the long way -- and that is a real case, because
++             DFB_PRESENT=scale on a MATCHING fb is how you ask for the
++             system-memory back buffer without changing the geometry. */
++          if (dw == sw && dh == sh)
++               goto one_to_one;
++
++          fbdev_fill_bars( dst, fw, fh, fpitch, dbpp, dx, dy, dw, dh );
++          fbdev_present_scale( src, sw, sh, spitch, sbpp, dst, fpitch, dbpp,
++                               dx, dy, dw, dh );
++          return;
++     }
++
++one_to_one:
++     if (dx < 0 || dy < 0)
++          return;
++
++     /* How many COLUMNS to copy.  A surface WIDER than the fb used to copy
++        nothing at all, which is a black screen rather than a crop -- and CROP is
++        the mode that *means* "take what fits", so it gets a column budget to go
++        with the row budget below.  The other modes keep the refusal: for them a
++        fb narrower than the surface is a misconfiguration, and a partial image
++        would hide it. */
++     cols = sw;
++     if (dx + cols > fw) {
++          if (mode != PRESENT_CROP)
++               return;
++          cols = fw - dx;
++          if (cols <= 0)
++               return;
++     }
++
++     /* How many rows to copy.  Never more than the fb has left below dy, so a
++        surface taller than its space -- which is what PRESENT_CROP *means* -- is
++        a row budget on the copy rather than a resampling. */
++     rows = sh;
++     if (rows > fh - dy)
++          rows = fh - dy;
++     if (rows <= 0)
++          return;
++
++     if (mode == PRESENT_LETTERBOX)
++          fbdev_fill_bars( dst, fw, fh, fpitch, dbpp, dx, dy, sw, sh );
++
++     /* The whole frame in one copy: same format, no offset, strides agree.  This
++        is the case a Pi-like fb is in, and it is a single 2 MB memcpy. */
++     if (sbpp == dbpp && dx == 0 && dy == 0 && fpitch == spitch &&
++         cols == sw && rows == sh) {
++          memcpy( dst, src, (size_t)rows * spitch );
++          return;
++     }
++
++     for (y = 0; y < rows; y++) {
++          const unsigned char *srow = src + y * spitch;
++          unsigned char       *drow = dst + (y + dy) * fpitch + dx * dbpp;
++
++          if (sbpp == dbpp) {
++               memcpy( drow, srow, (size_t)cols * sbpp );
++          }
++          else if (sbpp == 2 && dbpp == 4) {
++               /* the ~1 Mpx 565 -> 8888 convert: two pixels an iteration, or it
++                  cannot do a frame every 16 ms */
++               const unsigned short *s = (const unsigned short *)srow;
++               unsigned int         *d = (unsigned int *)drow;
++               int                   n = cols & ~1;
++
++               for (x = 0; x < n; x += 2) {
++                    d[x]     = rgb565_to_rgb32( s[x] );
++                    d[x + 1] = rgb565_to_rgb32( s[x + 1] );
++               }
++               if (cols & 1)
++                    d[cols - 1] = rgb565_to_rgb32( s[cols - 1] );
++          }
++          else if (sbpp == 4 && dbpp == 2) {
++               const unsigned int *s = (const unsigned int *)srow;
++               unsigned short     *d = (unsigned short *)drow;
++
++               for (x = 0; x < cols; x++)
++                    d[x] = rgb32_to_rgb565( s[x] );
++          }
++          else
++               return;                        /* no conversion for this pixel pair */
++     }
++}
++
  FBDev *dfb_fbdev = NULL;
  
  /******************************************************************************/
-@@ -461,6 +565,7 @@ system_initialize( CoreDFB *core, void **data )
+@@ -273,23 +731,26 @@ static DFBResult dfb_fbdev_open( void )
+ 
+ static DFBResult dfb_fbdev_open( void )
+ {
+-     DFBResult error_result = DFB_FAILURE;
++     DFBResult   error_result = DFB_FAILURE;
++     const char *fbdev;
+ 
+-     if (dfb_config->fb_device) {
+-          dfb_fbdev->fd = open( dfb_config->fb_device, O_RDWR );
+-          if (dfb_fbdev->fd < 0) {
+-               D_PERROR( "DirectFB/FBDev: Error opening '%s'!\n",
+-                         dfb_config->fb_device);
+-
+-               error_result = errno2result( errno );
+-               goto error;
+-          }
+-     }
+-     else if (getenv( "FRAMEBUFFER" ) && *getenv( "FRAMEBUFFER" ) != '\0') {
+-          dfb_fbdev->fd = open( getenv ("FRAMEBUFFER"), O_RDWR );
++     /* Which framebuffer.  dfb_config->fb_device is the directfbrc 'fbdev='
++      * option, which still wins because it is the one DirectFB documented for
++      * years; FB_DEV is the launcher's knob (rb.conf's RB_FB_DEV, exported by
++      * start-rb.sh) so the device can be moved without editing a config file
++      * inside the chroot.  Both are the same kind of string: a path. */
++     fbdev = dfb_config->fb_device;
++     if (!fbdev || !*fbdev) {
++          if (getenv( "FB_DEV" ) && *getenv( "FB_DEV" ) != '\0')
++               fbdev = getenv( "FB_DEV" );
++          else if (getenv( "FRAMEBUFFER" ) && *getenv( "FRAMEBUFFER" ) != '\0')
++               fbdev = getenv( "FRAMEBUFFER" );
++     }
++
++     if (fbdev && *fbdev) {
++          dfb_fbdev->fd = open( fbdev, O_RDWR );
+           if (dfb_fbdev->fd < 0) {
+-               D_PERROR( "DirectFB/FBDev: Error opening '%s'!\n",
+-                          getenv ("FRAMEBUFFER"));
++               D_PERROR( "DirectFB/FBDev: Error opening '%s'!\n", fbdev );
+ 
+                error_result = errno2result( errno );
+                goto error;
+@@ -461,6 +922,7 @@ system_initialize( CoreDFB *core, void **data )
  
       dfb_fbdev->core   = core;
       dfb_fbdev->shared = shared;
@@ -319,7 +834,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
  
       page_size = direct_pagesize();
  
-@@ -515,10 +620,82 @@ system_initialize( CoreDFB *core, void **data )
+@@ -515,9 +977,332 @@ system_initialize( CoreDFB *core, void **data )
                      "Could not disable console acceleration!\n" );
            goto error;
       }
@@ -328,81 +843,331 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
       dfb_fbdev_var_to_mode( &shared->current_var,
                              &shared->current_mode );
 +
-+     /* ROTATION (Prime GO): read DFB_ROTATE env (left/right/180/off) and
-+      * allocate a scratch buffer for the software rotation.
-+      * The actual geometry comes from the layer region config at flip time,
-+      * here we only remember the physical fb geometry. */
-+     shared->rot_deg    = 0;
-+     shared->rot_scratch = NULL;
-+     shared->rot_surface = NULL;
++     /* PRESENTATION.  Two things happen here, in this order:
++      *
++      * 1. the REAL fb geometry is read with raw syscalls.  It has to be: the
++      *    LD_PRELOAD shim rewrites FBIOGET_VSCREENINFO/FBIOGET_FSCREENINFO to the
++      *    logical 1280x800x16 rbp believes in, and *this* code needs the truth --
++      *    it is the blit destination, and the page count below is the buffer-mode
++      *    decision.
++      * 2. the present mode is selected from DFB_PRESENT (DFB_ROTATE still works,
++      *    as the rotate mode plus its angle -- the launcher has always set it).
++      *
++      * The real geometry is read unconditionally, not only when rotating: every
++      * mode except OFF blits, and OFF is the only mode that may ignore the fb.
++      *
++      * There is deliberately no "if (rot_deg)" guard around any of this.  The
++      * original code only ever looked at the real geometry when it was told to
++      * rotate, which meant a fb that disagrees with the shim's lie went unnoticed
++      * on every other path -- including the one that decides how many buffers the
++      * primary layer may have. */
++     shared->present_mode     = PRESENT_OFF;
++     shared->present_dst_bpp  = 0;
++     shared->present_dx       = 0;
++     shared->present_dy       = 0;
++     shared->present_pages    = 1;
++     shared->present_pan      = 0;
++     shared->rot_deg          = 0;
++     shared->rot_scratch      = NULL;
++     shared->rot_surface      = NULL;
 +     shared->rot_surface_size = 0;
 +     {
-+          const char *rot = getenv( "DFB_ROTATE" );
++          struct fb_var_screeninfo rv;
++          struct fb_fix_screeninfo rfx;
++
++          memset( &rv, 0, sizeof(rv) );
++          if (syscall( SYS_ioctl, dfb_fbdev->fd, FBIOGET_VSCREENINFO, &rv ) == 0 && rv.xres)
++               shared->real_var = rv;
++          else {
++               shared->real_var = shared->orig_var;
++               shared->real_var.xres_virtual = shared->orig_var.xres;
++               shared->real_var.yres_virtual = shared->fix.smem_len / shared->fix.line_length;
++          }
++
++          memset( &rfx, 0, sizeof(rfx) );
++          if (syscall( SYS_ioctl, dfb_fbdev->fd, FBIOGET_FSCREENINFO, &rfx ) == 0 && rfx.line_length)
++               shared->rot_fpitch = rfx.line_length;
++          else
++               shared->rot_fpitch = shared->fix.line_length;
++
++          shared->rot_fw = shared->real_var.xres;
++          shared->rot_fh = shared->real_var.yres;
++
++          shared->present_dst_bpp = shared->real_var.bits_per_pixel / 8;
++          if (shared->present_dst_bpp < 2)
++               shared->present_dst_bpp = 2;      /* never 0: fbdev.h's fill/convert
++                                                    paths switch on 2 vs 4 */
++
++          /* How many whole frames fit in the fb.  The stride here is the REAL
++           * one (raw syscall): fix.line_length came back through the shim, so it
++           * is the logical stride, and on a 32bpp fb that is exactly half the
++           * fb's own -- which would double the page count. */
++          if (shared->rot_fpitch > 0 && shared->rot_fh > 0 && shared->fix.smem_len > 0)
++               shared->present_pages = shared->fix.smem_len /
++                                       ((unsigned)shared->rot_fpitch * (unsigned)shared->rot_fh);
++          if (shared->present_pages < 1)
++               shared->present_pages = 1;
++          shared->present_pan = (shared->present_pages > 1);
++     }
++
++     {
++          const char *present = getenv( "DFB_PRESENT" );
++          const char *rot     = getenv( "DFB_ROTATE" );
++
++          if (present && present[0]) {
++               if (!strcmp( present, "off" ))
++                    shared->present_mode = PRESENT_OFF;
++               else if (!strcmp( present, "convert" ))
++                    shared->present_mode = PRESENT_CONVERT;
++               else if (!strcmp( present, "letterbox" ))
++                    shared->present_mode = PRESENT_LETTERBOX;
++               else if (!strcmp( present, "crop" ))
++                    shared->present_mode = PRESENT_CROP;
++               else if (!strcmp( present, "scale" ))
++                    shared->present_mode = PRESENT_SCALE;
++               else if (!strcmp( present, "rotate" ))
++                    shared->present_mode = PRESENT_ROTATE;
++               else
++                    D_ERROR( "FBDev/Present: unknown DFB_PRESENT '%s' -- expected one "
++                             "of off, convert, letterbox, crop, scale, rotate.\n", present );
++          }
++
 +          if (rot && rot[0] && strcmp( rot, "off" ) != 0) {
++               shared->present_mode = PRESENT_ROTATE;
 +               if (!strcmp( rot, "left" ))
 +                    shared->rot_deg = 90;
 +               else if (!strcmp( rot, "right" ))
 +                    shared->rot_deg = 270;
 +               else
 +                    shared->rot_deg = atoi( rot );
++          }
 +
-+               /* read the REAL fb geometry via raw syscall (bypasses the
-+                * LD_PRELOAD shim that lies to rbp about the logical size) */
-+               {
-+                    struct fb_var_screeninfo rv;
-+                    memset( &rv, 0, sizeof(rv) );
-+                    if (syscall( SYS_ioctl, dfb_fbdev->fd, FBIOGET_VSCREENINFO, &rv ) == 0 && rv.xres)
-+                         shared->real_var = rv;
-+                    else {
-+                         shared->real_var = shared->orig_var;
-+                         shared->real_var.xres_virtual = shared->orig_var.xres;
-+                         shared->real_var.yres_virtual = shared->fix.smem_len / shared->fix.line_length;
++          if (shared->present_mode == PRESENT_ROTATE && shared->present_dst_bpp != 4) {
++               /* the angle loops store 4-byte pixels unconditionally */
++               D_ERROR( "FBDev/Present: rotate needs a 32bpp fb, this one is %dbpp "
++                        "-- presenting without a blit instead.\n",
++                        shared->present_dst_bpp * 8 );
++               shared->present_mode = PRESENT_OFF;
++          }
++
++          if (shared->present_mode == PRESENT_LETTERBOX) {
++               /* centre the logical surface in the real fb; a fb that is SMALLER
++                * than the surface is cropped by the row budget instead */
++               shared->present_dx = (shared->rot_fw - shared->orig_var.xres) / 2;
++               shared->present_dy = (shared->rot_fh - shared->orig_var.yres) / 2;
++               if (shared->present_dx < 0)
++                    shared->present_dx = 0;
++               if (shared->present_dy < 0)
++                    shared->present_dy = 0;
++          }
++
++          /*
++           * AUTO-FALLBACK.  The shim tells rbp and DirectFB the fb is 1280x800x16
++           * whatever it really is, so a real geometry that differs from the
++           * logical one is not a preference -- it is a mismatch OFF cannot
++           * survive.  Under OFF the layer surface IS the fb page: the pool hands
++           * out an offset in the REAL fb with the LOGICAL pitch
++           * (fbdev_surface_pool.c's OFF branch) and rbp draws its whole 1280x800
++           * frame into it regardless.  A LARGER fb then gets a 2560-byte stride
++           * in a wider page -- a sheared image, every frame; a SMALLER one fails
++           * primaryTestRegion()'s need_mem check against the shimmed geometry and
++           * there is no UI at all (docs/12).  So the shipped default "off" is
++           * UPGRADED rather than obeyed when the two disagree.
++           *
++           * This is dead on a fb that matches the shim, which is exactly why it
++           * cannot regress the verified configuration: it fires only when one of
++           * the fields below disagrees.  DFB_PRESENT_AUTO=0 turns it off, and is
++           * the control in the S10.0 drill.
++           *
++           * The notice goes to /tmp/dfbdig9.log as well as D_ERROR, because rbp
++           * calls DirectFBSetOption("quiet") and every D_ERROR in production is
++           * suppressed -- the file is the only channel anyone will read.
++           */
++          {
++               const char *env_auto = getenv( "DFB_PRESENT_AUTO" );
++
++               if ((!env_auto || env_auto[0] != '0') &&
++                   shared->present_mode == PRESENT_OFF) {
++                    /* pixel strides, not byte strides: that is what tells a
++                     * geometry mismatch apart from a format-only one */
++                    int real_px  = (shared->rot_fpitch > 0 && shared->present_dst_bpp > 0)
++                                   ? shared->rot_fpitch / shared->present_dst_bpp : 0;
++                    int logic_px = (shared->orig_var.bits_per_pixel >= 8)
++                                   ? shared->fix.line_length /
++                                     (shared->orig_var.bits_per_pixel / 8) : 0;
++
++                    if (shared->real_var.xres != shared->orig_var.xres ||
++                        shared->real_var.yres != shared->orig_var.yres ||
++                        real_px != logic_px) {
++                         shared->present_mode = PRESENT_SCALE;
++                         { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,
++                              "PRESENT: auto -- real fb %dx%d pitch %d does not match the "
++                              "logical %dx%d pitch %d, and 'off' cannot present that; "
++                              "using mode=scale\n",
++                              shared->rot_fw, shared->rot_fh, shared->rot_fpitch,
++                              shared->orig_var.xres, shared->orig_var.yres,
++                              shared->fix.line_length); fclose(f);} }
++                         D_ERROR( "FBDev/Present: fb is %dx%d but the logical surface "
++                                  "is %dx%d -- 'off' would shear or draw nothing; "
++                                  "using 'scale' instead.\n",
++                                  shared->rot_fw, shared->rot_fh,
++                                  shared->orig_var.xres, shared->orig_var.yres );
++                    }
++                    else if (shared->real_var.bits_per_pixel !=
++                             shared->orig_var.bits_per_pixel) {
++                         /* same geometry, different pixel format: a 1:1 convert is
++                          * cheaper and sharper than resampling by exactly 1.0 */
++                         shared->present_mode = PRESENT_CONVERT;
++                         { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,
++                              "PRESENT: auto -- real fb is %dbpp, logical %dbpp; "
++                              "using mode=convert\n",
++                              shared->real_var.bits_per_pixel,
++                              shared->orig_var.bits_per_pixel); fclose(f);} }
 +                    }
 +               }
++          }
 +
-+               shared->rot_fw      = shared->real_var.xres;
-+               shared->rot_fh      = shared->real_var.yres;
-+               /* real line_length via raw syscall (shim may fake it) */
-+               {
-+                    struct fb_fix_screeninfo rfx;
-+                    memset( &rfx, 0, sizeof(rfx) );
-+                    if (syscall( SYS_ioctl, dfb_fbdev->fd, FBIOGET_FSCREENINFO, &rfx ) == 0 && rfx.line_length)
-+                         shared->rot_fpitch = rfx.line_length;
-+                    else
-+                         shared->rot_fpitch = shared->fix.line_length;
++          /* PRESENT_SCALE's rectangle and its frame budget, both computed once
++           * here so that the blit, the PRESENT: line and the cursor shim all
++           * read the same numbers. */
++          if (shared->present_mode == PRESENT_SCALE) {
++               const char *env_fit    = getenv( "DFB_PRESENT_FIT" );
++               const char *env_skip   = getenv( "DFB_PRESENT_SKIP" );
++               const char *env_budget = getenv( "DFB_PRESENT_PX_BUDGET" );
++               long long   budget = 2600000;
++               long long   cost;
++
++               shared->present_stretch = (env_fit && !strcmp( env_fit, "stretch" ));
++
++               fbdev_present_fit( shared->orig_var.xres, shared->orig_var.yres,
++                                  shared->rot_fw, shared->rot_fh,
++                                  shared->present_stretch,
++                                  &shared->present_dw, &shared->present_dh,
++                                  &shared->present_dx, &shared->present_dy );
++
++               if (env_budget && env_budget[0]) {
++                    long b = atol( env_budget );
++                    if (b > 0)
++                         budget = b;
 +               }
-+               { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,"ROTINIT: real_fb=%dx%d pitch=%d (orig_var=%dx%d)\n",shared->rot_fw,shared->rot_fh,shared->rot_fpitch,shared->orig_var.xres,shared->orig_var.yres); fclose(f);} }
- 
-+               /* logical layer geometry (shimmed): orig_var carries the
-+                * logical xres/yres/bpp that rbp believes in. */
-+               {
-+                    int lw = shared->orig_var.xres ? shared->orig_var.xres : 1280;
-+                    int lh = shared->orig_var.yres ? shared->orig_var.yres : 800;
-+                    int lbpp = (shared->orig_var.bits_per_pixel / 8);
-+                    if (lbpp < 2) lbpp = 4;      /* safety */
-+                    shared->rot_src_bpp = lbpp;
-+                    shared->rot_scratch = malloc( (size_t)lh * lw * lbpp );
-+                    /* system-memory source surface: 3 buffers (triple) of the
-+                     * logical layer frame - keep separate so rbp draws into
-+                     * clean buffers, then we rotate into the fb. */
-+                    shared->rot_surface = malloc( 3 * (size_t)lh * lw * lbpp );
-+                    shared->rot_surface_size = 3 * lh * lw * lbpp;
++
++               /* The cost is a WEIGHTED output pixel count: 32bpp output costs
++                * about twice 16bpp.  The budget is a guess until S10.3 measures
++                * it -- which is why the averaged line exists, and why
++                * DFB_PRESENT_SKIP overrides the whole calculation without a
++                * rebuild (the RB_PAN_PACER_MS precedent). */
++               cost = (long long)shared->present_dw * shared->present_dh *
++                      (shared->present_dst_bpp == 4 ? 2 : 1);
++
++               shared->present_skip = 1;
++               if (env_skip && env_skip[0]) {
++                    int s = atoi( env_skip );
++                    if (s > 0)
++                         shared->present_skip = s > 8 ? 8 : s;
 +               }
-+               if (shared->rot_scratch && shared->rot_surface)
-+                    D_INFO( "FBDev/Rotate: rotation %d enabled (fb %dx%d)\n",
-+                            shared->rot_deg, shared->rot_fw, shared->rot_fh );
 +               else {
-+                    shared->rot_deg = 0;
-+                    if (shared->rot_scratch) { free(shared->rot_scratch); shared->rot_scratch = NULL; }
-+                    if (shared->rot_surface) { free(shared->rot_surface); shared->rot_surface = NULL; }
++                    while (shared->present_skip < 4 &&
++                           cost > budget * shared->present_skip)
++                         shared->present_skip++;
++               }
++
++               if (cost > 2 * budget) {
++                    /* Loud and one-shot, and the honest answer: a skip of 4 is not
++                     * a usable UI, it is a slideshow.  Naming the remedy is the
++                     * deliverable here. */
++                    { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,
++                         "PRESENT: WARNING %lld weighted output pixels per frame at "
++                         "%dx%d is far beyond a software scaler on this SoC -- set a "
++                         "video= mode near 1280x800 in cmdline.txt\n",
++                         cost, shared->present_dw, shared->present_dh); fclose(f);} }
++                    D_ERROR( "FBDev/Present: scaling to %dx%d is %lld weighted pixels "
++                             "per frame -- too much for this SoC; set a video= mode "
++                             "near 1280x800.\n",
++                             shared->present_dw, shared->present_dh, cost );
 +               }
 +          }
-+     }
 +
++          /* Under every mode except OFF the layer surface is a system-memory
++           * buffer, and this is what makes that possible: rbp draws into clean
++           * memory and the present path copies it out, instead of drawing into
++           * the very page the display is scanning.  That is worth having on its
++           * own -- it is what stops rbp's render thread from tearing -- and it is
++           * also the only way the fb's format can differ from rbp's. */
++          if (shared->present_mode != PRESENT_OFF) {
++               int lw   = shared->orig_var.xres ? shared->orig_var.xres : 1280;
++               int lh   = shared->orig_var.yres ? shared->orig_var.yres : 800;
++               int lbpp = shared->orig_var.bits_per_pixel / 8;
++
++               if (lbpp < 2)
++                    lbpp = 4;                 /* safety */
++
++               shared->rot_src_bpp      = lbpp;
++               shared->rot_scratch      = malloc( (size_t)lh * lw * lbpp );
++               /* system-memory source surface: 3 buffers (triple) of the logical
++                * layer frame, so rbp draws into a clean buffer and we present
++                * afterwards */
++               shared->rot_surface      = malloc( 3 * (size_t)lh * lw * lbpp );
++               shared->rot_surface_size = 3 * lh * lw * lbpp;
++
++               if (!shared->rot_scratch || !shared->rot_surface) {
++                    shared->present_mode = PRESENT_OFF;
++                    if (shared->rot_scratch) { free( shared->rot_scratch ); shared->rot_scratch = NULL; }
++                    if (shared->rot_surface) { free( shared->rot_surface ); shared->rot_surface = NULL; }
++                    shared->rot_surface_size = 0;
++                    D_ERROR( "FBDev/Present: could not allocate the system surfaces "
++                             "(%dx%d %dbpp) -- presenting without a blit instead.\n",
++                             lw, lh, lbpp * 8 );
++               }
++          }
++
++          if (shared->present_mode == PRESENT_SCALE)
++               D_INFO( "FBDev/Present: mode %s (angle %d), fb %dx%d %dbpp pitch %d, "
++                       "logical %dx%d %dbpp, %d page(s), pan %d -- scale %dx%d at "
++                       "+%d+%d (%s), skip %d\n",
++                       fbdev_present_name( shared->present_mode ), shared->rot_deg,
++                       shared->rot_fw, shared->rot_fh, shared->present_dst_bpp * 8,
++                       shared->rot_fpitch,
++                       shared->orig_var.xres, shared->orig_var.yres,
++                       shared->orig_var.bits_per_pixel,
++                       shared->present_pages, shared->present_pan,
++                       shared->present_dw, shared->present_dh,
++                       shared->present_dx, shared->present_dy,
++                       shared->present_stretch ? "stretch" : "fit",
++                       shared->present_skip );
++          else
++               D_INFO( "FBDev/Present: mode %s (angle %d), fb %dx%d %dbpp pitch %d, "
++                       "logical %dx%d %dbpp, %d page(s), pan %d\n",
++                       fbdev_present_name( shared->present_mode ), shared->rot_deg,
++                       shared->rot_fw, shared->rot_fh, shared->present_dst_bpp * 8,
++                       shared->rot_fpitch,
++                       shared->orig_var.xres, shared->orig_var.yres,
++                       shared->orig_var.bits_per_pixel,
++                       shared->present_pages, shared->present_pan );
++
++          /* The one-shot PRESENT: line.  The prefix is deliberately identical for
++           * every mode, and the scale suffix is appended only under PRESENT_SCALE,
++           * so the line a matching fb produces is byte-for-byte what it was before
++           * this rung existed -- which is what the S10.4 no-regression drill
++           * diffs. */
++          { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){
++               fprintf(f,"PRESENT: mode=%s angle=%d real_fb=%dx%d pitch=%d bpp=%d pages=%d pan=%d (logical %dx%d)",
++                       fbdev_present_name(shared->present_mode),shared->rot_deg,
++                       shared->rot_fw,shared->rot_fh,shared->rot_fpitch,
++                       shared->present_dst_bpp*8,shared->present_pages,shared->present_pan,
++                       shared->orig_var.xres,shared->orig_var.yres);
++               if (shared->present_mode == PRESENT_SCALE)
++                    fprintf(f," scale=%dx%d dx=%d dy=%d fit=%s skip=%d",
++                            shared->present_dw,shared->present_dh,
++                            shared->present_dx,shared->present_dy,
++                            shared->present_stretch ? "stretch" : "fit",
++                            shared->present_skip);
++               fprintf(f,"\n");
++               fclose(f);} }
++     }
+ 
       shared->orig_cmap_memory = SHMALLOC( pool_data, 256 * 2 * 4 );
       if (!shared->orig_cmap_memory) {
-           ret = D_OOSHM();
-@@ -598,6 +775,15 @@ error:
+@@ -598,6 +1383,15 @@ error:
  
  error:
       if (shared) {
@@ -418,30 +1183,78 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
            if (shared->orig_cmap_memory)
                 SHFREE( pool_data, shared->orig_cmap_memory );
  
-@@ -1188,7 +1374,9 @@ primaryInitLayer( CoreLayer                  *layer,
+@@ -1188,7 +1982,37 @@ primaryInitLayer( CoreLayer                  *layer,
       /* fill out the default configuration */
       config->flags      = DLCONF_WIDTH       | DLCONF_HEIGHT |
                            DLCONF_PIXELFORMAT | DLCONF_BUFFERMODE;
 -     config->buffermode = DLBM_FRONTONLY;
-+     config->buffermode = DLBM_TRIPLE;   /* PATCH: force triple buffering so
-+                                            DirectFB flips the primary region
-+                                            (needed for the rotation path) */
++     /* PATCH: how many buffers the primary region may have is decided by how
++      * many the fb can actually HOLD, not by ypanstep.  A fb with ypanstep set
++      * but only one frame of memory -- which is what vc4 reports: ypanstep 1/1
++      * with smem_len == xres * yres * bpp -- must stay FRONTONLY, or DirectFB
++      * allocates three buffers in a surface of one and primaryTestRegion() fails
++      * with DFB_LIMITEXCEEDED, taking the primary surface with it and leaving
++      * rbp with nothing to draw on.  See docs/06.
++      *
++      * FRONTONLY is not a downgrade for a single-page fb: the one surface IS the
++      * page being scanned, so rbp draws straight into it and a flip is a no-op
++      * pan.
++      *
++      * PATCH: that is true of OFF, and only of OFF.  Under any other present mode
++      * the layer surface lives in SYSTEM memory (rot_surface -- see fbdevLock()),
++      * so how many pages the fb holds says nothing about how many buffers the
++      * region may have: the fb only ever receives the present blit, into its one
++      * page, and rot_surface is allocated for three logical frames.
++      *
++      * It matters because the present blit is reached ONLY for TRIPLE and
++      * BACKVIDEO -- layer_region.c calls the driver's FlipRegion for those two
++      * and falls through to the core's own copy path for FRONTONLY.  Picking
++      * FRONTONLY here regardless of the present mode therefore made the entire
++      * present path dead code: the region test passed, rbp ran, and the panel
++      * stayed black, because nothing ever copied rot_surface into the fb.  Two
++      * system-memory buffers are what the driver's present needs.  See docs/06. */
++     if (dfb_fbdev->shared->present_pages >= 3)
++          config->buffermode = DLBM_TRIPLE;
++     else if (dfb_fbdev->shared->present_mode != PRESENT_OFF)
++          config->buffermode = DLBM_BACKVIDEO;
++     else
++          config->buffermode = DLBM_FRONTONLY;
       config->width      = dfb_config->mode.width  ? dfb_config->mode.width  : default_mode->xres;
       config->height     = dfb_config->mode.height ? dfb_config->mode.height : default_mode->yres;
  
-@@ -1441,7 +1629,19 @@ primarySetRegion( CoreLayer                  *layer,
+@@ -1373,6 +2197,11 @@ primaryTestRegion( CoreLayer                  *layer,
+      if (config->options)
+           fail |= CLRCF_OPTIONS;
+ 
++     /* A source offset is a pan, so upstream tests it against ypanstep.  That is
++      * deliberately left alone here even though ypanstep is not a reliable
++      * answer on vc4 (see dfb_fbdev_mode_to_var): on a one-page fb a non-zero
++      * source.y is dropped by the present path and the pan stays at 0, whereas
++      * failing the region test would refuse a layer rbp can perfectly well use. */
+      if ((config->source.x && !shared->fix.xpanstep) ||
+          (config->source.y && !shared->fix.ypanstep && !shared->fix.ywrapstep))
+           fail |= CLRCF_SOURCE;
+@@ -1441,7 +2270,27 @@ primarySetRegion( CoreLayer                  *layer,
                      return ret;
            }
            else {
 -               ret = dfb_fbdev_pan( config->source.x, lock->offset / lock->pitch + config->source.y, true );
 +               int yofs;
-+               if (dfb_fbdev->shared->rot_deg) {
-+                    /* ROTATION: convert the logical buffer offset to a
-+                     * physical fb row offset (fh rows per buffer). */
-+                    int sw  = config->source.w;
-+                    int sh  = config->source.h;
-+                    int idx = lock->offset / (sw * 4 * sh);
-+                    yofs = idx * dfb_fbdev->shared->orig_var.yres + config->source.y;
++               if (dfb_fbdev->shared->present_mode != PRESENT_OFF) {
++                    /* Which of the system-memory buffers the lock points at, in
++                     * REAL fb rows -- fbdev_pan() pans in real_var's terms.  The
++                     * divisor is the lock's own pitch and not sw * 4 * sh: the
++                     * source surface is rbp's format, which on the shimmed
++                     * geometry is 16bpp, and a 4 in there silently halves idx.
++                     *
++                     * A single-page fb has nowhere to pan TO, so the offset stays
++                     * 0 -- anything else asks the driver to show a page that is
++                     * not there. */
++                    if (!dfb_fbdev->shared->present_pan)
++                         yofs = 0;
++                    else
++                         yofs = lock->offset / (lock->pitch * config->source.h) *
++                                dfb_fbdev->shared->rot_fh + config->source.y;
 +               }
 +               else
 +                    yofs = lock->offset / lock->pitch + config->source.y;
@@ -450,7 +1263,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
                 if (ret)
                      return ret;
            }
-@@ -1485,11 +1685,41 @@ primaryFlipRegion( CoreLayer             *layer,
+@@ -1485,12 +2334,114 @@ primaryFlipRegion( CoreLayer             *layer,
           !dfb_config->pollvsync_after)
            dfb_screen_wait_vsync( dfb_screens_at(DSCID_PRIMARY) );
  
@@ -459,11 +1272,12 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 -                          (flags & DSFLIP_WAITFORSYNC) == DSFLIP_ONSYNC );
 -     if (ret)
 -          return ret;
-+     if (dfb_fbdev->shared->rot_deg) {
-+          /* ROTATION (Prime GO): the layer surface is a logical (swapped)
-+           * buffer (e.g. 1280x800, pitch 5120) inside the fb memory.
-+           * Rotate it in place into the physical fb layout (800x1280,
-+           * pitch 3200) and pan to the fb buffer it lives in. */
++     if (dfb_fbdev->shared->present_mode != PRESENT_OFF) {
++          /* PRESENTATION: the layer surface is a system-memory buffer of the
++           * logical geometry rbp believes in (e.g. 1280x800 for a panel that is
++           * really 1280x800, or 1280x800 rotated into a 800x1280 portrait fb).
++           * Copy it into the physical fb layout and pan to the fb buffer it
++           * lands in. */
 +          FBDevShared *shared = dfb_fbdev->shared;
 +          int sw  = config->width;
 +          int sh  = config->height;
@@ -472,20 +1286,91 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 +          int fh  = shared->rot_fh;
 +          int fpitch = shared->rot_fpitch;
 +          int idx = 0;
++          int present = 1;
++
 +          if (spitch > 0 && sh > 0)
 +               idx = lock->offset / (spitch * sh);
 +
-+          fbdev_rotate_primary( (unsigned char*)shared->rot_surface + lock->offset,
-+                                sw, sh, spitch,
-+                                dfb_fbdev->framebuffer_base + idx * fh * fpitch,
-+                                fw, fh, fpitch,
-+                                shared->rot_deg );
++          /* With one page there is no back page to draw into: the blit has to go
++           * into the page being scanned, or it lands past the end of the fb. */
++          if (!shared->present_pan)
++               idx = 0;
 +
-+          ret = dfb_fbdev_pan( config->source.x,
-+                               idx * fh + config->source.y,
-+                               (flags & DSFLIP_WAITFORSYNC) == DSFLIP_ONSYNC );
-+          if (ret)
-+               return ret;
++          /* The frame budget.  A skip skips the PAN as well as the blit: panning
++           * without blitting would show a page that was never drawn.  And it
++           * falls through rather than returning, so dfb_surface_flip() below
++           * still runs and DirectFB's buffer recycling is unaffected by a skip. */
++          if (shared->present_mode == PRESENT_SCALE) {
++               if (shared->present_skip > 1 &&
++                   (shared->present_frames % (unsigned long)shared->present_skip) != 0)
++                    present = 0;
++
++               shared->present_frames++;
++          }
++
++          if (present) {
++               /* The clock is read only under PRESENT_SCALE, so the OFF path --
++                * the verified configuration -- pays nothing for the measurement. */
++               long long t0 = (shared->present_mode == PRESENT_SCALE)
++                              ? direct_clock_get_micros() : 0;
++
++               fbdev_present_primary( (unsigned char*)shared->rot_surface + lock->offset,
++                                      sw, sh, spitch, shared->rot_src_bpp,
++                                      dfb_fbdev->framebuffer_base + idx * fh * fpitch,
++                                      fw, fh, fpitch, shared->present_dst_bpp,
++                                      shared->present_mode, shared->rot_deg,
++                                      shared->present_dx, shared->present_dy,
++                                      shared->present_dw, shared->present_dh );
++
++               if (shared->present_mode == PRESENT_SCALE) {
++                    long long us = direct_clock_get_micros() - t0;
++
++                    shared->present_mus  += us;
++                    shared->present_done += 1;
++                    if (us > shared->present_max_us)
++                         shared->present_max_us = us;
++
++                    /* The steady-state window: everything after rbp's bring-up.
++                     * See FBDevShared's present_* comment for why both exist. */
++                    if (shared->present_done > PRESENT_WARMUP) {
++                         shared->present_warm_mus  += us;
++                         shared->present_warm_done += 1;
++                    }
++               }
+ 
++               ret = dfb_fbdev_pan( config->source.x,
++                                    shared->present_pan ? idx * fh + config->source.y : 0,
++                                    (flags & DSFLIP_WAITFORSYNC) == DSFLIP_ONSYNC );
++               if (ret)
++                    return ret;
++          }
++
++          /* The measured line, once, at the PRESENT_REPORT_ATth present.  This is
++           * the number that replaces the guessed pixel budget -- and on a panel
++           * where the WARNING above fired, it is the number that says how bad it
++           * really is.  One-shot, per the instrumentation rule in docs/06.
++           *
++           * The average reported is the WARM one: the first PRESENT_WARMUP
++           * presents carry rbp's bring-up and are not what the frame budget has
++           * to hold.  present_reported, not the counter's value, is what makes
++           * this fire exactly once -- see FBDevShared's present_* comment. */
++          if (shared->present_mode == PRESENT_SCALE &&
++              !shared->present_reported &&
++              shared->present_done == PRESENT_REPORT_AT) {
++               long long     mus  = shared->present_warm_done ? shared->present_warm_mus
++                                                             : shared->present_mus;
++               unsigned long done = shared->present_warm_done ? shared->present_warm_done
++                                                             : shared->present_done;
++
++               shared->present_reported = 1;
++               { FILE*f=fopen("/tmp/dfbdig9.log","a"); if(f){fprintf(f,
++                    "PRESENT: %lu presented / %lu flips, avg %.2f ms per present "
++                    "after %d warmup, worst %.2f ms (60 Hz budget %.2f ms), skip %d\n",
++                    shared->present_done, shared->present_frames,
++                    (double)mus / 1000.0 / (double)done,
++                    PRESENT_WARMUP, (double)shared->present_max_us / 1000.0,
++                    16.666666, shared->present_skip); fclose(f);} }
++          }
 +     }
 +     else {
 +          ret = dfb_fbdev_pan( config->source.x,
@@ -494,55 +1379,69 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 +          if (ret)
 +               return ret;
 +     }
- 
++
       if ((flags & DSFLIP_WAIT) &&
           (dfb_config->pollvsync_after || !(flags & DSFLIP_ONSYNC)))
-@@ -1542,6 +1772,10 @@ dfb_fbdev_pan( int xoffset, int yoffset, bool onsync )
+           dfb_screen_wait_vsync( dfb_screens_at(DSCID_PRIMARY) );
+@@ -1542,6 +2493,14 @@ dfb_fbdev_pan( int xoffset, int yoffset, bool onsync )
  
       var = &shared->current_var;
  
-+     if (dfb_fbdev->shared->rot_deg && shared->real_var.xres)
-+          var = &shared->real_var;   /* PATCH: use the REAL fb geometry (the
-+                                        LD_PRELOAD shim may lie to rbp) */
++     if (dfb_fbdev->shared->present_mode != PRESENT_OFF && shared->real_var.xres)
++          var = &shared->real_var;   /* PATCH: use the REAL fb geometry.  Under
++                                        every present mode the offsets this
++                                        function is given are in REAL fb rows,
++                                        and the LD_PRELOAD shim lies to rbp
++                                        about the logical size, so current_var's
++                                        yres_virtual is not the fb's. */
 +
       if (var->xres_virtual < xoffset + var->xres) {
            D_ERROR( "DirectFB/FBDev: xres %d, vxres %d, xoffset %d\n",
                      var->xres, var->xres_virtual, xoffset );
-@@ -1670,20 +1904,24 @@ dfb_fbdev_mode_to_var( const VideoMode           *mode
+@@ -1670,22 +2629,31 @@ dfb_fbdev_mode_to_var( const VideoMode           *mode
       else
            var.yoffset = 0;
  
 -     /* Set buffer mode */
 +     /* Set buffer mode
-+      * PATCH (running on DRM/rockchipdrmfb fixed-geometry fb): when the fb
-+      * has no panning (ypanstep==0 && ywrapstep==0) the upstream code rejects
-+      * TRIPLE/BACKVIDEO with DFB_UNSUPPORTED, which makes layer-surface
-+      * allocation fail and later corrupts DirectFB's layer bookkeeping.
-+      * Instead, always fall back to a single FRONTONLY buffer. The virtual
-+      * height is kept at the fb's real yres_virtual (e.g. the triple-buffered
-+      * 3840 rows of rockchipdrmfb) so the surface math matches the actual fb. */
++      * PATCH (running on a fixed-geometry DRM fb): upstream decides this from
++      * ypanstep, and asks the fb for three or two buffers' worth of virtual
++      * height.  On a fb that reports panning but only HAS one frame -- vc4:
++      * ypanstep 1/1 with smem_len == xres * yres * bpp -- that asks for memory
++      * that is not there, the surface allocation fails, and the failure surfaces
++      * far away as DFB_LIMITEXCEEDED from primaryTestRegion() (docs/06).
++      *
++      * So the test is the page count: the number of whole frames the fb holds,
++      * read from the REAL geometry at open.  Asking for more buffers than the fb
++      * has is the bug either way -- a fb with no panning at all, or a fb with one
++      * page -- so both collapse to a single FRONTONLY buffer.  That is not a
++      * downgrade on a one-page fb: the one surface is the scanned page. */
       switch (buffermode) {
            case DLBM_TRIPLE:
 -               if (shared->fix.ypanstep == 0 && shared->fix.ywrapstep == 0)
 -                    return DFB_UNSUPPORTED;
--
--               var.yres_virtual *= 3;
--               break;
--
-           case DLBM_BACKVIDEO:
-                if (shared->fix.ypanstep == 0 && shared->fix.ywrapstep == 0)
--                    return DFB_UNSUPPORTED;
-+                    break;   /* no panning -> single front buffer below */
++          case DLBM_BACKVIDEO:
++               if (shared->present_pages < (buffermode == DLBM_TRIPLE ? 3 : 2))
++                    break;   /* more buffers than pages -> single front buffer below */
  
--               var.yres_virtual *= 2;
+-               var.yres_virtual *= 3;
 +               if (buffermode == DLBM_TRIPLE)
 +                    var.yres_virtual *= 3;
 +               else
 +                    var.yres_virtual *= 2;
                 break;
  
+-          case DLBM_BACKVIDEO:
+-               if (shared->fix.ypanstep == 0 && shared->fix.ywrapstep == 0)
+-                    return DFB_UNSUPPORTED;
+-
+-               var.yres_virtual *= 2;
+-               break;
+-
            case DLBM_BACKSYSTEM:
-@@ -1694,6 +1932,7 @@ dfb_fbdev_mode_to_var( const VideoMode           *mode
+           case DLBM_FRONTONLY:
+                break;
+@@ -1694,6 +2662,7 @@ dfb_fbdev_mode_to_var( const VideoMode           *mode
                 return DFB_UNSUPPORTED;
       }
  
@@ -550,39 +1449,80 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
       /* Set pixel format */
       var.bits_per_pixel = DFB_BITS_PER_PIXEL(pixelformat);
       var.transp.length  = var.transp.offset = 0;
-@@ -1897,6 +2136,31 @@ dfb_fbdev_test_mode( const VideoMode             *mode
-                                   0, 0, config->buffermode, &var );
+@@ -1887,6 +2856,34 @@ dfb_fbdev_test_mode( const VideoMode             *mode
+      D_ASSERT( mode != NULL );
+      D_ASSERT( config != NULL );
+ 
++     /* A buffer mode the fb cannot hold is not a supported mode.  Upstream
++      * leaves this to ypanstep, which is not the question on a fb that reports
++      * panning without having the pages (vc4 -- docs/06).  Failing here is what
++      * makes DirectFB fall back to the layer's own default buffer mode instead
++      * of allocating three buffers inside one page, where buffers 2 and 3 would
++      * point past the end of the mmap. */
++     switch (config->buffermode) {
++          case DLBM_TRIPLE:
++               if (shared->present_pages < 3)
++                    return DFB_LIMITEXCEEDED;
++               break;
++          case DLBM_BACKVIDEO:
++               /* PATCH: the page count bounds the buffers only when the buffers
++                * ARE the fb's pages -- i.e. under OFF.  Under a present mode the
++                * region's two buffers live in system memory (rot_surface, sized
++                * for three) and the fb's single page is only ever the blit's
++                * destination, so a one-page fb holds them perfectly well.
++                * Refusing here is what kept the present blit unreachable: the
++                * region test fails, DirectFB falls back to FRONTONLY, and the
++                * core then never calls FlipRegion at all.  See docs/06. */
++               if (shared->present_pages < 2 &&
++                   shared->present_mode == PRESENT_OFF)
++                    return DFB_LIMITEXCEEDED;
++               break;
++          default:
++               break;
++     }
++
+      /* Is panning supported? */
+      if (source->w != mode->xres && shared->fix.xpanstep == 0)
+           return DFB_UNSUPPORTED;
+@@ -1898,6 +2895,37 @@ dfb_fbdev_test_mode( const VideoMode             *mode
       if (ret)
            return ret;
-+
-+     /* PATCH (rockchipdrmfb): force the request to the real fb format so the
-+      * region test (and hence window creation) succeeds on the fixed 32bpp fb.
-+      * Also force the geometry to the REAL fb size when the layer uses a
-+      * swapped/logical geometry (rotation mode): the DRM fb rejects any
+ 
++     /* PATCH (rockchipdrmfb/vc4): force the request to the real fb format so the
++      * region test (and hence window creation) succeeds on a fixed-format fb.
++      * Also force the geometry to the REAL fb size whenever the layer's geometry
++      * is a logical one (every present mode but OFF): the DRM fb rejects any
 +      * modeset that differs from the panel, so the TEST modeset must use the
-+      * actual fb geometry to pass. */
-+     {
-+          struct fb_var_screeninfo real;
-+          memset( &real, 0, sizeof(real) );
-+          if (!FBDEV_IOCTL( FBIOGET_VSCREENINFO, &real ) && real.bits_per_pixel) {
-+               var.bits_per_pixel = real.bits_per_pixel;
-+               var.red            = real.red;
-+               var.green          = real.green;
-+               var.blue           = real.blue;
-+               var.transp         = real.transp;
-+               var.grayscale      = real.grayscale;
-+               if (dfb_fbdev->shared->rot_deg) {
-+                    var.xres          = real.xres;
-+                    var.yres          = real.yres;
-+                    var.xres_virtual  = real.xres_virtual;
-+                    var.yres_virtual  = real.yres_virtual;
-+               }
++      * actual fb geometry to pass.
++      *
++      * PATCH: "the REAL fb" has to come from shared->real_var, which
++      * dfb_fbdev_open() filled with a raw syscall() that bypasses the LD_PRELOAD
++      * shim.  Reading it through FBDEV_IOCTL instead returns the shim's logical
++      * 1280x800 no matter what the panel is -- so on a smaller panel this forced
++      * var back UP to the logical geometry, need_mem came out at the logical
++      * 2,048,000 against a real smem_len of 1,843,200, and the region test failed
++      * with DFB_LIMITEXCEEDED: rbp died at startup with an out-of-memory warning
++      * on a perfectly healthy fb.  This is the same argument, and the same
++      * source, as the pan path's override (see dfb_fbdev_pan()). */
++     if (shared->real_var.bits_per_pixel) {
++          var.bits_per_pixel = shared->real_var.bits_per_pixel;
++          var.red            = shared->real_var.red;
++          var.green          = shared->real_var.green;
++          var.blue           = shared->real_var.blue;
++          var.transp         = shared->real_var.transp;
++          var.grayscale      = shared->real_var.grayscale;
++          if (dfb_fbdev->shared->present_mode != PRESENT_OFF) {
++               var.xres           = shared->real_var.xres;
++               var.yres           = shared->real_var.yres;
++               var.xres_virtual   = shared->real_var.xres_virtual;
++               var.yres_virtual   = shared->real_var.yres_virtual;
 +          }
 +     }
- 
++
       need_mem = DFB_BYTES_PER_LINE( config->format, var.xres_virtual ) *
                  DFB_PLANE_MULTIPLY( config->format, var.yres_virtual );
-@@ -2012,14 +2276,33 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
+      if (shared->fix.smem_len < need_mem) {
+@@ -2012,14 +3040,33 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
            return ret;
       }
  
@@ -620,7 +1560,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
       }
  
       if (FBDEV_IOCTL( FBIOGET_VSCREENINFO, &var2 )) {
-@@ -2032,17 +2315,28 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
+@@ -2032,17 +3079,28 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
       if (var.xres != var2.xres || var.xres_virtual != var2.xres_virtual ||
           var.yres != var2.yres || var.yres_virtual != var2.yres_virtual)
       {
@@ -656,11 +1596,10 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
  
       shared->current_var = var;
       dfb_fbdev_var_to_mode( &var, &shared->current_mode );
-@@ -2390,6 +2684,14 @@ dfb_fbdev_set_rgb332_palette( void )
- 
+@@ -2391,6 +3449,14 @@ dfb_fbdev_set_rgb332_palette( void )
       return ret;
  }
-+
+ 
 +/* PATCH (rockchipdrmfb hardening): the DRM-backed fbdev driver is NOT safe
 + * against concurrent FBIOPUT_VSCREENINFO / FBIOPAN_DISPLAY / mmap requests
 + * from multiple DirectFB threads (the rockchipdrmfb modeset path can NULL
@@ -668,10 +1607,11 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 + * process-wide mutex. rbp runs DirectFB in a single process, so a static
 + * (non-process-shared) mutex is sufficient. */
 +static pthread_mutex_t dfb_fb_ioctl_lock = PTHREAD_MUTEX_INITIALIZER;
- 
++
  static FusionCallHandlerResult
  fbdev_ioctl_call_handler( int           caller,
-@@ -2403,6 +2705,8 @@ fbdev_ioctl_call_handler( int           caller,
+                           int           call_arg,
+@@ -2403,6 +3469,8 @@ fbdev_ioctl_call_handler( int           caller,
       const char cursoroff_str[] = "\033[?1;0;0c";
       const char blankoff_str[] = "\033[9;0]";
  
@@ -680,7 +1620,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
       if (dfb_config->vt && !dfb_config->kd_graphics && call_arg == FBIOPUT_VSCREENINFO)
            ioctl( dfb_fbdev->vt->fd, KDSETMODE, KD_GRAPHICS );
  
-@@ -2416,6 +2720,8 @@ fbdev_ioctl_call_handler( int           caller,
+@@ -2416,6 +3484,8 @@ fbdev_ioctl_call_handler( int           caller,
            write( dfb_fbdev->vt->fd, blankoff_str, strlen(blankoff_str) );
       }
  
@@ -692,19 +1632,101 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 diff --git a/systems/fbdev/fbdev.h b/systems/fbdev/fbdev.h
 --- a/systems/fbdev/fbdev.h
 +++ b/systems/fbdev/fbdev.h
-@@ -98,6 +98,27 @@ typedef struct {
+@@ -98,8 +98,151 @@ typedef struct {
       CoreLayerRegionConfig    config;
  
       SurfaceManager          *manager;
 +
-+     /* ROTATION (Prime GO portrait panel)
-+      * When the layer is presented rotated into the physical fb:
-+      *   rot_deg   = 90 (left/CCW), 270 (right/CW), 180, or 0 = off
-+      *   rot_sw/h  = logical layer surface size (e.g. 1280x800)
-+      *   rot_spitch= logical layer pitch in bytes (e.g. 5120)
-+      *   rot_fw/h  = physical fb size (e.g. 800x1280)
-+      *   rot_fpitch= physical fb line_length (e.g. 3200)
-+      *   rot_scratch = scratch buffer for the software rotation */
++     /* PRESENTATION -- how the logical layer surface reaches the physical
++      * framebuffer.  See the PRESENT_* enum below.
++      *
++      *   present_mode    one of PRESENT_*
++      *   present_dst_bpp physical fb bytes/pixel (2 or 4), from the REAL fb
++      *   present_dx/dy   where the logical surface starts inside the fb
++      *                   (LETTERBOX centring, and SCALE's fit inset; 0 for
++      *                   every other mode)
++      *   present_pages   how many whole frames fit in fix.smem_len.  The buffer
++      *                   mode is decided from this and NOT from ypanstep: vc4
++      *                   reports ypanstep 1/1 on a fb that holds exactly one
++      *                   frame, so an ypanstep test misses and the driver ends
++      *                   up claiming three pages it does not have -- which fails
++      *                   primaryTestRegion() with DFB_LIMITEXCEEDED (docs/06).
++      *   present_pan     non-zero when present_pages > 1, so a blit can land in
++      *                   a back page and be shown with a pan.  Zero means the
++      *                   blit must go into the visible page.
++      *
++      * The rot_* fields are the ROTATE mode's angle and the REAL fb geometry,
++      * read with a raw syscall because the LD_PRELOAD shim lies to rbp about the
++      * logical size.  They are used by every mode except OFF: the real geometry
++      * is the blit destination, and the scratch/system surfaces are what make it
++      * possible to draw in system memory and copy afterwards.
++      *
++      *   rot_deg    = 90 (left/CCW), 270 (right/CW), 180, or 0 = off
++      *   rot_fw/h   = physical fb size (e.g. 800x1280 on a portrait panel)
++      *   rot_fpitch = physical fb line_length
++      *   rot_scratch= scratch buffer for the software copy
++      *   rot_surface= system-memory source surface (the layer draws here) */
++     int                      present_mode;
++     int                      present_dst_bpp;
++     int                      present_dx;
++     int                      present_dy;
++     int                      present_pages;
++     int                      present_pan;
++
++     /* PRESENT_SCALE's destination rectangle, in REAL fb pixels, and the policy
++      * that produced it.  Computed ONCE, at open, by fbdev_present_fit() -- the
++      * same helper the one-shot PRESENT: line reads, so the logged numbers and
++      * the drawn ones cannot disagree.
++      *
++      * present_stretch is 0 for aspect-fit (bars on the short axis) and 1 for
++      * stretch-to-fill.  Under aspect-fit a non-zero present_dx/dy is normal and
++      * is NOT the letterbox offset: it is the inset the fit produced.
++      *
++      * The cursor shim computes the same rectangle from the same rule -- see
++      * point_fit() in scripts/shims/point_xform.c.  It is in a different build
++      * and cannot share this header, so a change to one is a change to both. */
++     int                      present_dw;
++     int                      present_dh;
++     int                      present_stretch;
++
++     /* PRESENT_SCALE's frame budget.  present_skip is how many flips to count
++      * between presents (1 = every frame, the default and the only value any
++      * other mode ever sees).  It exists because the resample runs on rbp's
++      * SCHED_FIFO-98 render thread: a cost that does not fit the frame must
++      * lower the PANEL's update rate, not starve the player.  A skipped flip
++      * skips the pan too -- panning without blitting would show a page that was
++      * never drawn.
++      *
++      * present_frames counts FLIPS, present_done counts the ones that actually
++      * blitted, and present_mus is the time spent in those blits: together they
++      * are the one-shot measured line, so they are only touched under
++      * PRESENT_SCALE (the OFF path pays for no clock call at all).
++      *
++      * The line REPORTS present_warm_mus/present_warm_done -- the same blits
++      * minus the first PRESENT_WARMUP.  rbp's own bring-up (window stack, first
++      * paints, the media scan) lands in the earliest presents and inflated the
++      * average on the unit, so a budget read off the whole window would be
++      * pessimistic.  Both windows are kept: the totals are what the skip
++      * arithmetic and any later reader want, the warm pair is the steady state.
++      *
++      * present_reported -- NOT `present_done == 300` -- is what makes the line
++      * one-shot.  With skip > 1 present_done STALLS at the trigger between
++      * presents, so the equality held on every skipped flip and the line was
++      * written once per skipped flip: measured eight times in a row at skip=8.
++      *
++      * present_max_us is the worst single present.  It is reported because the
++      * average alone cannot be interpreted: an average of 80 ms is a uniformly
++      * slow blit (a plateau) if the worst frame is 80 ms, and one freeze that
++      * the other 299 frames are averaging away if the worst frame is seconds.
++      * Those two need opposite responses, and both were observed on the unit. */
++     int                      present_skip;
++     unsigned long            present_frames;
++     unsigned long            present_done;
++     long long                present_mus;
++     unsigned long            present_warm_done;
++     long long                present_warm_mus;
++     long long                present_max_us;
++     int                      present_reported;
 +     int                      rot_deg;
 +     int                      rot_sw;
 +     int                      rot_sh;
@@ -719,25 +1741,70 @@ diff --git a/systems/fbdev/fbdev.h b/systems/fbdev/fbdev.h
 +     struct fb_var_screeninfo real_var;      /* real fb geometry (bypasses shim) */
  } FBDevShared;
  
++/*
++ * PRESENTATION MODES.
++ *
++ * OFF is not a degenerate case of the others: it means the layer surface *is*
++ * the framebuffer page, so nothing is copied at all and a flip is a pan (or a
++ * no-op pan when the fb has a single page).  Every other mode makes the layer
++ * surface a system-memory buffer and blits it into the fb.
++ *
++ *   OFF        no blit -- the layer surface is the visible page
++ *   CONVERT    pixel-format conversion only, same geometry (565 <-> 8888)
++ *   LETTERBOX 1:1 copy centred in a LARGER fb, bars filled
++ *   CROP      1:1 copy of the top rows into a SHORTER fb: a row budget on the
++ *              copy, no resampling
++ *   SCALE      nearest-neighbour resample to fit ANY fb: aspect-fit and centred
++ *              (PRESENT_FIT=fit, the default) or stretched to fill
++ *              (PRESENT_FIT=stretch).  This is the only rung that can present a
++ *              1280x800 surface on a panel that is neither, and it is what
++ *              PRESENT_AUTO selects when the real fb disagrees with the shim.
++ *              It is nearest-neighbour on purpose -- exact and cheap; a box
++ *              filter is a follow-up only if a downscale is seen to drop
++ *              hairline UI rules.
++ *   ROTATE     rotated 1:1 copy; the angle is rot_deg (portrait panel path)
++ *
++ * SCALE has no hardware path: DirectFB 1.4.16 ships no drmkms system module, so
++ * reaching vc4's HVS would mean leaving DirectFB.  It is therefore built to
++ * degrade rather than to be fast -- see present_skip / DFB_PRESENT_PX_BUDGET.
++ *
++ * Selected with DFB_PRESENT (rb.conf's RB_DFB_PRESENT).  DFB_ROTATE still works
++ * and is equivalent to DFB_PRESENT=rotate plus the angle, because it is what the
++ * launcher has always set.
++ */
++enum {
++     PRESENT_OFF = 0,
++     PRESENT_CONVERT,
++     PRESENT_LETTERBOX,
++     PRESENT_CROP,
++     PRESENT_SCALE,
++     PRESENT_ROTATE
++};
++
  typedef struct {
+      FBDevShared             *shared;
+ 
 diff --git a/systems/fbdev/fbdev_surface_pool.c b/systems/fbdev/fbdev_surface_pool.c
 --- a/systems/fbdev/fbdev_surface_pool.c
 +++ b/systems/fbdev/fbdev_surface_pool.c
-@@ -362,8 +362,20 @@ fbdevLock( CoreSurfacePool       *pool,
+@@ -362,8 +362,23 @@ fbdevLock( CoreSurfacePool       *pool,
  
            D_DEBUG_AT( FBDev_Surfaces, "  -> primary layer buffer (index %d)\n", index );
  
 -          lock->pitch  = shared->fix.line_length;
 -          lock->offset = index * allocation->config.size.h * lock->pitch;
-+          if (dfb_fbdev->shared->rot_deg) {
-+               /* ROTATION (Prime GO): the primary layer surface is the
-+                * swapped/logical geometry.  Pitch depends on the layer
-+                * pixel format (RGB16 => 2 Bpp, RGB32 => 4 Bpp). */
++          if (dfb_fbdev->shared->present_mode != PRESENT_OFF) {
++               /* PRESENTATION: the primary layer surface lives in system memory
++                * and is a tight buffer of the LOGICAL geometry, so its pitch is
++                * the surface's own width -- not the fb's line_length, which
++                * describes a fb that may be a different size and a different
++                * format (and which came back through the LD_PRELOAD shim anyway).
++                * Pitch depends on the layer pixel format (RGB16 => 2 Bpp). */
 +               int bpp = DFB_BITS_PER_PIXEL(allocation->config.format) / 8;
 +               if (bpp < 2) bpp = 4;             /* safety */
 +               lock->pitch  = allocation->config.size.w * bpp;
 +               lock->offset = index * allocation->config.size.h * lock->pitch;
-+               shared->rot_src_bpp = bpp;        /* tell rotation the src bpp */
++               shared->rot_src_bpp = bpp;        /* tell present the src bpp */
 +          }
 +          else {
 +               lock->pitch  = shared->fix.line_length;
@@ -746,15 +1813,17 @@ diff --git a/systems/fbdev/fbdev_surface_pool.c b/systems/fbdev/fbdev_surface_po
  #if D_DEBUG_ENABLED
            allocation->offset = lock->offset;
  #endif
-@@ -378,6 +390,12 @@ fbdevLock( CoreSurfacePool       *pool,
+@@ -378,6 +393,14 @@ fbdevLock( CoreSurfacePool       *pool,
       lock->addr = dfb_fbdev->framebuffer_base + lock->offset;
       lock->phys = dfb_fbdev->shared->fix.smem_start + lock->offset;
  
-+     /* ROTATION (Prime GO): the primary layer surface lives in SYSTEM memory
-+      * (a clean buffer separate from the fb), so rbp draws there without
-+      * clobbering the fb destination we rotate into. */
++     /* PRESENTATION: the primary layer surface lives in SYSTEM memory (a clean
++      * buffer separate from the fb), so rbp draws there without clobbering the
++      * fb page that the present path copies into -- and without drawing into the
++      * page the display is scanning.  This holds for every present mode except
++      * OFF; OFF is precisely the case where the surface *is* the fb page. */
 +     if ((allocation->type & CSTF_LAYER && allocation->resource_id == DLID_PRIMARY) &&
-+         dfb_fbdev->shared->rot_deg && dfb_fbdev->shared->rot_surface)
++         dfb_fbdev->shared->present_mode != PRESENT_OFF && dfb_fbdev->shared->rot_surface)
 +          lock->addr = (char*)dfb_fbdev->shared->rot_surface + lock->offset;
       D_DEBUG_AT( FBDev_SurfLock, "  -> offset %lu, pitch %d, addr %p, phys 0x%08lx\n",
                   lock->offset, lock->pitch, lock->addr, lock->phys );

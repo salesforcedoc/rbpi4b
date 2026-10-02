@@ -7,12 +7,12 @@ target).
 
 | | Pioneer XDJ-RX3 (source) | Denon Prime GO (worked) | Denon SC Live 4 (previous) | Raspberry Pi 4B (**target**) |
 |---|---|---|---|---|
-| SoC | NXP i.MX6 Quad, ARMv7 **soft-float** | Rockchip RK3288, ARMv7 hard-float | Rockchip RK3288, ARMv7 hard-float | BCM2711 Cortex-A72, **armv7l** hard-float (32-bit OS) |
-| Kernel | Linux 3.0.101 | 6.1.111-inmusic PREEMPT_RT | 6.1.111-inmusic PREEMPT_RT | Raspberry Pi kernel, 6.1 or later (Bookworm) |
-| OS | BusyBox / in-house init | Buildroot 2023.02.11, systemd | Buildroot 2023.02.11, systemd | **Pi OS Lite 32-bit**, Debian Bookworm, systemd |
-| Display | 1280×800 landscape, RGB565 | 800×1280 portrait, RGB32 DRM fb | 800×1280 portrait, RGB32 DRM fb | **HDMI** 1280×800 forced, `vc4drmfb`, 16 bpp RGB565 *expected* |
+| SoC | NXP i.MX6 Quad, ARMv7 **soft-float** | Rockchip RK3288, ARMv7 hard-float | Rockchip RK3288, ARMv7 hard-float | BCM2711 Cortex-A72 (4 cores), **hard-float**, 32-bit userland — the kernel is arm64 on current images |
+| Kernel | Linux 3.0.101 | 6.1.111-inmusic PREEMPT_RT | 6.1.111-inmusic PREEMPT_RT | Raspberry Pi kernel **`6.18.50+rpt-rpi-v8` measured** (aarch64, `32-bit EL0 Support`) |
+| OS | BusyBox / in-house init | Buildroot 2023.02.11, systemd | Buildroot 2023.02.11, systemd | **Pi OS Lite 32-bit**, Debian 13 (trixie) as measured, systemd |
+| Display | 1280×800 landscape, RGB565 | 800×1280 portrait, RGB32 DRM fb | 800×1280 portrait, RGB32 DRM fb | **HDMI** `vc4drmfb`, **1280×720 at 16 bpp RGB565 as measured** — the mode has never been asked for; 1280×800 is `rbp`'s logical geometry ([13](13-raspberrypi4.md)) |
 | Touch | tsc2007 resistive | ILI2117 capacitive (event0) | ILI2117 capacitive (event0) | **none** — an evdev pointer (mouse or USB touch panel) |
-| Audio | 3× CS4344 DACs | JP11 codec, 4 ch (`hw:1,0`) | JP21 codec, 8 ch (`hw:1,0`) | DDJ-FLX4 USB audio, 4 ch (`plughw:CARD=DDJFLX4,DEV=0`) |
+| Audio | 3× CS4344 DACs | JP11 codec, 4 ch (`hw:1,0`) | JP21 codec, 8 ch (`hw:1,0`) | DDJ-FLX4 USB audio, 4 ch (`hw:CARD=DDJFLX4,DEV=0`), **S16_LE/S24_3LE at 44100 or 48000 as measured** ([13](13-raspberrypi4.md)) |
 | Controls | EUP / SUB MCUs over SPI | ALSA MIDI "Control Surface" (seq 16) | ALSA MIDI "Control Surface" (seq 16) | ALSA MIDI **"DDJ-FLX4 MIDI 1"** over USB |
 | USB | 2 host ports + sub-MCU | 1× USB-A | USB-A host (EHCI/OHCI) | 2× USB 3.0 + 2× USB 2.0 |
 | Storage | — | root 466 MB ro, `/data` ~50 MB free | root 466 MB ro, `/data` 5.6 GB free | microSD, root rw, GBs free |
@@ -24,8 +24,11 @@ column is the target**, and the two things it shares with the Prime GO and SC
 Live 4 are the ones that matter:
 
 1. **A hard-float kernel running a soft-float userland.** Pi OS 32-bit is
-   `armv7l`/`armhf`, so an ARMv7 kernel executes soft-float EABI ELF natively —
-   the same trick the Buildroot targets used, with none of the vendor baggage.
+   `armhf`, and its kernel executes soft-float EABI ELF natively — the same trick
+   the Buildroot targets used, with none of the vendor baggage. Note that what
+   enables it is 32-bit *emulation* in the kernel (`32-bit EL0`), not the kernel
+   being 32-bit: the measured unit's kernel is arm64 and runs the soft-float
+   chroot all the same.
 2. **No Pioneer hardware anywhere.** Every `rbp` patch exists because a Pioneer
    panel MCU, power-manager MCU or i.MX6 board check has nothing to talk to on
    the target. That is as true of a Pi as it was of a Denon.
@@ -35,10 +38,16 @@ usual two — see [08 — Controls](08-controls.md) and
 [09 — Audio](09-audio.md), plus the display's present path in
 [06 — Display](06-display.md).
 
-> **A 64-bit image is not an option.** Pi OS 64-bit fails every 32-bit-ARM
-> constraint the shims depend on: 32-bit `smem_start`/`time_t` layout in the fb
-> structs, `SYS_mmap2`, `uc_mcontext.arm_*`, and ARM32 machine-code patching of
-> `rbp` itself. Pi OS Lite 32-bit is the tested configuration.
+> **Use Pi OS Lite 32-bit — and expect a 64-bit kernel.** The 32-bit-ARM
+> constraints the shims depend on (32-bit `smem_start`/`time_t` layout in the fb
+> structs, `SYS_mmap2`, `uc_mcontext.arm_*`, ARM32 machine-code patching of `rbp`
+> itself) are constraints on the *chroot's* binaries, which are 32-bit whatever
+> the host runs. The kernel therefore only needs to execute 32-bit ARM ELF
+> (`32-bit EL0`/`CONFIG_COMPAT`), which Pi OS kernels do — the measured Pi runs
+> the arm64 kernel `6.18.50+rpt-rpi-v8` on its 32-bit image and reports exactly
+> that. 32-bit Lite is the tested configuration because that is what every
+> measurement in [13](13-raspberrypi4.md) was taken on, not because a 64-bit
+> kernel is fatal.
 
 ## 1. The soft-float chroot
 
@@ -148,19 +157,24 @@ an i.MX6 fbdev (16 bpp, 1280×800) and crashes on a DRM fb. The patched fbdev
 module is built from [`tools/build-directfb/`](../tools/build-directfb/).
 
 The Pi's `/dev/fb0` is **`vc4drmfb`** — DRM fbdev emulation, like the Rockchip
-target's, but on a much more standard `drm_fb_helper` client. Two facts drive
-the design, and both are expectations until `tools/fbdump` records them:
+target's, but on a much more standard `drm_fb_helper` client. `tools/fbdump`
+recorded it, and two measured facts drive the design:
 
-* `xres=1280 yres=800 bpp=16 line_length=2560 yres_virtual=800 ypanstep=0` —
-  16 bpp means the present path can be a per-row `memcpy`. Confirm with
-  [fbdump](../tools/fbdump.c), see [13](13-raspberrypi4.md#measuring-the-framebuffer-toolsfbdump).
-* **No `ypanstep`**, and `vc4`'s `drm_fbdev` returns from `FBIOPAN_DISPLAY`
-  without waiting for vblank — which is why the fb shim has a frame pacer.
+* `xres=1280 yres=800 bpp=16 line_length=2560 yres_virtual=800 ypanstep=1/1` —
+  16 bpp RGB565 is `rbp`'s own format, so the present path needs no conversion;
+  see [13](13-raspberrypi4.md#measuring-the-framebuffer-toolsfbdump) for the raw
+  output.
+* **`ypanstep` is `1/1` with one page** — the fb claims it can pan and has
+  nowhere to pan to, which is the value that misled the buffer-mode decision
+  into three buffers where one fits. That, not the geometry, was the display
+  blocker; see [06 — Display](06-display.md#the-present-path). Separately,
+  `vc4`'s `drm_fbdev` returns from `FBIOPAN_DISPLAY` without waiting for vblank,
+  which is why the fb shim has a frame pacer.
 
 The mode itself comes from the kernel command line, not from `config.txt`; see
-[13 — the HDMI mode](13-raspberrypi4.md#the-hdmi-mode). The patch in the tree
-today still installs the previous target's rotation path, so the present path is
-described honestly in [06 — Display](06-display.md).
+[13 — the HDMI mode](13-raspberrypi4.md#the-hdmi-mode). The present path is
+general — `off`/`convert`/`letterbox`/`crop`/`rotate` — and is described in
+[06 — Display](06-display.md).
 
 ## 4. Disk budget
 

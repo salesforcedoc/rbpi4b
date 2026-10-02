@@ -1,0 +1,91 @@
+[Unit]
+Description=rblive4 - XDJ-RX3 rekordbox player (rbp)
+Documentation=https://github.com/andrewsim/rbpi4b/blob/main/docs/11-runtime-launcher.md
+After=basic.target
+# Deliberately NOT After=multi-user.target, which is what this unit used to say.
+# Waiting for multi-user added that whole span of pure latency and bought
+# nothing: the launcher needs the framebuffer, /dev, /proc, /sys and /tmp -- all
+# of which are up at basic.target (measured 11.9 s, against multi-user at 22.5 s
+# on boot 229cfdd9, so 10.6 s of it) -- and it needs no network, no media mount
+# and no other service. rbp's devices are local, fix-dev.sh modprobes snd-seq
+# itself, and the media arrives asynchronously through usb-watch.sh. Measured:
+# the launcher started 9 ms after multi-user.target purely because of this line
+# (boot 229cfdd9, journalctl -o short-monotonic).
+#
+# With the line gone and no Wants= of its own, DefaultDependencies leaves
+# After=basic.target / Requires=sysinit.target, so the job still belongs to the
+# multi-user transaction but starts as soon as what it uses is up. multi-user is
+# NOT delayed by it: Type=simple marks the job started at execve. The
+# After=basic.target above is stated explicitly rather than left to the default:
+# it is the guarantee this whole change rests on, and a future
+# DefaultDependencies=no should not be able to remove it silently.
+#
+# The dependency this assumes is that /dev/fb0 exists by basic.target.
+# systemd-udev-trigger only QUEUES coldplug, so that is asserted by measurement
+# (docs/13 S11.4), not by construction. If fb0 were ever missing here, rbp exits
+# and Restart=always retries it every 10 s -- each retry re-running fix-dev.sh's
+# chmod over the chroot during boot. The escape hatch is udev-settle, and the
+# Wants= is mandatory because After= alone does not pull it in:
+#     Wants=systemd-udev-settle.service
+#     After=systemd-udev-settle.service
+#
+# The kiosk idiom, and the documented way to get the console back: `systemctl
+# start getty@tty1` stops the player and hands the local console over, which is
+# what docs/11 asks for ("make it easy to disable"). The launcher does the same
+# thing by hand (it disables getty@tty1 itself), so this is the declaration of
+# that intent rather than a new mechanism.
+#
+# This is also why the early start is safe: Conflicts= is symmetric, so whichever
+# of rblive4/display-manager starts SECOND stops the first. Before the reorder
+# rblive4 always started second (it waited for multi-user), so a display manager
+# could never take it down; now that it starts first, install.sh persists the
+# `systemctl disable` of each display manager and of getty@tty1 to keep the
+# conflict one-sided. On a target with one of them installed and ENABLED, that
+# disable is load-bearing, not belt.
+Conflicts=getty@tty1.service display-manager.service
+# Retry forever. The launcher's normal exit path returns 0 even when rbp died
+# (it reports the failure and exits), so Restart=on-failure would never fire and
+# a brownout would leave a dead screen with the unit "succeeded". StartLimit* are
+# [Unit] directives since systemd v230 -- in [Service] they are silently ignored,
+# which is the mistake this comment exists to prevent.
+StartLimitIntervalSec=0
+
+[Service]
+# start-rb.sh blocks until rbp exits (its own `while kill -0 "$RBP"` loop), so
+# simple is exactly right: systemd's idea of "running" is rbp's lifetime for
+# free, with no PID file and no forking.
+Type=simple
+# Must be the deployed absolute path, not a wrapper or a symlink: the launcher
+# finds lib.sh (and fix-dev.sh, usb-watch.sh, display-watch.sh) through
+# `dirname "$0"`.
+ExecStart=/opt/rblive4/start-rb.sh
+# The launcher calls chroot, modprobe and blkid, all of which live in /usr/sbin.
+# systemd's default PATH for a system unit does include it, but this unit is
+# started by hand during bring-up too, so it does not rely on that.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Restart=always
+RestartSec=10
+# Generous: the launcher's cleanup stops the watcher, kills rbp and releases the
+# media mounts, and a stuck unmount must not be cut short mid-write.
+TimeoutStopSec=30
+# mixed, not the default control-group: SIGTERM goes to the launcher ALONE, so
+# its trap can run that cleanup, and only then does SIGKILL take the group (rbp,
+# edb_streamd, the watcher) after TimeoutStopSec. Under the default control-group
+# policy every process gets SIGTERM at once and the cleanup fights its own
+# children.
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rblive4
+# Deliberately NOT set:
+#   PrivateTmp= -- /tmp is the rendezvous between the host and the chroot
+#     (udev_usb1, usbwatch.pid, guard_LocalDBServer), and it is where both
+#     watchers keep their state (usbwatch.pid, displaywatch.pid, and the display
+#     watcher's .geom baseline and .fires counter). A private /tmp would give the
+#     launcher an empty one and rbp would never hear about the media.
+#   ConditionPathExists=/dev/fb0 -- an appliance powered on before its monitor
+#     would then never start. If you want that behaviour it belongs in a drop-in,
+#     not in the shipped unit.
+
+[Install]
+WantedBy=multi-user.target

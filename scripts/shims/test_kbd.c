@@ -7,10 +7,13 @@
  * ctrl_map.o, shimutil.o are the objects that ship, not copies) and pins the
  * rbp keycodes that come out. What is being checked, in the order it matters:
  *
- *   1. The map is a non-MIDI surface. kbd_devices() says so, and the tables it
- *      fills are empty — a keyboard has no note and no CC, and if build() ever
- *      left stale bindings in ctrl_map.c's tables, the map would still dispatch
- *      through them if someone later gave it an event().
+ *   1. The map is a non-MIDI surface. kbd_devices() says so, there is an input()
+ *      and no event(), and its build() leaves the shared binding tables exactly
+ *      as it found them — a keyboard has no note and no CC. That last one used to
+ *      read "build() empties them"; since 2026-09-26 the front end owns the reset
+ *      (ctrl_map.h), because a keyboard and an FLX4 are built into the same two
+ *      tables and a build that cleared them would leave the controller with no
+ *      bindings at all. main() is where that is asserted, with the planted rows.
  *
  *   2. Every binding reaches the keycode its table row says it should. This is
  *      the assertion with teeth: the deck channels (2 as well as 1), LOAD on the
@@ -25,14 +28,19 @@
  *
  * What is NOT checked here, and cannot be:
  *
- *   - evdev_io.c. Opening /dev/input/event* is the one thing in this port that
- *     needs a device; it is deliberately not linked into this test, so nothing
- *     here claims it reads events correctly. What is checked is the contract on
- *     the other side of it: that this map knows what to do with a raw triple.
+ *   - evdev_io.c. Opening /dev/input/event* needs a device; it is deliberately
+ *     not linked into THIS test, so nothing here claims it reads events
+ *     correctly. What is checked here is the contract on the other side of it:
+ *     that this map knows what to do with a raw triple. The reader's own
+ *     behaviour — which nodes it opens, when it notices a new one, and what it
+ *     does when one goes away — is test_evdev's, which fakes the syscall
+ *     boundary rather than the module.
  *   - The sign of the selector rotation against rbp's list. map_kbd.c sends the
  *     same +1/-1 that map_jp21.c's knob sends for a clockwise turn, and that is
- *     asserted here; whether rbp's list scrolls up or down for it has never been
- *     observed. See the note under the binding table in map_kbd.c.
+ *     asserted here; whether rbp's list scrolls up or down for it had never been
+ *     observed, and the operator's correction of 2026-09-26 (the pair worked
+ *     backwards) is what the assertion now encodes. See the note under the
+ *     binding table in map_kbd.c and docs/16-input-and-hotplug.md.
  *
  * One side effect worth knowing about, the same one test_midi.c has: klog() is
  * unconditional, so running this appends a few lines to /tmp/knobshim.log.
@@ -69,8 +77,16 @@
 #define KEY_ESC       1
 #define KEY_1         2
 #define KEY_2         3
+#define KEY_5         6
+#define KEY_6         7
+#define KEY_7         8
+#define KEY_8         9
+#define KEY_9         10
+#define KEY_0         11
 #define KEY_BACKSPACE 14
+#define KEY_W         17
 #define KEY_ENTER     28
+#define KEY_S         31
 #define KEY_Z         44
 #define KEY_X         45
 #define KEY_N         49
@@ -193,6 +209,12 @@ static const struct step steps[] = {
      { "deck 2 SYNC down",     EV_KEY, KEY_COMMA, 1, 1, { W(K_SYNC, OP_PRESS, 2, 0) } },
      { "deck 2 SYNC up",       EV_KEY, KEY_COMMA, 0, 1, { W(K_SYNC, OP_RELEASE, 2, 0) } },
 
+     /* ---- w / s: PLAY on deck 1 and deck 2, additive to space/n ---------- */
+     { "W deck 1 PLAY down",   EV_KEY, KEY_W, 1, 1, { W(K_PLAY, OP_PRESS, 1, 0) } },
+     { "W deck 1 PLAY up",     EV_KEY, KEY_W, 0, 1, { W(K_PLAY, OP_RELEASE, 1, 0) } },
+     { "S deck 2 PLAY down",   EV_KEY, KEY_S, 1, 1, { W(K_PLAY, OP_PRESS, 2, 0) } },
+     { "S deck 2 PLAY up",     EV_KEY, KEY_S, 0, 1, { W(K_PLAY, OP_RELEASE, 2, 0) } },
+
      /* The two decks are separate holds: deck 2's PLAY does not touch deck 1's
       * latch, and both may be down at once. */
      { "deck 1 PLAY down",     EV_KEY, KEY_SPACE, 1, 1, { W(K_PLAY, OP_PRESS, 1, 0) } },
@@ -206,13 +228,44 @@ static const struct step steps[] = {
      { "LOAD deck 2 down",     EV_KEY, KEY_2, 1, 1, { W(K_LOAD, OP_PRESS, 2, 0) } },
      { "LOAD deck 2 up",       EV_KEY, KEY_2, 0, 1, { W(K_LOAD, OP_RELEASE, 2, 0) } },
 
-     /* ---- the selector: the arrows and the wheel rotate, Enter pushes ---- */
-     { "selector up",          EV_KEY, KEY_UP, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
-     { "selector up (autorepeat repeats the step)", EV_KEY, KEY_UP, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
+     /* ---- the rest of the digit row: rbp's browse-screen keys, all global --- */
+     { "SOURCE down",          EV_KEY, KEY_5, 1, 1, { W(K_SOURCE, OP_PRESS, CH_GLOBAL, 0) } },
+     { "SOURCE repeat",        EV_KEY, KEY_5, 2, 0, { {0,0,0,0} } },
+     { "SOURCE up",            EV_KEY, KEY_5, 0, 1, { W(K_SOURCE, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "SOURCE up again",      EV_KEY, KEY_5, 0, 0, { {0,0,0,0} } },
+     { "BROWSE down",          EV_KEY, KEY_6, 1, 1, { W(K_BROWSE, OP_PRESS, CH_GLOBAL, 0) } },
+     { "BROWSE up",            EV_KEY, KEY_6, 0, 1, { W(K_BROWSE, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "TAG LIST down",        EV_KEY, KEY_7, 1, 1, { W(K_TAGLIST, OP_PRESS, CH_GLOBAL, 0) } },
+     { "TAG LIST up",          EV_KEY, KEY_7, 0, 1, { W(K_TAGLIST, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "MENU down",            EV_KEY, KEY_0, 1, 1, { W(K_MENU, OP_PRESS, CH_GLOBAL, 0) } },
+     { "MENU up",              EV_KEY, KEY_0, 0, 1, { W(K_MENU, OP_RELEASE, CH_GLOBAL, 0) } },
+
+     /* ---- PLAYLIST and SEARCH: the last two rows of the digit-row browse
+      * surface to be filled in, and they were filled in only when their keycodes
+      * were measured on the unit (rbp_abi.h carries the runs). Until then these
+      * four rows pinned that a press produced *nothing* -- a row sending keycode
+      * 0 would be a keycode rbp never asked for -- and that is still what the
+      * `{0,0,0,0}` expectation shape is for. ---- */
+     { "PLAYLIST down",        EV_KEY, KEY_8, 1, 1, { W(K_PLAYLIST, OP_PRESS, CH_GLOBAL, 0) } },
+     { "PLAYLIST up",          EV_KEY, KEY_8, 0, 1, { W(K_PLAYLIST, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "SEARCH down",          EV_KEY, KEY_9, 1, 1, { W(K_SEARCH, OP_PRESS, CH_GLOBAL, 0) } },
+     { "SEARCH up",            EV_KEY, KEY_9, 0, 1, { W(K_SEARCH, OP_RELEASE, CH_GLOBAL, 0) } },
+
+     /* ---- the selector: the arrows and the wheel rotate, Enter pushes ----
+      *
+      * The signs: UP is -1 and DOWN is +1 as of 2026-09-26. They were the other
+      * way round and the operator reported the pair working backwards, which is
+      * the only observation of the sign there has been -- it cannot be measured
+      * on the SOURCE panel, which has nothing to move between. The WHEEL is
+      * still +1, i.e. it now agrees with DOWN ("away from the user" = "down the
+      * list"), and this assertion is what will catch a later well-meaning flip
+      * of one and not the other. docs/16-input-and-hotplug.md. ---- */
+     { "selector up",          EV_KEY, KEY_UP, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
+     { "selector up (autorepeat repeats the step)", EV_KEY, KEY_UP, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
      { "selector up release (a step holds nothing)", EV_KEY, KEY_UP, 0, 0, { {0,0,0,0} } },
-     { "selector down",        EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
-     { "selector down (autorepeat)", EV_KEY, KEY_DOWN, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
-     { "selector down again",  EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, -1) } },
+     { "selector down",        EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
+     { "selector down (autorepeat)", EV_KEY, KEY_DOWN, 2, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
+     { "selector down again",  EV_KEY, KEY_DOWN, 1, 1, { W(K_SELECTOR, OP_ROTATE, CH_GLOBAL, +1) } },
      { "selector down release", EV_KEY, KEY_DOWN, 0, 0, { {0,0,0,0} } },
 
      { "selector push down",   EV_KEY, KEY_ENTER, 1, 1, { W(K_SELECTOR, OP_PRESS, CH_GLOBAL, 0) } },
@@ -259,9 +312,17 @@ static const struct step steps[] = {
      { "a key with no binding", EV_KEY, KEY_LEFT, 1, 0, { {0,0,0,0} } },
      { "a key with no binding, released", EV_KEY, KEY_LEFT, 0, 0, { {0,0,0,0} } },
      /* A code the map does not carry, on a type it does: the filter is a pair,
-      * so EV_REL carrying a key code is nothing. */
+      * so EV_REL carrying a key code is nothing.
+      *
+      * The EV_KEY half has to be REL_X and not a wheel code, because REL_WHEEL
+      * is 8 and KEY_7 is 8 -- the same number in two namespaces. That is not a
+      * bug to fix but a coexistence to pin, and the rows above already do: the
+      * TAG LIST rows drive EV_KEY code 8 to K_TAGLIST while the wheel rows drive
+      * EV_REL code 8 to a selector rotation. Together they are the assertion
+      * that `type` is what tells the two apart, which is why this row cannot
+      * make the same point with the same number. */
      { "EV_REL carrying a key code", EV_REL, KEY_SPACE, 1, 0, { {0,0,0,0} } },
-     { "EV_KEY carrying a wheel code", EV_KEY, REL_WHEEL, 1, 0, { {0,0,0,0} } },
+     { "EV_KEY carrying the pointer's X code", EV_KEY, REL_X, 1, 0, { {0,0,0,0} } },
 };
 
 #define NSTEPS ((int)(sizeof(steps) / sizeof(steps[0])))
@@ -291,6 +352,9 @@ static void pin_keycodes(void)
      CHECK(K_SELECTOR == 0x420c, "K_SELECTOR is 0x%04x, not 0x420c", K_SELECTOR);
      CHECK(K_BACK     == 0x420d, "K_BACK is 0x%04x, not 0x420d", K_BACK);
      CHECK(K_SOURCE   == 0x0201, "K_SOURCE is 0x%04x, not 0x0201", K_SOURCE);
+     CHECK(K_BROWSE   == 0x0202, "K_BROWSE is 0x%04x, not 0x0202", K_BROWSE);
+     CHECK(K_TAGLIST  == 0x0203, "K_TAGLIST is 0x%04x, not 0x0203", K_TAGLIST);
+     CHECK(K_MENU     == 0x0206, "K_MENU is 0x%04x, not 0x0206", K_MENU);
 
      /* The ops and the channel are as load-bearing as the keycodes: OP_ROTATE
       * with OP_PRESS's number would push the selector once per notch. */
@@ -380,20 +444,13 @@ static void check_surface(void)
 
      /* A keyboard is not a MIDI device: no sequencer event, and no heartbeat.
       * Both are optional in struct ctrl_map, and both being NULL is what makes
-      * the reader the map's only source. */
+      * the reader the map's only source -- which is also why this map can sit
+      * beside a live FLX4 without consuming its events. */
      CHECK(map_kbd.event == NULL, "the keyboard map has a sequencer handler");
      CHECK(map_kbd.tick == NULL, "the keyboard map has a tick");
 
      CHECK(map_kbd.name != NULL && map_kbd.name[0] != '\0',
            "the keyboard map has no name for MIDI_MAP to select it by");
-
-     /* It fills neither binding table -- there is no note and no CC on a
-      * keyboard -- and a map switch is a rebuild from nothing, so a keyboard
-      * after a JP21 session must leave the tables empty rather than carrying the
-      * controller's rows into a surface that can never dispatch them. */
-     CHECK(note_map_n == 0 && abs_map_n == 0,
-           "the keyboard map left %d notes and %d absolute controls in the "
-           "shared binding tables", note_map_n, abs_map_n);
 }
 
 int main(void)
@@ -408,18 +465,72 @@ int main(void)
 
      pin_keycodes();
 
-     /* Plant a binding the way a MIDI map would, so the reset below has
-      * something to clear: asserting that an empty table is still empty proves
-      * nothing. A keyboard arriving after a JP21 session must not leave the
-      * controller's rows behind in the shared tables. */
+     /* The ownership change of 2026-09-26, and the reason these assertions live
+      * here at the top level rather than inside check_surface(): the shared
+      * binding tables are reset by the FRONT END (ctrl_map.h), once, before it
+      * builds either map, because two maps are now live at the same time -- a
+      * MIDI surface and a non-MIDI one.
+      *
+      * The failure mode to pin is the one that change removed: if kbd_build()
+      * ever calls ctrl_bindings_reset() again, it wipes the FLX4's rows and puts
+      * nothing in their place, so every button on the controller goes dead from a
+      * map that is working exactly as it was designed to. So plant bindings the
+      * way a MIDI map would, build, and require them to still be there.
+      *
+      * Two of each, not one, so the surviving count cannot be read as "the map
+      * added something of its own" -- this map adds nothing at all. */
      add_note(0, 36, K_PAD1, 1);
+     add_note(0, 37, K_LOOPIN, 1);
      add_abs(0, 17, K_HPMIX, 1);
-     CHECK(note_map_n == 1 && abs_map_n == 1,
-           "planting a binding left %d notes and %d absolute controls",
-           note_map_n, abs_map_n);
+     add_abs(0, 18, K_HPLEVEL, 1);
+     CHECK(note_map_n == 2 && abs_map_n == 2,
+           "planting bindings left %d notes and %d absolute controls, expected 2 "
+           "and 2", note_map_n, abs_map_n);
 
      map_kbd.build();
      check_surface();
+
+     CHECK(note_map_n == 2 && abs_map_n == 2,
+           "a keyboard build must ADD to the shared binding tables, not wipe "
+           "them: it left %d notes and %d absolute controls, expected the 2 and 2 "
+           "that were planted before it -- an FLX4 built second would have no "
+           "bindings left", note_map_n, abs_map_n);
+
+     /* And the front end's reset -- now the only thing that clears them -- does
+      * clear them, both tables together. */
+     ctrl_bindings_reset();
+     CHECK(note_map_n == 0 && abs_map_n == 0,
+           "ctrl_bindings_reset() left %d notes and %d absolute controls",
+           note_map_n, abs_map_n);
+
+     /* MIDI_MAP=none / EVDEV_MAP=none exist so that "no surface on this side" is
+      * a selection someone can make deliberately, rather than the silent
+      * fallback to a map the operator did not ask for. So it has to be
+      * selectable: an inert surface, with a build() the front end can call like
+      * any other. */
+     CHECK(map_none.build != NULL, "map_none has no build()");
+     CHECK(map_none.startup == NULL && map_none.event == NULL &&
+           map_none.tick == NULL && map_none.devices == NULL &&
+           map_none.input == NULL,
+           "map_none is not inert");
+     CHECK(map_none.name != NULL && map_none.name[0] != '\0',
+           "map_none has no name for MIDI_MAP to select it by");
+     map_none.build();
+     CHECK(note_map_n == 0 && abs_map_n == 0,
+           "map_none built %d notes and %d absolute controls into the shared "
+           "tables", note_map_n, abs_map_n);
+
+     /* Neither of the surfaces this link knows has a panel to light, and that has
+      * to be a declared NULL rather than an omission. rbp_led.c asks the front
+      * end for the selected surface's table and sends NOTHING when it gets NULL,
+      * so a map that leaves this field out is a map that lights nothing -- and
+      * the whole reason it is a field is that "nothing" must be distinguishable
+      * from "the previous target's notes". Pinned here because this is the only
+      * suite that links both of these maps. */
+     CHECK(map_kbd.leds == NULL,
+           "map_kbd declares a panel to light, and a keyboard has none");
+     CHECK(map_none.leds == NULL,
+           "map_none declares a panel to light, and it has no surface at all");
 
      drive();
      check_clamp();
