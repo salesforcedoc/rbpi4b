@@ -5,11 +5,15 @@
  * Nothing here allocates, reads a clock, opens a device or touches a global:
  * every input is an argument, which is what lets test_audio.c pin it on the host.
  * The errno values are the only libc dependency, and they are what the kernel
- * actually returns from a non-blocking snd_pcm_writei().
+ * actually returns from a non-blocking snd_pcm_writei(). pow() is the one other
+ * external call, in mirror_boost_gain(): a dB is what an operator sets and a
+ * multiplier is what the mixer needs, and a table of the values anyone would
+ * plausibly set would be both longer and less exact than the one line here.
  */
 #include "mirror_policy.h"
 
 #include <errno.h>
+#include <math.h>
 #include <string.h>
 
 /* One whitespace-separated token. Advances *pp past it, and returns 0 when the
@@ -180,4 +184,40 @@ unsigned long mirror_pad_frames(long avail, unsigned long buffer,
     if (target - level > max_pad)
         return max_pad;
     return target - level;
+}
+
+unsigned long mirror_hold_fill(const unsigned char *frame, unsigned frame_bytes,
+                               unsigned long frames, unsigned char *out,
+                               unsigned long out_bytes)
+{
+    unsigned long fits, i;
+
+    /* Nothing to repeat, nowhere to put it, or no frame to repeat: all three are the
+     * caller's fallback (silence) rather than an error, so all three answer 0. */
+    if (frame == NULL || out == NULL || frame_bytes == 0 || frames == 0)
+        return 0;
+    fits = out_bytes / frame_bytes;
+    if (fits == 0)
+        return 0;
+    if (frames > fits)
+        frames = fits;          /* clamped to the buffer, never trusted past it */
+    for (i = 0; i < frames; i++)
+        memcpy(out + i * (unsigned long)frame_bytes, frame, frame_bytes);
+    return frames;
+}
+
+double mirror_boost_gain(double db)
+{
+    /* NaN is the one input that must not propagate: it would not stay in the sample
+     * that produced it, it would multiply into every frame of the mirror for the
+     * rest of the process's life, and the only symptom would be silence. Infinity
+     * is caught by the window below like any other out-of-range value. `db != db`
+     * rather than isnan() so this file keeps its no-<math.h> include list. */
+    if (db != db)
+        return 1.0;
+    if (db > MIRROR_BOOST_DB_MAX)
+        db = MIRROR_BOOST_DB_MAX;
+    if (db < MIRROR_BOOST_DB_MIN)
+        db = MIRROR_BOOST_DB_MIN;
+    return pow(10.0, db / 20.0);
 }

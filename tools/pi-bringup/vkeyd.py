@@ -46,9 +46,12 @@ UI_DEV_CREATE = 0x5501
 
 # The keys the maps can act on, plus a couple that are deliberately unbound so a
 # test can prove the "unmapped evdev" path still reports what it sees.
-# 1 Esc, 2/3 1/2 LOAD, 6/7/8 5/6/7 SOURCE/BROWSE/TAGLIST, 11 0 MENU,
-# 14 Backspace BACK, 17/31 w/s, 28 Enter, 57 Space, 103/105/106/108 arrows.
-KEYS = [1, 2, 3, 6, 7, 8, 11, 14, 17, 28, 31, 57, 103, 105, 106, 108]
+# 1 Esc, 2/3 1/2 LOAD, 6/7/8 5/6/7 SOURCE/BROWSE/TAGLIST, 9/10 8/9
+# PLAYLIST/SEARCH, 11 0 MENU, 14 Backspace BACK, 17/31 w/s, 28 Enter, 57 Space,
+# 103/105/106/108 arrows. KEY_8/KEY_9 were added 2026-09-29 so the top menu's
+# last two columns can be driven like the other four: map_kbd.c binds all six
+# digit keys and there was no reason for the daemon to be able to reach only four.
+KEYS = [1, 2, 3, 6, 7, 8, 9, 10, 11, 14, 17, 28, 31, 57, 103, 105, 106, 108]
 
 # 32-bit host userland: struct input_event is time(2x long) + type + code +
 # value = 16 bytes, which is what "llHHi" gives natively. A 64-bit userland

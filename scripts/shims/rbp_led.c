@@ -18,7 +18,8 @@
  *
  * A row the surface marks -1 means "this panel has no such LED", and NOTHING is
  * sent for it. That is the load-bearing case, not an edge case: it is what lets
- * the bridge run against an FLX4 whose note numbers are still unmeasured, and
+ * the bridge run against an FLX4 whose note numbers are mostly still unmeasured
+ * (three rows of the table were measured on 2026-10-01; the rest are -1), and
  * what keeps the previous target's numbers from being transmitted at a panel
  * they would land on as phantom controls.
  */
@@ -65,7 +66,8 @@ int led_loop_armed[2];
  * slot maps to a different predicate below), so the index lives here. */
 enum {
      L_SYNC, L_CUE, L_PLAY, L_KEYLOCK, L_VINYL, L_SLIP,
-     L_LOOPIN, L_LOOPOUT, L_ALOOP, L_SLOT_COUNT
+     L_LOOPIN, L_LOOPOUT, L_ALOOP,
+     L_MODE0, L_MODE1, L_MODE2, L_MODE3, L_SLOT_COUNT
 };
 
 static int led_verbose = 0;
@@ -80,6 +82,29 @@ static signed char led_last[2][L_SLOT_COUNT]; /* [deck][slot] -1 = unknown */
 static int led_prev_looping[2];
 static int led_dbg_last[2];               /* last logged loop-state bitmask */
 static int led_blink_phase;               /* current blink phase (0/1) */
+
+/* THE PANEL WANTS A STREAM, NOT AN EDGE -- measured on the FLX4, 2026-10-01.
+ *
+ * Every send helper below drops a repeat on the grounds that an LED already told
+ * to be lit need not be told again. That is true of the JP21 and it is NOT true
+ * of this panel: playing one candidate note at a time into the FLX4 from the host,
+ * a 1.2 s hold carrying a SINGLE message lit only one of four candidates, while
+ * the same four held 3 s with the message re-sent every 100 ms lit all four. So
+ * `led_force`, set on a cadence here, is the whole of what makes a deck LED stay
+ * lit.
+ *
+ * Stated honestly: the FIRST probe did light one LED (SAMPLER, note 34) from a
+ * single message, so the panel does not ignore single messages outright -- what
+ * it wants is a refresh, and which LEDs latch and which need the stream is not
+ * something a 4-candidate probe can separate. Re-sending all of them uniformly is
+ * the choice that cannot be wrong, and it costs ~420 messages/s on a USB link
+ * that carries 31250 baud on the DIN side.
+ *
+ * 2 ticks = 100 ms, the interval the probe measured. Re-sending an "off" too is
+ * deliberate: it is what stops an LED that should be dark from sticking lit.
+ */
+#define LED_RESEND_TICKS 2
+static int led_force;                     /* this tick re-sends regardless */
 /* How many mixer strips this bridge can carry per-deck state for. It is a bound
  * on the ARRAY, not a statement about any surface: strip_count comes out of a
  * map's table, and a table that says 8 would run off the end of a [2] here. The
@@ -112,6 +137,7 @@ static const struct led_notes *led_notes_sel(void)
 #define LED_PAD_FIRST   18
 #define LED_PAD_COUNT   8
 static int led_pad_last[2][LED_PAD_COUNT];  /* last MIDI velocity, -1 unknown */
+static int led_pad_base[2] = { -1, -1 };    /* note base the eight were sent at */
 
 static unsigned char *ledstat_ptr(void)
 {
@@ -125,8 +151,48 @@ static unsigned char *ledstat_ptr(void)
      return (unsigned char *)ledmgr + LEDSTAT_OFF;
 }
 
+/* rbp's real per-deck pad mode -- 0 HOT CUE / 1 AUTO BEAT LOOP / 2 SLIP BEAT
+ * LOOP / 3 BEAT JUMP -- or -1 if the chain is not up yet.
+ *
+ * This is the same walk rbp's own UiGetPadMode (0xfd3cc) does, spelled out as
+ * reads rather than called. Every other LED in this file reads rbp's memory
+ * with a guard and never enters rbp's code; the mode's structures are built
+ * during rbp's start-up, so an unguarded call is a dereference this thread
+ * cannot survive -- and the guards are the whole difference.
+ *
+ * A fifth value, 4, is real and not an error: rbp produces it when a mode
+ * button is pressed for the mode rbp is ALREADY in (the size bank opens). It is
+ * returned as it is rather than folded into one of the four, because it names no
+ * mode and the caller must not treat it as one. */
+static int rbp_pad_mode(int deck)
+{
+     void *holder, *sw, *pd;
+
+     holder = *(void **)UI_PADMODE_HOLDER_GLOBAL;
+     if (!holder)
+          return -1;
+     sw = *(void **)((char *)holder + PADMODE_STATWATCHER_OFF);
+     if (!sw)
+          return -1;
+     pd = *(void **)((char *)sw + (deck ? PADMODE_DECK2_OFF : PADMODE_DECK1_OFF));
+     if (!pd)
+          return -1;
+     return (int)*(unsigned char *)((char *)pd + PADMODE_BYTE_OFF);
+}
+
 /* Look up rbp's own state for one (id, channel) LED.
- * Returns 0=off, 1=solid, 2=blink, 3=dim, or -1 if rbp has no such entry. */
+ * Returns 0=off, 1=solid, 2=blink, 3=dim, or -1 if rbp has no such entry.
+ *
+ * State 3 is the one to be careful with, because "dim" is this file's name for
+ * it and not a measurement.  What IS measured (2026-10-01, work/padwatch.py on
+ * a paused deck with a track loaded) is what rbp uses it for on the pads: in
+ * AUTO BEAT LOOP, all eight pads sit at state 1 and the **engaged** one goes to
+ * **3** -- pressing pad 5 (the 4-beat size) moved exactly id 22 to 3, pressing
+ * pad 7 moved it (id 22 back to 1, id 24 to 3), and pressing pad 7 again
+ * cleared it.  rbp's own screen marks the same cell with an orange highlight,
+ * so its intent is to make the active loop stand out.  A panel with brightness
+ * can render that as dim-vs-bright; this one has only OFF and ON, which is why
+ * the pad path below blinks state 3 (see the measurement at that call site). */
 static int ledstat_state(unsigned int id, unsigned int ch)
 {
      unsigned char *ls = ledstat_ptr();
@@ -165,6 +231,31 @@ static int ledstat_rgb(unsigned int id, unsigned int ch, unsigned char *out)
                out[0] = e[40]; out[1] = e[41]; out[2] = e[42];
                return 1;
           }
+     }
+     return 0;
+}
+
+/* Has rbp assigned this pad nothing (rbp_abi.h's LED_ENTRY_OFF_UNASSIGNED)?
+ * Returns 0 for an entry that says the pad holds something AND for one rbp does
+ * not have: the caller's question is "may I dark this pad", and an entry that is
+ * absent is already darked by the State guard beside this one -- so answering
+ * "yes, it is unassigned" for a missing entry would be the same answer twice and
+ * would make the panel's look depend on which of the two reads failed. */
+static int ledstat_unassigned(unsigned int id, unsigned int ch)
+{
+     unsigned char *ls = ledstat_ptr();
+     unsigned char *arr;
+     unsigned int count, i;
+     if (!ls)
+          return 0;
+     count = *(unsigned short *)(ls + 4);
+     arr = *(unsigned char **)(ls + 8);
+     if (!arr || count == 0 || count > LED_DUMP_MAX)
+          return 0;
+     for (i = 0; i < count; i++) {
+          unsigned char *e = arr + LED_ENTRY_SIZE * i;
+          if (*(unsigned int *)(e + 0) == id && *(unsigned int *)(e + 4) == ch)
+               return *(unsigned int *)(e + LED_ENTRY_OFF_UNASSIGNED) != 0;
      }
      return 0;
 }
@@ -212,15 +303,17 @@ static void led_dump_scan(void)
  * than another target's number.
  *
  * `last` is the caller's own "what did I last send" cell, so a repeat is dropped
- * before it reaches midi_io.c. It is updated only when the send actually
- * happened: midi_note() returns 0 when no route is up yet, and leaving the cell
- * alone is what makes the LED go out on the next tick instead of being lost. */
+ * before it reaches midi_io.c -- EXCEPT on a `led_force` tick, which is what this
+ * panel needs to keep an LED lit (see LED_RESEND_TICKS). It is updated only when
+ * the send actually happened: midi_note() returns 0 when no route is up yet, and
+ * leaving the cell alone is what makes the LED go out on the next tick instead of
+ * being lost. */
 static void led_send(int sch, int note, signed char *last, int on)
 {
      signed char want = (signed char)(on ? 1 : 0);
      if (sch < 0 || note < 0)
           return;
-     if (*last == want)
+     if (!led_force && *last == want)
           return;
      /* The byte building lives in midi_io.c, which is also what decides whether
       * this goes out on rawmidi or over the sequencer. */
@@ -236,7 +329,12 @@ static void led_send(int sch, int note, signed char *last, int on)
  * has no entry for it yet.  State 2 is rbp's blink request (e.g. SYNC blinks
  * when synced but the platter was nudged off beat), so we drive the panel
  * blink ourselves at the same cadence.  State 3 (dim) has no panel equivalent
- * available here and counts as on, which is what the previous target did. */
+ * available here and counts as on, which is what the previous target did.
+ *
+ * That last rule stands for the DECK LEDs, which is all this helper serves.  The
+ * pads deliberately differ: there state 3 is measured to mean "this is the
+ * engaged beat-loop pad" and is blinked, because there is a specific thing to
+ * say and no way to say it with brightness.  See ledstat_state's comment. */
 static void led_from_table(int sch, int note, signed char *last, unsigned int id,
                            int deck, int fallback)
 {
@@ -286,7 +384,7 @@ static void led_pad_apply(int sch, int note, int *last, unsigned char vel)
 {
      if (sch < 0 || note < 0)
           return;
-     if (*last == (int)vel)
+     if (!led_force && *last == (int)vel)
           return;
      if (!midi_note(sch, note, vel))
           return;                        /* retry next tick */
@@ -317,7 +415,7 @@ static void led_apply_g(int idx, int sch, int note, int on)
      signed char want = (signed char)(on ? 1 : 0);
      if (sch < 0 || note < 0)
           return;
-     if (led_last_g[idx] == want)
+     if (!led_force && led_last_g[idx] == want)
           return;
      if (!midi_note(sch, note, on ? 0x7f : 0x00))
           return;
@@ -338,7 +436,7 @@ static void led_send_run(int sch_first, int count, int note,
      signed char want = (signed char)(on ? 1 : 0);
      if (sch_first < 0 || note < 0 || count <= 0)
           return;
-     if (*last == want)
+     if (!led_force && *last == want)
           return;
      for (int k = 0; k < count; k++)
           if (!midi_note(sch_first + k, note, on ? 0x7f : 0x00))
@@ -366,6 +464,7 @@ static void led_refresh(void)
           return;
      blink = (led_tick & 8) ? 1 : 0;      /* ~400 ms on / off */
      led_blink_phase = blink;
+     led_force = ((led_tick % LED_RESEND_TICKS) == 0);   /* see above */
 
      /* global LEDs, straight from rbp (id -> whatever note this panel uses) */
      for (int g = 0; g < LED_FX_COUNT; g++) {
@@ -448,26 +547,111 @@ static void led_refresh(void)
           /* RGB performance pads: rbp LedDef::ID 18..25 -> whatever note this
            * surface lights for pad p, on its own pad channel. LED_PADS=0 stops
            * here: rbp's pad state is still read by the rest of this function,
-           * the pads are simply not sent. */
-          if (led_pads && n->pad_ch >= 0 && n->n_pad_first >= 0) {
-               for (int p = 0; p < LED_PAD_COUNT; p++) {
-                    unsigned char rgb[3];
-                    int pnote = n->n_pad_first + p;
-                    int st = ledstat_state(LED_PAD_FIRST + (unsigned)p,
-                                           (unsigned)i + 1);
-                    if (st <= 0 ||
-                        !ledstat_rgb(LED_PAD_FIRST + (unsigned)p,
-                                     (unsigned)i + 1, rgb)) {
-                         led_pad_apply(n->pad_ch + i, pnote,
-                                       &led_pad_last[i][p], 0);
-                    } else if (st == 2) {
-                         led_pad_apply(n->pad_ch + i, pnote, &led_pad_last[i][p],
-                              blink ? led_encode(n->pad_enc,
-                                                 rgb[0], rgb[1], rgb[2]) : 0);
-                    } else {
-                         led_pad_apply(n->pad_ch + i, pnote, &led_pad_last[i][p],
-                              led_encode(n->pad_enc, rgb[0], rgb[1], rgb[2]));
+           * the pads are simply not sent.
+           *
+           * The note is `base + p` and the base is PER MODE on a surface that
+           * re-addresses its pads (ctrl_map.h's n_pad_base has the measurement),
+           * which is the one thing this group does that no other group here
+           * does -- hence the mode read and the clearing of the old base. */
+          if (led_pads && n->pad_ch >= 0 && n->n_pad_base[0] >= 0) {
+               int pch = i ? n->pad_ch2 : n->pad_ch;
+               int m = rbp_pad_mode(i);
+               /* -1 = the chain is not up, 4 = rbp's size-bank echo: neither
+                * names a mode, so the pads are left exactly as they are -- the
+                * same rule, for the same reason, as the mode LEDs below. Darking
+                * them would be a lie about a mode that has not changed. */
+               if (pch >= 0 && m >= 0 && m < 4) {
+                    int base = n->n_pad_base[m];
+
+                    /* A mode change moves the note each pad answers to, so the
+                     * eight notes the LAST mode used have to be cleared before
+                     * the new ones are sent: rbp's state for a pad can be the
+                     * same in both modes, and then the pad would stay lit at a
+                     * note the panel has already moved away from -- stuck until
+                     * that mode came back. The velocity cache is dropped with
+                     * them, so the new notes go out on the next tick rather than
+                     * waiting for the resend timer. */
+                    if (base != led_pad_base[i]) {
+                         if (led_pad_base[i] >= 0) {
+                              for (int p = 0; p < LED_PAD_COUNT; p++)
+                                   led_pad_apply(pch, led_pad_base[i] + p,
+                                                 &led_pad_last[i][p], 0);
+                              memset(led_pad_last[i], -1, sizeof(led_pad_last[0]));
+                         }
+                         led_pad_base[i] = base;
                     }
+
+                    for (int p = 0; p < LED_PAD_COUNT; p++) {
+                         unsigned char rgb[3];
+                         int pnote = base + p;
+                         int st = ledstat_state(LED_PAD_FIRST + (unsigned)p,
+                                                (unsigned)i + 1);
+                         /* An unassigned pad is DARK, not white. rbp keeps
+                          * every pad's State at 1 and separates an empty one
+                          * from a loaded one by a flag beside the state and by
+                          * colour alone (rbp_abi.h has the measurement), so a
+                          * State-only rule lights all eight white pads in HOT
+                          * CUE -- which is what the operator's panel showed, and
+                          * not what an RX3 or this unit's own cues do. */
+                         if (st <= 0 ||
+                             ledstat_unassigned(LED_PAD_FIRST + (unsigned)p,
+                                                (unsigned)i + 1) ||
+                             !ledstat_rgb(LED_PAD_FIRST + (unsigned)p,
+                                          (unsigned)i + 1, rgb)) {
+                              led_pad_apply(pch, pnote,
+                                            &led_pad_last[i][p], 0);
+                         } else if (st == 2 || st == 3) {
+                              /* 2 is rbp's blink request. 3 is the state rbp
+                               * puts the ENGAGED beat-loop pad in while its
+                               * seven siblings stay at 1 -- measured
+                               * 2026-10-01 on a paused deck, moving the loop
+                               * from pad 5 to pad 7 and watching the 3 move
+                               * with it, and clearing when the loop was let
+                               * go (ledstat_state's comment has the run).
+                               *
+                               * Blink is the rendering, and it is a choice
+                               * worth naming: this panel's pads are OFF/ON
+                               * only -- Pioneer's own list gives every one of
+                               * its 350 LED rows as 0x00 or 0x7F -- so
+                               * "dimmer than its neighbours" cannot be sent
+                               * and *some* difference is the only alternative
+                               * to the eight looking identical, which is
+                               * exactly the operator's report ("aren't they
+                               * supposed to flash when engaged?"). Before
+                               * this, 3 fell into the solid branch below and
+                               * an engaged loop was invisible on the panel
+                               * while rbp's own screen highlighted the cell. */
+                              led_pad_apply(pch, pnote, &led_pad_last[i][p],
+                                   blink ? led_encode(n->pad_enc,
+                                                      rgb[0], rgb[1], rgb[2]) : 0);
+                         } else {
+                              led_pad_apply(pch, pnote, &led_pad_last[i][p],
+                                   led_encode(n->pad_enc, rgb[0], rgb[1], rgb[2]));
+                         }
+                    }
+               }
+          }
+
+          /* The four pad-mode buttons: exactly one lit, the one for the mode
+           * rbp is actually in. Read rather than remembered, so a mode changed
+           * from rbp's own screen lights the right button too -- the same reason
+           * the FX CH SELECT lever tracks the lever and not the last keycode.
+           *
+           * `n_mode[0] < 0` means this surface lights none, and the whole group
+           * is skipped -- the same rule as every other LED here, for the same
+           * reason (a neighbouring surface's note is never substituted).
+           *
+           * Mode 4 (rbp's size-bank echo, see rbp_pad_mode) is neither < 0 nor
+           * one of the four, so the LEDs are left exactly as they were. Darking
+           * all four would be a lie about a mode that has not changed, and
+           * lighting one of them would be a guess. */
+          if (n->n_mode[0] >= 0) {
+               int m = rbp_pad_mode(i);
+               if (m >= 0 && m < 4) {
+                    for (int k = 0; k < 4; k++)
+                         if (n->n_mode[k] >= 0)
+                              led_send(sch, n->n_mode[k],
+                                       &led_last[i][L_MODE0 + k], k == m);
                }
           }
 
@@ -580,6 +764,7 @@ void *led_thread(void *arg)
                "sending will begin when one comes up\n");
      memset(led_last, -1, sizeof(led_last));
      memset(led_pad_last, -1, sizeof(led_pad_last));
+     led_pad_base[0] = led_pad_base[1] = -1;
      /* Say which panel, or that there is none, once -- a dark panel has three
       * very different causes (this selection, a surface whose rows are all -1,
       * and a fault) and the log should not make them look alike. Checked here

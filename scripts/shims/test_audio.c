@@ -18,9 +18,24 @@
  * that is only true of some formats.
  *
  * The `test_mirror_*` cases at the bottom pin the HDMI mirror's decisions
- * (mirror_policy.c), which are the half of that feature which is arithmetic. The
- * half that is not — the fill inside the shim's per-frame loop — cannot be reached
- * from here at all, and is covered by the drill in docs/13-raspberrypi4.md.
+ * (mirror_policy.c), which are the half of that feature which is arithmetic — how
+ * much the drift correction inserts (test_mirror_pad) and what it inserts
+ * (test_mirror_hold, a repeat of the last delivered frame rather than silence).
+ * The half that is not — which frame counts as "last" and the fill inside the
+ * shim's per-frame loop — cannot be reached from here at all, and is covered by
+ * the drill in docs/13-raspberrypi4.md.
+ *
+ * `test_pace_deadline` pins the block clock a cardless unit runs on
+ * (pace_policy.c) — the rate itself, which no counter in the shim reports, by way
+ * of the mirror's drift correction, which is the one number in the log that does.
+ *
+ * `test_mirror_boost_gain` and `test_s24pack_clamp` are the pair behind the
+ * mirror's level: the first is the dB-to-multiplier law the HDMI out is lifted by,
+ * the second is the sample domain that lift has to stay inside. They are together
+ * because they are one decision — the gain is allowed past unity ONLY because
+ * something saturates on the way out, and the test at the bottom of the second one
+ * pins that the saturation did not move inside the packers, where it would invert
+ * a raw word instead of clipping it.
  *
  * The `test_master_*` cases pin the same two things for the master
  * (master_policy.c): which devices its chain may contain, and what one writei()
@@ -37,6 +52,7 @@
 #include "s24pack.h"
 #include "mirror_policy.h"
 #include "master_policy.h"
+#include "pace_policy.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -660,6 +676,328 @@ static void test_mirror_pad(void)
     CHECK(pads >= 1000 && pads <= 1400, "the pad fired %lu times in 120000 blocks", pads);
 }
 
+/* The pad's content: a repeat of the last delivered frame, where it used to be a run
+ * of silence.
+ *
+ * This is the part of the correction the operator asked for by name, and the reason is
+ * in test_mirror_pad above: the pads do not arrive one frame at a time, they arrive 34
+ * to 38 at a time every five seconds, and 0.8 ms of silence in the middle of a track
+ * is an envelope notch. What is pinned here is that the hold repeats the frame the
+ * caller handed it, at the frame's own stride, and that it can never write past the
+ * buffer it was given — the one place in the correction that touches a caller-sized
+ * buffer, and an overrun there would read as a mixer fault rather than as a mirror
+ * one.
+ *
+ * The choice of WHICH frame is held (the last one the stream delivered, not the one
+ * about to be written) is made in audioshim.c and cannot be reached from here; that
+ * half is the drill in docs/13-raspberrypi4.md. */
+static void test_mirror_hold(void)
+{
+    unsigned char out[64];
+    const unsigned char f4[4] = { 0x11, 0x22, 0x33, 0x44 };   /* one s16 stereo frame */
+    const unsigned char f6[6] = { 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff };  /* s24_3le */
+
+    /* The ordinary case: N copies of the frame, byte for byte, and nothing left in
+     * the buffer past them. A hold is a copy of a *sample*, so the bytes go out as
+     * they arrived — there is no interpretation of them here and must not be. */
+    memset(out, 0x7f, sizeof out);
+    CHECK(mirror_hold_fill(f4, sizeof f4, 5, out, sizeof out) == 5,
+          "five frames were not placed");
+    CHECK(memcmp(out, "\x11\x22\x33\x44\x11\x22\x33\x44\x11\x22\x33\x44\x11\x22\x33\x44"
+                      "\x11\x22\x33\x44", 20) == 0,
+          "the held frames are not repeats of the frame handed in");
+    CHECK(out[20] == 0x7f, "the hold wrote past the frames it reported");
+
+    /* A negative sample is still just bytes: 24-bit -1 is 0xffffff, and the hold must
+     * copy that rather than anything that looks like it. This is the same trap
+     * test_packing_and_the_extension pins for the packer. */
+    {
+        const unsigned char neg[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+        memset(out, 0x00, sizeof out);
+        CHECK(mirror_hold_fill(neg, sizeof neg, 3, out, sizeof out) == 3,
+              "a negative frame was not held");
+        CHECK(out[17] == 0xff && out[18] == 0x00,
+              "the held frame is not followed by the buffer's own bytes");
+    }
+
+    /* The stride is the frame's, not a container width: a 6-byte frame repeated 4
+     * times is 24 bytes, and a version that assumed 4 would land the second copy in
+     * the middle of the first. */
+    memset(out, 0x00, sizeof out);
+    CHECK(mirror_hold_fill(f6, sizeof f6, 4, out, sizeof out) == 4,
+          "four 6-byte frames were not placed");
+    CHECK(memcmp(out + 6, f6, sizeof f6) == 0, "the second copy is not on the frame stride");
+    CHECK(out[24] == 0x00, "a 6-byte hold overran its 24 bytes");
+
+    /* The clamp: a request larger than the buffer is cut to what fits, not honoured.
+     * The caller's own ceiling is MIRROR_PAD_MAX, so this is defensive — and defensive
+     * is exactly what a buffer whose size is computed at the call site needs. */
+    memset(out, 0x7f, sizeof out);
+    CHECK(mirror_hold_fill(f4, sizeof f4, 1000, out, sizeof out) == 16,
+          "an oversize hold was not clamped to the buffer");
+    CHECK(out[63] == 0x44, "the clamped hold did not fill the buffer exactly");
+    CHECK(mirror_hold_fill(f6, sizeof f6, 100, out, 12) == 2,
+          "a 12-byte buffer did not take exactly two 6-byte frames");
+
+    /* Nothing to hold, and nowhere to put it: all of these are the caller's silence
+     * fallback, so all of them answer 0 rather than a partial or bogus count. */
+    CHECK(mirror_hold_fill(NULL, 4, 4, out, sizeof out) == 0, "a NULL frame was held");
+    CHECK(mirror_hold_fill(f4, 0, 4, out, sizeof out) == 0, "a zero-width frame was held");
+    CHECK(mirror_hold_fill(f4, 4, 0, out, sizeof out) == 0, "a zero-length hold was placed");
+    CHECK(mirror_hold_fill(f4, 4, 4, NULL, sizeof out) == 0, "a NULL destination was written");
+    CHECK(mirror_hold_fill(f4, 4, 4, out, 3) == 0, "a buffer too small for one frame took one");
+
+    /* The widest frame this shim can produce — S24_LE stereo, two 4-byte containers —
+     * is the one the hold buffer is sized for, so it has to be the one that fits
+     * exactly. */
+    {
+        const unsigned char f8[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        memset(out, 0x7f, sizeof out);
+        CHECK(mirror_hold_fill(f8, sizeof f8, 3, out, 24) == 3,
+              "three 8-byte frames did not fit a 24-byte buffer");
+        CHECK(memcmp(out + 16, f8, sizeof f8) == 0, "an 8-byte hold is not on the frame stride");
+        CHECK(out[24] == 0x7f, "an 8-byte hold wrote past its 24 bytes");
+    }
+}
+
+/* The mirror's level lift, which is the one gain on this port allowed past unity.
+ *
+ * The value that matters is +4 dB, because that is what the unit runs — the
+ * operator's own choice, and this is where the number is pinned rather than in the
+ * shim's arithmetic. The exact multiplier is 1.5848931924611136; asserting it to
+ * 12 places is what stops a later edit from quietly redefining the dB as a power
+ * ratio, or 20 as 10. */
+static void test_mirror_boost_gain(void)
+{
+    /* A tolerance, because pow(10.0, 0.2) is not exactly representable and the point
+     * here is the law, not the last bit of libm. */
+    double g;
+
+    g = mirror_boost_gain(4.0);
+    CHECK(g > 1.5848931924611130 && g < 1.5848931924611140,
+          "+4 dB is x%.17g, expected 1.5848931924611136", g);
+
+    /* The identity, which is also the escape hatch: 0 dB is no change at all, and it
+     * is exactly 1.0 rather than a very small power of ten away from it. */
+    CHECK(mirror_boost_gain(0.0) == 1.0, "0 dB is x%.17g, not exactly 1.0",
+          mirror_boost_gain(0.0));
+
+    /* Below unity it attenuates, the same law read backwards: -6.02 dB is half. */
+    g = mirror_boost_gain(-6.020599913279624);
+    CHECK(g > 0.4999999 && g < 0.5000001, "-6.02 dB is x%.17g, expected 0.5", g);
+
+    /* Half a dB is a meaningful step to an operator and must survive the law. */
+    g = mirror_boost_gain(0.5);
+    CHECK(g > 1.0592 && g < 1.0593, "+0.5 dB is x%.17g, expected 1.05925", g);
+
+    /* The window. A mis-keyed order of magnitude (+40 for +4.0) is what it is there
+     * for, so the clamp has to be a rail and not a pass-through. */
+    CHECK(mirror_boost_gain(MIRROR_BOOST_DB_MAX) == mirror_boost_gain(40.0),
+          "+40 dB was not clamped to the window");
+    CHECK(mirror_boost_gain(MIRROR_BOOST_DB_MAX) > mirror_boost_gain(4.0),
+          "the window's top is not above +4 dB — the guard rail would be the limit");
+    CHECK(mirror_boost_gain(-1e6) == mirror_boost_gain(MIRROR_BOOST_DB_MIN),
+          "a huge negative was not clamped to the window");
+    CHECK(mirror_boost_gain(MIRROR_BOOST_DB_MIN) > 0.0,
+          "the window's floor mutes the mirror instead of attenuating it");
+
+    /* Non-finite input answers unity. NaN is the one that matters: it would multiply
+     * into every frame of the mirror for the rest of the process's life, and the only
+     * symptom would be silence with every counter healthy. */
+    {
+        double nan = 0.0, inf = 1.0;
+        nan = nan / nan;
+        inf = inf / 0.0;
+        CHECK(mirror_boost_gain(nan) == 1.0, "NaN did not answer unity");
+        CHECK(mirror_boost_gain(inf) == mirror_boost_gain(MIRROR_BOOST_DB_MAX),
+              "+infinity was not clamped to the window's top");
+        CHECK(mirror_boost_gain(-inf) == mirror_boost_gain(MIRROR_BOOST_DB_MIN),
+              "-infinity was not clamped to the window's floor");
+    }
+}
+
+/* The sample domain, and the one thing on this port that has to ask about it.
+ *
+ * s24pack_clamp() is what the mirror's gain saturates with, and it is NOT applied
+ * inside the packers — they stay modular, which is what test_packing_and_the_
+ * extension above pins. Keeping those two facts in one place is the point of this
+ * test: the rails are the samples' own, and the reason the packers do not use them
+ * is that a raw word is already outside them by a whole convention. */
+static void test_s24pack_clamp(void)
+{
+    /* The rails are exact and inclusive: full scale is a valid sample, and the
+     * bottom is one count lower, because 24-bit two's complement is asymmetric. */
+    CHECK(s24pack_clamp(0) == 0, "zero was moved");
+    CHECK(s24pack_clamp(S24PACK_SAMPLE_MAX) == S24PACK_SAMPLE_MAX,
+          "full scale was clamped — the top of the domain is a legal sample");
+    CHECK(s24pack_clamp(S24PACK_SAMPLE_MIN) == S24PACK_SAMPLE_MIN,
+          "the bottom of the domain was clamped");
+    CHECK(s24pack_clamp(1) == 1 && s24pack_clamp(-1) == -1, "a small sample was moved");
+    CHECK(s24pack_clamp(S24PACK_SAMPLE_MAX + 1) == S24PACK_SAMPLE_MAX,
+          "one count past full scale was not pulled back to the rail");
+    CHECK(s24pack_clamp(S24PACK_SAMPLE_MIN - 1) == S24PACK_SAMPLE_MIN,
+          "one count below the bottom was not pulled back to the rail");
+
+    /* The extremes a boosted sample can actually reach: the loudest 24-bit sample
+     * times the window's top (+12 dB, 3.98x) is 33.4M, well inside int32, so the
+     * float-to-int conversion at the gain never overflows — this is the arithmetic
+     * that says so. */
+    CHECK(s24pack_clamp(33400000) == S24PACK_SAMPLE_MAX, "+12 dB's peak was not clamped");
+    CHECK(s24pack_clamp(-33400000) == S24PACK_SAMPLE_MIN,
+          "-12 dB's peak was not clamped");
+    CHECK(s24pack_clamp(2147483647) == S24PACK_SAMPLE_MAX, "INT32_MAX was not clamped");
+    CHECK(s24pack_clamp(-2147483647 - 1) == S24PACK_SAMPLE_MIN,
+          "INT32_MIN was not clamped");
+
+    /* And the property the packers rely on staying OUT of them: a raw word is
+     * clamped by this helper (it is many counts past full scale as a 32-bit value)
+     * while the packer still encodes it verbatim, which is the difference between a
+     * -1 and a full-scale blast on a card that reads the low three bytes. */
+    {
+        int32_t raw = 0x00ffffff;          /* rbp's -1, unextended */
+        unsigned char a[4], b[4];
+        int32_t ext = sext24(raw);
+
+        CHECK(ext == -1, "the premise: the extended raw word is -1");
+        CHECK(s24pack_clamp(raw) == S24PACK_SAMPLE_MAX,
+              "the clamp left a raw word alone; it is 16.7M as a 32-bit value");
+
+        memset(a, 0xAA, sizeof a);
+        memset(b, 0xAA, sizeof b);
+        CHECK(s24pack(AUDIO_FMT_S24_3LE, &raw, 1, 1, a, sizeof a) == 3 &&
+              s24pack(AUDIO_FMT_S24_3LE, &ext, 1, 1, b, sizeof b) == 3,
+              "S24_3LE refused a one-sample block");
+        CHECK(a[0] == 0xff && a[1] == 0xff && a[2] == 0xff && memcmp(a, b, 3) == 0,
+              "S24_3LE no longer encodes a raw word as -1: it produced %02x %02x %02x, "
+              "so something started clamping inside the packer", a[0], a[1], a[2]);
+    }
+}
+
+/* Feed the mirror's ring from a block clock, and count what the drift correction
+ * has to put back — the operator's symptom, as arithmetic.
+ *
+ * `work_ns` is everything a block costs besides its own time: the wakeup out of the
+ * sleep, the staging, the packing, the mirror. `deadline_paced` 0 is the
+ * sleep-per-block clock pace_policy.c replaced (usleep(period), then the work).
+ *
+ * The sink is 155 ppm faster than the feed, which is the drift the correction
+ * exists for, and the level is held near half a ring like the real one. Reports the
+ * frames of silence injected and the elapsed time, so the two clocks can be compared
+ * as rates instead of as arithmetic. */
+static void mirror_run_clock(int blocks, unsigned long period_ns,
+                             unsigned long work_ns, int deadline_paced,
+                             unsigned long *padframes, unsigned long long *elapsed_ns)
+{
+    const long buf = 1024;
+    const double sink = 44100.0 * (1.0 + 155e-6) / 1e9;   /* frames per ns */
+    double level = buf / 2.0;
+    unsigned long long now = 0, dl = 0;
+    int t;
+
+    *padframes = 0;
+    for (t = 0; t < blocks; t++) {
+        unsigned long long after;
+
+        if (deadline_paced) {
+            dl = pace_next_deadline(now, period_ns, dl);
+            after = dl + work_ns;             /* wake at the deadline, then work */
+        } else {
+            after = now + period_ns + work_ns;   /* usleep(period), then work */
+        }
+
+        level -= (double)(after - now) * sink;    /* what the sink took meanwhile */
+        level += 64.0;                            /* what the block fed it */
+        if (level < 0.0)
+            level = 0.0;                  /* an XRUN: the stream restarts here */
+        now = after;
+
+        {
+            unsigned long p = mirror_pad_frames(buf - (long)level, (unsigned long)buf,
+                                                (unsigned long)buf / 2, 64);
+            if (p) {
+                *padframes += p;
+                level += (double)p;
+            }
+        }
+    }
+    *elapsed_ns = now;
+}
+
+/* The block clock (pace_policy.c), and what a wrong one costs the monitor.
+ *
+ * This is the second half of the cardless story. The first half — three sleeps per
+ * block, a third of real time — is pinned by pace_secondary()'s counter rule, which
+ * is three lines of arithmetic inside the shim and cannot be reached from here. The
+ * half that is here is the rate itself: a clock is not content, so not one counter
+ * in the shim reports it, and both rounds of this defect were found only because
+ * the HDMI mirror's *drift correction* counts the silence it injects, which is the
+ * deficit. */
+static void test_pace_deadline(void)
+{
+    const unsigned long period = 1451247;   /* 64 frames at 44100, in ns */
+    const unsigned long work = 167000;      /* measured on the unit, cardless */
+    const int blocks = 35000;               /* ~58 s, the length of the windows */
+    unsigned long p_sleep, p_dead;
+    unsigned long long el_sleep, el_dead;
+
+    /* The rule, case by case, with `now` the moment inside a block whose deadline
+     * is 1000 — the wait is the returned deadline minus now, because that is what
+     * the caller sleeps and therefore what sets the rate. */
+    CHECK(pace_next_deadline(1000, period, 0) == 1000 + period,
+          "the first block was not given a period of its own");
+    CHECK(pace_next_deadline(1000, period, 1000) - 1000 == period,
+          "a block that had done none of its work was not given a whole period");
+    /* The defect, in one line: a block that has already spent half its period on
+     * its own work waits the other half. A sleep of a whole period always waited a
+     * whole period, which is how the work got charged to the clock. */
+    CHECK(pace_next_deadline(1000 + period / 2, period, 1000)
+              - (1000 + period / 2) == period - period / 2,
+          "a block that had done half its work did not wait the remainder");
+    /* A block that overran its period is written off, not repaid: the deadline
+     * restarts a period from now, so the blocks after it do not run fast. Running
+     * fast is the worse artefact of the two — it is the ring overflowing instead
+     * of draining, and no amount of silence can correct that. */
+    CHECK(pace_next_deadline(1000 + 3 * period, period, 1000)
+              - (1000 + 3 * period) == period,
+          "a late block was repaid as a burst of fast blocks");
+    /* A clock that stepped backwards restarts the same way, rather than being slept
+     * through as a stall of the length of the step. */
+    CHECK(pace_next_deadline(1000, period, 1000 + 5 * period) - 1000 == period,
+          "a backwards clock step became a long sleep");
+    /* And a zero period is not a division: nothing to wait for. */
+    CHECK(pace_next_deadline(1000, 0, 777) == 1000, "a zero period produced a deadline");
+
+    /* The two clocks over the same 35000 blocks, as the mirror's own counters saw
+     * them with the FLX4 away. */
+    mirror_run_clock(blocks, period, work, 0, &p_sleep, &el_sleep);
+    mirror_run_clock(blocks, period, work, 1, &p_dead, &el_dead);
+
+    /* The deadline clock costs the block clock exactly: the elapsed time is the
+     * blocks' own periods plus the last block's work, and no more. */
+    CHECK(el_dead == (unsigned long long)blocks * period + work,
+          "the deadline clock took %llu ns for %d blocks, not %lu",
+          el_dead, blocks, (unsigned long)blocks * period + work);
+    /* The sleep clock paid the overhead on every block, which is the whole defect:
+     * 35000 x 167 us of it, 89.7 % of real time. */
+    CHECK(el_sleep == (unsigned long long)blocks * (period + work),
+          "the sleep clock's per-block cost did not add up");
+    CHECK(el_sleep > el_dead, "the two clocks are not distinguishable at all");
+
+    /* And this is what the operator heard. The ring needs ~6.9 frames a second of
+     * correction (the two crystals, 155 ppm); the sleep clock made the mirror
+     * inject 7.38 frames of silence into every 64-frame block — 660x the drift,
+     * 10.3 % of the timeline, in holes of ~0.17 ms about a hundred times a second
+     * — and the deadline clock puts it back at the floor. Both halves are pinned,
+     * because either alone passes for the wrong reason. */
+    CHECK(p_dead > 0, "the drift correction never fired, so this proves nothing");
+    CHECK(p_dead * 1000 / blocks < 30,           /* 0.01 frames/block, not 7.38 */
+          "the deadline clock needed %lu frames of silence in %d blocks", p_dead, blocks);
+    CHECK(p_sleep / blocks >= 7 && p_sleep / blocks <= 8,
+          "the sleep clock cost %lu frames of silence per block", p_sleep / blocks);
+    CHECK(p_sleep > 500 * p_dead,
+          "the two clocks were not far apart: %lu frames against %lu", p_sleep, p_dead);
+}
+
 /* ---- the master's policy ---------------------------------------------------- */
 
 static void test_master_candidates(void)
@@ -1005,6 +1343,10 @@ int main(void)
     test_mirror_candidates();
     test_mirror_backoff();
     test_mirror_pad();
+    test_mirror_hold();
+    test_mirror_boost_gain();
+    test_s24pack_clamp();
+    test_pace_deadline();
     test_master_candidates();
     test_master_verdict();
     test_master_fail_counter();

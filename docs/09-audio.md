@@ -233,6 +233,7 @@ slower HDMI sink must cost the mirror blocks and never the master:
 | `RB_AUDIO_MIRROR_DEV` | `hw:CARD=vc4hdmi0,DEV=0 hw:CARD=vc4hdmi1,DEV=0` | space-separated, tried in order, because which micro-HDMI port the monitor is on is not fixed; each `hw:` entry also yields its `plughw:` twin. **Empty turns the mirror off** |
 | `RB_AUDIO_MIRROR_FMT` | `subframe_le` | `s24_le`, `s24_3le`, `s16_le`, `subframe_le` — see the trap below |
 | `RB_AUDIO_MIRROR_REOPEN_MS` | `5000` | the ceiling on the retry wait after the sink goes away; `0` means try once at startup and never again |
+| `RB_AUDIO_MIRROR_BOOST_DB` | `4` | the mirror's fixed level lift, in dB — the only thing on this port that puts the HDMI out above the master's own level. `0` is the old behaviour; negative sits the mirror below the master. Accepted window −24…+12 dB; watch `clips=` after changing it |
 
 These need a **shim rebuild** when they change, unlike the rest of the audio
 block: the device, the format and the retry interval are read inside
@@ -293,24 +294,22 @@ those are the pot's own raw numbers rather than a law applied to them.
 
 **What that costs, stated plainly:** 12 o'clock is no longer full level. It reads
 **0.833**, about **−1.6 dB**, and everything below the knee scaled down with it.
-Nothing anywhere in the law can exceed 1.0, so this change only ever *lowers* what
-a given position gives — it moves the knee, it does not add level. If what is
-wanted is more level available rather than a different knee, that is the boost
-below, and it needs the `s24pack()` clamp first.
+Nothing anywhere in the knob's law can exceed 1.0, so this change only ever
+*lowers* what a given position gives — it moves the knee, it does not add level. If
+what is wanted is more level available rather than a different knee, that is
+`RB_AUDIO_MIRROR_BOOST_DB`, which is the next subsection and is **no longer** a
+thing that needs a change to `s24pack()` first.
 
 The one mercy of the travel being the whole range is that the **bottom is
 unaffected**: raw 0 is the stop and it still maps to silence, exactly as under
 every earlier version of this law. Under the 0.65 reading it would not have been,
 which is the second thing that bad premise would have got wrong.
 
-The **travel above the knee being flat rather than boosted** is deliberate.
-`s24pack()` does not clamp — `((uint32_t)src[i] << 4) & 0x0ffffff0U`
-**wraps** a sample pushed past 24 bits, folding the waveform into the "loud and
-very distorted" defect S4.6 measured — so `clamp01(g_mirror_gain)` in `audioshim`
-is a ceiling, not a limit to be raised. rbp's master does peak below full scale
-(loudest 500-block window of the 2026-09-27 run: 3229776 of 8388608, ≈ **−8.3
-dBFS**), so a boost is possible in principle — but it needs a saturating clamp in
-`s24pack()` first. That is a separate change and is deliberately not this one.
+The **travel above the knee is flat, not boosted, and that is still true of the
+knob** — turning it past 1 o'clock buys nothing. The level above the master comes
+from `RB_AUDIO_MIRROR_BOOST_DB` instead, because the knob is an attenuator the
+operator sets by ear and a fixed, logged, one-line-revertible number is the easier
+thing to change and the easier thing to take back. The two multiply.
 
 **How that is checked with no hand on the knob:** point `RB_MIDI_REPLAY` at a
 hand-written dump of CC 8/40 lines — `mididump_replay()` feeds the real
@@ -349,7 +348,8 @@ there is nothing to restore, and
 `g_mirror_gain` stays at its initial `1.0` until the knob is first moved. Turning
 it once re-syncs the mirror; until then the HDMI copy is at full level wherever
 the knob is sitting, so the first touch can be a jump. `audioshim` samples it once per flush and clamps it (`clamp01`), because it
-arrives over the shared-state contract rather than from the shim's own arithmetic.
+arrives over the shared-state contract rather than from the shim's own arithmetic;
+what it is clamped *to* — unity — is then multiplied by the lift below.
 
 That contract is why **both shims ship together**: `g_mirror_gain` is in
 `SHMSTATE_SYMBOL_LIST`, and `SHMSTATE_ABI_VERSION` is 2. A new `audioshim`
@@ -357,6 +357,94 @@ against an old `knobshim` fails loudly at load (`undefined symbol`); the reverse
 mix is the quiet one — an old `audioshim`'s list never mentions the symbol, so it
 resolves what it knows and the knob is simply dead — which is what the version
 bump exists to make loud. See [08 — Controls](08-controls.md).
+
+### The lift: `RB_AUDIO_MIRROR_BOOST_DB`, and the clamp it needed
+
+**The question was "any way to get audio on HDMI louder?" (2026-09-30), and before
+this the honest answer was no.** The knob reaches unity at 1 o'clock and is flat
+above it, so the HDMI out sat at the master's own level with its top travel spent;
+and the Pi's vc4 HDMI card has **no ALSA mixer control at all** — `amixer -c 1
+scontrols` is empty, as are cards 2 and 3, and only card 0 (the headphone jack) has
+a `PCM` — so there is no fader in that path to raise. The only volume on the HDMI
+output was the monitor's own OSD.
+
+So the mirror takes a **single multiplier of its own**, applied in `flush_master()`
+where the mirror's copy is scaled and **nowhere else**: the master's `ol`/`or_`
+writes are untouched, so not a sample of the FLX4's stream changes and the unit's
+own output stage is unaffected. Default **+4 dB** (×1.5849), the operator's own
+choice — it was proposed at +6 and answered *"how about instead of +6 how about
+testing +4?"*.
+
+**The number comes from the measured headroom.** rbp's master peaks below full
+scale: the loudest 500-block window of the 2026-09-27 run read **3229776 of
+8388608**, ≈ **−8.3 dBFS**. +4 dB lands that peak near **−4.3 dBFS**; +6 would
+land near −2.3. That is a *peak* figure, not an RMS one, so material with a smaller
+crest factor than that run will run out of headroom before the arithmetic says so.
+
+**Running out of headroom now CLIPS rather than wraps, and that is the whole
+reason this is safe.** The mirror's samples are saturated to the 24-bit domain
+(`S24PACK_SAMPLE_MAX/MIN` in
+[s24pack.h](../scripts/shims/s24pack.h)) on the way into the mirror's buffer, by
+`mirror_saturate()`, which counts what it pulled back as **`clips=`** on the
+mirror log line. Without it the same gain would wrap: `((uint32_t)src[i] << 4) &
+0x0ffffff0U` folds a sample pushed past 24 bits, which is the *loud and very
+distorted* defect S4.6 measured. `clips=` is the field to watch after changing
+this setting or after playing material with more dynamic range than the run above —
+it is cumulative, in **samples**, so one loud transient on both channels counts 2.
+
+**The clamp is at the gain, not inside `s24pack()`** — and the first draft of this
+change put it in the packer, which was wrong. The packers are *modular on purpose*:
+they read bits 23..0 and encode whatever they are given, which is what makes them
+insensitive to the missing sign extension in rbp's raw word (rbp's raw `-1` is the
+positive `0x00ffffff`). A clamp there turns that raw word into **+8388607** — a
+full-scale blast where a quiet *−1* was meant — because on a 24-in-32 card those
+low three bytes *are* the sample. It would have replaced a correct reading with the
+"aliased waveform at full level" class from the other side. So the domain is
+defined in `s24pack.h`, enforced at the one point that can leave it, and
+`test_audio.c` pins **both** halves: that the helper saturates, and that the
+packers did not start doing it.
+
+The window (**−24…+12 dB**) exists for a mis-keyed order of magnitude: `+40` for
+`+4.0` is a factor of 100, i.e. every sample pinned to a rail. A value outside it
+is clamped, and the log prints **what was asked for** beside the gain that reached
+the samples, so the two numbers differing is the tell. A non-number
+(`RB_AUDIO_MIRROR_BOOST_DB=4dB`) answers the default rather than a silent partial
+parse.
+
+The setting is read inside `audioshim.so`, so — like the three knobs above — it
+needs a shim rebuild and it appears in the startup line:
+
+```
+audioshim: mirror dev="hw:CARD=vc4hdmi0,DEV=0 hw:CARD=vc4hdmi1,DEV=0" fmt=subframe_le boost=4.00dB (x1.5849) reopen=5000ms candidates=4 dropped=0
+```
+
+### The lift's headroom is rbp's own level — `TRIM` buys boost
+
+The lift has a fixed ceiling to fit under, and it is absolute: `0 dBFS`. What makes
+room for it is not on the mirror at all — it is **rbp's own output level**, which
+the FLX4's **TRIM** knob sets (`add_abs(rch, CC_TRIM, K_TRIM, sch)`, a channel
+strip control, so it moves *both* outputs) and which the periodic `writei` line
+reports as **`peak_m`**. The mirror's peak is `peak_m x 1.5849`, so the setting is
+a budget, measured on the unit on 2026-09-30:
+
+| TRIM | rbp's loudest sample (`peak_m`) | the mirror at +4 dB | verdict |
+|---|---|---|---|
+| hot (as found) | 7 132 566 = **−1.41 dBFS** | +2.59 dBFS | `clips=3739` — the ceiling is touched |
+| 12 o'clock (detent) | 3 813 818 = **−6.85 dBFS** | **−2.85 dBFS** | clean, `clips +0`, 2.85 dB of margin |
+
+So for +4 dB to be clean, `peak_m` must stay at or below **−4.0 dBFS**; the trim
+is the control that decides whether it does. Two consequences worth carrying:
+
+* **The MASTER LEVEL knob cannot fix clipping.** It is a 0..1 attenuator on the
+  mirror *and* the unit's own analogue output, so turning it down takes the room
+  down with it — it is not a balance control. Turning it *up* past its knee moves
+  the room only, because `clamp01()` pins the mirror's gain at 1.0. So the room can
+  be restored after a trim change without disturbing the lift.
+* **The trim/boost trade changes the balance, not the ceiling.** With a hot trim
+  and +1 dB, or a cool trim and +4 dB, the mirror can sit at the same level — but
+  the ratio of HDMI to room is the boost alone (1.12x against 1.58x), which is the
+  whole point of the lift. Lowering the trim is what buys a bigger lift, and the
+  room's loss is recovered on the FLX4's own knob.
 
 ### The format is not negotiable, and neither is `hw:`
 
@@ -391,27 +479,126 @@ So the mirror holds its ring near **half full** against both directions:
 a **prefill** of 512 frames of silence at each stream start (without it the ring
 holds only the 64 frames of one block, the DMA drains that in 1.4 ms, and the
 stream is in XRUN before the next block arrives — measured as a `prepare` on 3500
-of 3501 blocks), and a **pad** of a few frames of silence when the level falls
-below the target. At the measured drift that is about one frame every 0.2 s — 23 µs
-of silence — and the drop side handles the other direction. Both are silence, so
-neither touches what the master hears.
+of 3501 blocks), and a **pad** when the level falls below the target, which writes
+a **repeat of the last frame the mirror delivered** — a zero-order hold, not
+silence. The drop side handles the other direction.
+
+**The pad was silence until 2026-09-30, and the measurement is what changed it.**
+The design predicted "about one frame every 0.2 s, 23 µs of silence"; the unit
+instead pads **32–41 frames at a time, one every 5.2–6.5 s** — 0.76–0.9 ms, ~145 ppm
+of the stream, about eleven a minute. The total is the two clocks' difference and is
+right; the *granularity* was the wrong prediction, because `snd_pcm_avail_update()`
+on a hw PCM reports against `hw_ptr` and the DMA advances that a whole 256-frame
+period at a time, so the level the shim samples is a sawtooth and nearly every
+correction is clamped at `MIRROR_PAD_MAX`. At 23 µs silence is inaudible; at 0.8 ms
+it is the envelope dropping to zero and coming back — a tick. Holding the last
+delivered frame costs one step, from that frame to the one that follows the pad, and
+no energy at all. The prefill stays silence deliberately: it is 11.6 ms, long enough
+that a DC hold would be its own artefact, and it lands at a stream start under the
+startup mute. `padsilent` counts the pads that had no delivered frame to hold — the
+silence fallback — so it must stay **0** after the first block; a non-zero reading is
+the old behaviour back. `scripts/shims/mirror_policy.c` carries both halves as pure
+functions (`mirror_pad_frames` and `mirror_hold_fill`) and `test_audio.c` pins them
+on the host; which frame counts as "last" is the shim's own ordering and is a drill
+(S4.5).
 
 `/tmp/audioshim.log` carries the record, one line every 500 blocks:
 
 ```
 audioshim: mirror OPEN hw:CARD=vc4hdmi0,DEV=0 fmt=subframe_le rate=44100 period=256 periods=4 buffer=1024 prefill=512
 audioshim: mirror UP hw:CARD=vc4hdmi0,DEV=0 (first block delivered 64 of 64 frames)
-audioshim: mirror #50001 blocks=50001 frames=3200064 dropped=0 short=0 retries=1 lost=0 pads=56 padframes=1728 gain=1.000 dev=hw:CARD=vc4hdmi0,DEV=0
+audioshim: mirror #50001 blocks=50001 frames=3200064 dropped=0 short=0 retries=1 lost=0 pads=56 padframes=1728 padsilent=0 clips=0 gain=1.000 boost=4.00dB dev=hw:CARD=vc4hdmi0,DEV=0
 ```
 
 `retries` staying at its startup value, `lost=0` and `dropped=0` are the pass;
 `padframes` advancing at ~7 a second is the correction working, not a fault; and
-`gain` is the mirror's level, printed **raw** rather than clamped so the log shows
+`gain` is the knob's level, printed **raw** rather than clamped so the log shows
 what the controls shim actually wrote (`1.000` until the MASTER LEVEL knob is
-touched). The sink's own view is `/proc/asound/card2/pcm0p/sub0/status` —
+touched), `boost` is the fixed lift in dB, and `clips` counts the samples that lift
+pushed past full scale — see the lift above, where that field is the thing to
+watch. The sink's own view is `/proc/asound/card2/pcm0p/sub0/status` —
 `RUNNING`, with a `delay` near half the buffer. Both are in the S4.5–S4.8 rows of
 the bring-up order ([13](13-raspberrypi4.md#bring-up-order)), and the sink going
 away and coming back is S8.8.
+
+**`padframes` carries a second reading, and on 2026-09-28 it was the instrument
+that found a defect no other counter could see.** The mirror is fed one block per
+master block, so the ring's drain rate *is* the master's block clock: the pad rate
+is the feed deficit, and with the card away it read **7.53–7.63 frames per
+64-frame block** — ~4560 frames/s of silence against the ~6.9 frames a *second*
+two crystals differ by, 660×, i.e. 10.3 % of the monitor's timeline replaced by
+~0.17 ms holes about a hundred times a second. That is the *"slow and distorted"*
+the operator reported, and it read out here first because every other counter in
+the shim counts *content*, and the clock is not content. The cause was the block
+clock itself — with no card, the sleep `pace_without_device()` takes on rbp's
+behalf — now a **deadline per block**: the deadline advances one period and the
+caller sleeps only the remainder, so the block's work and its wakeup come out of
+the block's own period ([pace_policy.h](../scripts/shims/pace_policy.h)). After
+that fix the cardless mirror pads **0.0096 frames per block**, the card-present
+floor (0.0092–0.0093 measured over 500 000-block spans). The drill is S4.10 and
+the operator's pulls are S9.8, both in [13](13-raspberrypi4.md).
+
+### The counters cannot tell you the sink is being fed
+
+Every number in that block can be perfect while the monitor is silent, and that is
+now **measured** rather than warned about: on 2026-09-28 the operator reported no
+HDMI sound, and the state behind the report was `mirror #994501 … dropped=0
+short=0 retries=1 lost=0 gain=0.852` 1:1 with a master whose `peak_m` was moving,
+the PCM `state: RUNNING` with `hw_ptr` advancing **44 200 frames/s** (132 608
+frames in 3 s — the hardware really was consuming the audio), `delay` in its 488–584
+band, the sink connected, its EDID advertising exactly this stream (LPCM, 2
+channels, 32/44.1/48 kHz, basic-audio flag, FL/FR speaker allocation), and **not
+one error line of any kind** in the log.
+
+So the mirror's counters are evidence about *the shim's* side of the wire — that it
+opened, that it is being fed, and that the driver is taking the frames. They say
+nothing about whether the sink is being fed in a way it can play. The two ways this
+port has already seen a mirror "work" and be wrong are the ones to reach for first:
+the subframe layout (S4.6 — loud and distorted, never silence) and this one, which
+is silence with the counters clean.
+
+What to do about it, in order: **restart the player** — it closes and reopens the
+mirror's PCM, which is the one cure measured to work — then check the sink's own
+input selection and volume, which the Pi cannot see. Do **not** go looking for a
+failed write: an HDMI unplug does not produce one. Measured (S4.12): across a 12 s
+replug the mirror's `dropped`/`short`/`lost`/`retries` never moved and `hw_ptr`
+went on advancing, i.e. **the PCM drains into a port with nothing on it**, so a sink
+that goes away costs the mirror nothing it can see and S8.8's original
+`mirror LOST err=-19` prediction is wrong. And that is now measured on **both**
+sides at once: a one-sample-a-second sysfs sampler caught the connector reading
+`disconnected`/`disabled`/`dpms=Off` with `modes` and `edid` empty (the empty-file
+md5 `d41d8cd9`) for the whole of that same unplug — **11 consecutive samples,
+02:29:10–02:29:21**, with the connector back on the next second — while `card1`
+stayed `state: RUNNING` and the mirror's block counter climbed 756 → 771. So the
+sink genuinely leaves; the shim simply has no way to notice. That also means a fix
+for a silent sink cannot hang off this path's error handling; the only signals
+measured to move on a sink event are `status`, `enabled`, `dpms`, `modes` and
+`edid` under `/sys/class/drm/card*-HDMI-A-*/` — and the framebuffer is *not* one of
+them (`FBIOGET_VSCREENINFO` returns `pixclock` and every timing length as **0**, so
+it carries geometry only). A `[drm] User-defined mode not supported` re-probe line
+in `dmesg` is a connector drop too — measured, three for three, at 02:29:10,
+02:29:44 and 02:32:25.
+
+**Measuring the rate, if you ever need it:** `hw_ptr` here advances at **44 116
+frames/s** against a nominal 44 100 (the difference is the mirror's own pad), and
+the honest way to get that number is a `date +%s` pair bracketing a bare `sleep 30`
+with *nothing* inside the bracket — 1 323 496 frames over 30 s. Two cheaper ways
+overstate it: reading the stamps off a one-second sampler whose iterations cost
+more than a second (its own log gives 46 500 frames/s), and a per-second loop that
+also greps the shim log (45 022). Both were written down as findings for a while,
+and neither is the device.
+
+What is still open is one forward test, and it is the operator's: play a track, pull
+the monitor's cable, plug it back, and listen. If the sound dies, a detector is
+worth building; if it survives — or if a second replug re-locks it while a player
+restart is not needed — then this is the sink's own audio lock, recovered by hand,
+and the honest record is that sentence rather than a fix. The 2026-09-28 incident
+could not settle it: the sound came back after *both* a player restart and a
+monitor power-cycle/replug, and the operator's own reading is the monitor
+([13](13-raspberrypi4.md#bring-up-order), S4.12). What the sampler later added is
+an argument from timing rather than from audibility — the operator was still
+pulling the cable at 02:29:44 and 02:32:25, nine and thirteen minutes *after* the
+02:19:58 restart, which reads as the restart not having been the cure.
 
 ## S24 sign extension — load-bearing, must not be "fixed"
 
@@ -506,9 +693,12 @@ The consequence to know about: **on a first start, both channels come up at
 unity until their faders are touched once.** A channel fader parked at the
 bottom will therefore play at full level until it is moved. The seed is
 deliberately on both `vu_thread` paths (`LED_VU=0` included) because the target
-whose meter this bridge cannot drive is exactly the target with no absolute
-controls — putting it inside the meter loop made it dead code on the only unit
-that needed it.
+with no absolute controls to report is exactly the target that needs it, and
+`LED_VU=0` is a manual OFF switch on the meter bridge rather than a statement
+about the surface — a map that declares no meter row gets no hook and no traffic
+either way, and the FLX4's map declares one (a host-driven level on CC 2, live
+as of 2026-10-01). Putting it inside the meter loop made it dead code on the only
+unit that needed it.
 
 The measurement that pins it (unit, 2026-09-26), and the shape of the trap:
 
@@ -537,6 +727,19 @@ to mask — but the FLX4 was found to thump on open, a loud pop/buzz the moment
 rbp first touches the card (2026-09-26), so the theory was wrong for the card
 this port is aimed at. The cost when a card does not need it is 1.5 s of
 silence at startup.
+
+**And the pop is now gone, by ear** — the operator, on 2026-09-30, asked nothing
+and reported it in passing: *"that audio popping thing is gone btw"*. That is the
+half of this section nothing in the log can supply. The arithmetic above proves
+the mute is **armed**; `startup mute released after N frames` appears on a run
+with no card just as it does on a working one, so the line can never show that
+the thing the mute masks stopped being audible. Ears are the only instrument for
+that, and they were the instrument that first found the thump (2026-09-26), so
+they close it. What is *not* separated by this is which change did it: the mute
+was set to 1500/300 in response to the thump and is the standing explanation, but
+the same window holds the pair-map and `access=3` replay work, so the attribution
+is "the pop is gone with the mute in force" rather than "the mute alone was
+measured to be the cure".
 
 A card that is *late* rather than noisy wants the opposite: set them back to 0
 in `rb.local.conf`, or lower `STARTUP_MUTE_MS`, so the port does not sit silent
@@ -724,11 +927,15 @@ it. Since `snd_ctl_pcm_info` never forwards, rbp may simply never ask again — 
 The master level comes from `audioshim.so`, which sees the master mix in
 `snd_pcm_writei()`, computes a per-channel true-S24 peak with a ~300 ms release,
 and publishes it to the shared `g_vu_peak[2]`. The controls shim turns that into
-whatever the target can display — and on the FLX4, whose meter is a CC 2 **value
-ramp** rather than the 11-segment bitmask this bridge drives, `RB_LED_VU=0` means
-the meter hook is not installed and nothing reads it. (This used to say the unit
-"has no meters", which is wrong — it has one of a different kind; see
-[15](15-flx4-midi.md#the-leds).) See [08 — Controls](08-controls.md).
+whatever the target can display — and it **does** display on the FLX4, whose
+meter is a CC 2 **value ramp** rather than the 11-segment bitmask the SC Live 4
+takes: the kind is read from the selected map's meter row (`meter_enc`), and the
+FLX4's row is live as of 2026-10-01, confirmed on the panel by the operator's own
+eye. `RB_LED_VU` ships `1` and is only a manual OFF switch — a surface whose map
+declares **no meter row** gets no hook installed and no traffic whatever the flag
+says. (This paragraph used to say the unit "has no meters", and then that the
+bridge could not drive the one it has; both are wrong.) See
+[08 — Controls](08-controls.md) and [15](15-flx4-midi.md#the-leds).
 
 ## For reference: the previous target's 8-channel codec
 

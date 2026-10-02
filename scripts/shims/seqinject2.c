@@ -3,7 +3,12 @@
  * sequencer input port (default 128:0, overridable with --dest) to exercise
  * the full Prime GO -> RX3 mapping without touching hardware.
  *
- *   seqinject2 note <ch> <note> <on|off>       note event (0-based ch)
+ *   seqinject2 note <ch> <note> <on|off> [vel] note event (0-based ch)
+ *        An explicit [vel] forces a Note-On carrying it, whatever <on|off>
+ *        says -- which is the only way to turn an FLX4 LED OFF, because that
+ *        panel IGNORES a real Note-Off (0x80). Measured 2026-10-01: `midi_led`
+ *        sent 0x80 for months and the glass never went dark. Without [vel] the
+ *        old behaviour is untouched (Note-On vel 100 / real Note-Off).
  *   seqinject2 cc   <ch> <cc> <val>            control change
  *   seqinject2 jog  <deck> <pos14>             jog pair CCs 0x37/0x4D (deck 0|1)
  *   seqinject2 pitch <deck> <pos14>            pitch fader pair 0x1F/0x4B
@@ -89,17 +94,22 @@ static void send_event(const struct snd_seq_event *ev)
           die("write event");
 }
 
-static void note(int ch, int n, int on)
+static void note(int ch, int n, int on, int vel)
 {
      struct snd_seq_event ev;
      memset(&ev, 0, sizeof(ev));
      ev.flags = SNDRV_SEQ_EVENT_LENGTH_FIXED;
-     ev.type = on ? SNDRV_SEQ_EVENT_NOTEON : SNDRV_SEQ_EVENT_NOTEOFF;
+     /* vel < 0 = no explicit velocity: the historical shape, and what every
+      * caller before the LED probe wanted (an injected press, not an LED). */
+     ev.type = (vel < 0 && !on) ? SNDRV_SEQ_EVENT_NOTEOFF : SNDRV_SEQ_EVENT_NOTEON;
      ev.data.note.channel = ch;
      ev.data.note.note = n;
-     ev.data.note.velocity = on ? 100 : 0;
+     ev.data.note.velocity = vel >= 0 ? vel : (on ? 100 : 0);
      send_event(&ev);
-     fprintf(stderr, "note ch%d n%d %s\n", ch, n, on ? "on" : "off");
+     if (vel >= 0)
+          fprintf(stderr, "note ch%d n%d %s vel%d\n", ch, n, on ? "on" : "off", vel);
+     else
+          fprintf(stderr, "note ch%d n%d %s\n", ch, n, on ? "on" : "off");
 }
 
 static void cc(int ch, int param, int val)
@@ -126,7 +136,7 @@ int main(int argc, char **argv)
      }
      if (i >= argc) {
           fprintf(stderr,
-                  "usage: %s [--dest C:P] note <ch> <n> <on|off>\n"
+                  "usage: %s [--dest C:P] note <ch> <n> <on|off> [vel]\n"
                   "                    | cc <ch> <cc> <val>\n"
                   "                    | jog <deck0|1> <pos14>\n"
                   "                    | pitch <deck0|1> <pos14>\n"
@@ -139,7 +149,8 @@ int main(int argc, char **argv)
           int ch = atoi(argv[i + 1]);
           int n = atoi(argv[i + 2]);
           int on = strcmp(argv[i + 3], "off") != 0;
-          note(ch, n, on);
+          int vel = (i + 4 < argc) ? atoi(argv[i + 4]) : -1;
+          note(ch, n, on, vel);
      } else if (strcmp(argv[i], "cc") == 0 && i + 3 < argc) {
           cc(atoi(argv[i + 1]), atoi(argv[i + 2]), atoi(argv[i + 3]));
      } else if (strcmp(argv[i], "jog") == 0 && i + 2 < argc) {

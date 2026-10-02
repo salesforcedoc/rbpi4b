@@ -1,6 +1,10 @@
 /*
  * s24pack.c — see s24pack.h. Two loops and a memcpy; the value is in being
  * separable, so the byte-level contract can be tested without a sound card.
+ * What these deliberately do NOT do is clamp: they encode whatever value they are
+ * given, which is what makes them insensitive to a raw word's missing sign
+ * extension — and the saturation the mirror's level needs lives at the mirror's
+ * gain instead, on the argument the header's S24PACK_SAMPLE_* comment sets out.
  */
 #define _GNU_SOURCE
 #include "s24pack.h"
@@ -69,8 +73,10 @@ unsigned s24pack(int fmt, const int32_t *src, unsigned frames, unsigned ch,
 
     switch (fmt) {
     case AUDIO_FMT_S24_LE:
-        /* The identity case: the scratch buffer already holds exactly these
-         * bytes, because that is the layout rbp wrote into it. */
+        /* The identity case: the scratch buffer already holds exactly these bytes,
+         * because that is the layout rbp wrote into it. Verbatim, and deliberately
+         * not clamped like the three below — see the S24PACK_SAMPLE_* comment in the
+         * header for what a clamp here would do to an unextended word. */
         memcpy(dst, src, need);
         break;
 

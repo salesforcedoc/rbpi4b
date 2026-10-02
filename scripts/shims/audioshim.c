@@ -71,7 +71,9 @@
 #include <stdarg.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
-#include <sys/time.h>   /* gettimeofday, for the reopen backoff — see now_ms() */
+#include <sys/time.h>   /* gettimeofday, for the reopen backoff and the block
+                         * clock — see now_ms() and pace_without_device() */
+#include <time.h>       /* nanosleep, for the block clock's remainder */
 
 /* Declarations of the state owned by the controls shim (which is preloaded
  * before us), plus the constructor-time check that it is actually there. */
@@ -80,6 +82,7 @@
 #include "s24pack.h"
 #include "mirror_policy.h"
 #include "master_policy.h"
+#include "pace_policy.h"
 
 /* Enforce GLIBC_2.4 versioning for libdl on glibc 2.13 */
 __asm__(".symver dlsym, dlsym@GLIBC_2.4");
@@ -221,6 +224,8 @@ static struct {
     int  mirror_fmt;           /* s24pack format, from AUDIO_MIRROR_FMT */
     char mirror_fmt_name[24];  /* as written, for the log */
     long mirror_reopen_ms;     /* AUDIO_MIRROR_REOPEN_MS: ceiling on the retry wait */
+    double mirror_boost_db;    /* AUDIO_MIRROR_BOOST_DB: the level lift, as written */
+    double mirror_boost;       /* and as a multiplier (mirror_boost_gain()) */
     long mute_frames;          /* STARTUP_MUTE_MS at 44100 */
     long fade_frames;          /* STARTUP_FADE_MS at 44100 */
     int  sched_rt;             /* SCHED_RT: 1 = keep rbp off RT (default) */
@@ -338,6 +343,30 @@ static const char *master_dev_name(void)
  * RB_AUDIO_MIRROR_REOPEN_MS=0 means try once at startup and never again. */
 #define AUDIO_MIRROR_REOPEN_MS_DEFAULT 5000
 
+/* The mirror's fixed level lift in dB, and the answer to "any way to get audio on
+ * HDMI louder?" (asked 2026-09-30). The knob cannot do it and nothing else can:
+ * MASTER LEVEL reaches unity at 1 o'clock and is flat above it — measured live as
+ * gain=1.000, i.e. the mirror is at the master's own level and its top travel is
+ * spent — and the Pi's vc4 HDMI card has NO ALSA mixer control at all (`amixer -c 1
+ * scontrols` is empty, as are cards 2 and 3; only card 0, the headphone jack, has a
+ * PCM control), so there is no software fader in that path to raise. Until now the
+ * only volume on the HDMI out was the monitor's own OSD.
+ *
+ * +4.0 dB is the operator's own choice: this was proposed at +6 and answered
+ * "how about instead of +6 how about testing +4?". The measurement behind both is
+ * the peak of the loudest block in a played run — 3 229 776 of 8 388 608, i.e.
+ * -8.3 dBFS — so +4 lands that peak near -4.3 dBFS and +6 near -2.3. This is a
+ * *peak* headroom, not an RMS one: material with less dynamic range than that run
+ * will clip here, which is what `clips=` on the mirror log line is for.
+ *
+ * It is a single multiplier applied to the mirror and to nothing else, so the
+ * master's own level — and therefore the FLX4's output — is untouched, and the
+ * knob still attenuates on top of it (the two multiply). Set it to 0 to get the
+ * previous behaviour back exactly, or negative to sit the mirror below the master.
+ * mirror_boost_gain() clamps the value to MIRROR_BOOST_DB_MIN..MAX, and a value
+ * outside that window is logged as the value it was given. */
+#define AUDIO_MIRROR_BOOST_DB_DEFAULT "4"
+
 /* The mirror's own ring, in frames and periods. Bigger than the master's 64-frame
  * block on purpose: the two ends run on independent clocks (the FLX4 and the HDMI
  * sink), so what this sizes is how much drift the mirror can absorb before it has
@@ -386,8 +415,19 @@ static const char *master_dev_name(void)
  * frame per 0.2 s of audio, so anything approaching this number is not drift — it is
  * a ring that was drained by something else (a stop in between, a level reading that
  * arrived after a stall), and 64 frames bounds how much silence such an event can
- * inject in one go. Sixteen blocks at most to work off a whole ring. */
+ * inject in one go. Sixteen blocks at most to work off a whole ring.
+ *
+ * The unit measured the pads against this ceiling and found they nearly all hit it:
+ * one pad every 5.2-5.5 s averaging 34-38 frames, not the one frame every 0.2 s the
+ * sentence above predicts, because snd_pcm_avail_update() on a hw PCM reports against
+ * hw_ptr and the DMA advances that a whole period at a time. The total is still right
+ * — it has to equal the drift — but it arrives as ~0.8 ms at a time, which is why the
+ * pad's *content* had to stop being silence. See mirror_write_hold(). */
 #define MIRROR_PAD_MAX 64
+
+/* The widest packed frame this shim can produce, in bytes: two channels in the widest
+ * container s24pack() has. Only the hold below is sized by it. */
+#define MIRROR_FRAME_MAX (2 * sizeof(int32_t))
 
 /* The retry floor, matching the master's REOPEN_MIN_MS. */
 #define MIRROR_REOPEN_MIN_MS 500
@@ -592,6 +632,7 @@ struct stage {
     int32_t buf[MAX_FRAMES * 2];
     unsigned frames;        /* frames ready, 0 = nothing staged yet */
     unsigned warn_size;     /* last mismatching size already logged */
+    unsigned long pace_seen;/* this stream's memory of the block clock: pace_secondary() */
 };
 static struct stage g_phone_stage, g_booth_stage;
 
@@ -626,6 +667,9 @@ static unsigned long g_mirror_prefill; /* frames of silence at each stream start
 static unsigned long g_mirror_buffer;  /* the ring the sink granted, in frames */
 static unsigned long g_mirror_pads;    /* blocks whose write carried padding */
 static unsigned long g_mirror_pad_frames_sum;  /* frames of padding written */
+static unsigned long g_mirror_pad_silent;  /* pads with no delivered frame to hold */
+static unsigned long g_mirror_clips;   /* mirror samples the boost pushed past full
+                                        * scale, saturated rather than wrapped */
 
 /* The mirror's staging buffers, stereo and only stereo: channel 0 is the master's
  * left, channel 1 its right (flush_master() fills them below). Two buffers, like
@@ -642,6 +686,16 @@ static int32_t g_mirror_packed[MAX_FRAMES * 2];
  * bytes per sample per channel — so a larger negotiated geometry can only ever be
  * clamped, never written past. */
 static unsigned char g_mirror_silence[MIRROR_PREFILL_FRAMES * 2 * sizeof(int32_t)];
+
+/* The pad's content, which is the last frame the mirror DELIVERED rather than a run
+ * of silence: the frame itself, its width, and the buffer the copies are built in.
+ * See mirror_write_hold() for why this is a frame and not zeroes. `last_bytes` is the
+ * whole of the "is there anything to hold" test — 0 until a block has gone out, and
+ * cleared when a stream is opened, so a pad can never hold a frame from a stream that
+ * has ended. */
+static unsigned char g_mirror_last[MIRROR_FRAME_MAX];
+static unsigned g_mirror_last_bytes;
+static unsigned char g_mirror_hold[MIRROR_PAD_MAX * MIRROR_FRAME_MAX];
 
 static unsigned int g_out_channels;   /* negotiated; 0 until set_channels() */
 static int g_pairs_resolved;
@@ -997,14 +1051,41 @@ static void load_config(void)
     if (g_cfg.mirror_reopen_ms < 0)
         g_cfg.mirror_reopen_ms = 0;
 
+    /* The level lift. strtod rather than env_int because a dB is not an integer and
+     * "4.5" is a reasonable thing to write; the trailing-garbage test is what stops
+     * a typo (RB_AUDIO_MIRROR_BOOST_DB=4dB, or a stray unit) from being read as a
+     * silent 4, which is exactly the class of defect this log exists for. Both
+     * failures answer the default rather than the partial parse. */
+    s = env_str("AUDIO_MIRROR_BOOST_DB", AUDIO_MIRROR_BOOST_DB_DEFAULT);
+    {
+        char *end = NULL;
+        double db = strtod(s, &end);
+        if (end == s || *end != '\0' || db != db) {
+            alog("audioshim: AUDIO_MIRROR_BOOST_DB='%s' is not a number; using the "
+                 "default %s dB\n", s, AUDIO_MIRROR_BOOST_DB_DEFAULT);
+            db = strtod(AUDIO_MIRROR_BOOST_DB_DEFAULT, NULL);
+        } else if (db > MIRROR_BOOST_DB_MAX || db < MIRROR_BOOST_DB_MIN) {
+            alog("audioshim: AUDIO_MIRROR_BOOST_DB=%g is outside the %g..%g dB window "
+                 "this shim applies; clamping. (A mis-keyed order of magnitude is "
+                 "why the window exists.)\n", db, MIRROR_BOOST_DB_MIN,
+                 MIRROR_BOOST_DB_MAX);
+        }
+        g_cfg.mirror_boost_db = db;
+        /* The multiplier comes from the law, which clamps to the same window — so the
+         * log prints what was ASKED FOR (above) beside the gain the samples actually
+         * get, and those two numbers differing is the tell that a value was clamped. */
+        g_cfg.mirror_boost = mirror_boost_gain(db);
+    }
+
     /* One line per candidate, at startup only, so the log says what was asked for
      * even when nothing ever opens. alog() truncates at 512 bytes, which a list
      * could reach, and a silently shortened device list is the kind of thing this
      * port keeps having to chase. */
     if (g_mirror_ncands > 0) {
         int i;
-        alog("audioshim: mirror dev=\"%s\" fmt=%s reopen=%ldms candidates=%d "
-             "dropped=%d\n", g_cfg.mirror_dev, g_cfg.mirror_fmt_name,
+        alog("audioshim: mirror dev=\"%s\" fmt=%s boost=%.2fdB (x%.4f) "
+             "reopen=%ldms candidates=%d dropped=%d\n", g_cfg.mirror_dev,
+             g_cfg.mirror_fmt_name, g_cfg.mirror_boost_db, g_cfg.mirror_boost,
              g_cfg.mirror_reopen_ms, g_mirror_ncands, g_mirror_dropped_cands);
         for (i = 0; i < g_mirror_ncands; i++)
             alog("audioshim: mirror candidate %d/%d: %s\n",
@@ -1445,7 +1526,13 @@ static int mirror_alsa_format(int fmt)
 
 /* Write up to MIRROR_PREFILL_FRAMES of silence, non-blocking and best-effort. The
  * return is deliberately dropped: a ring with room takes it, a ring without answers
- * -EAGAIN, and neither is anything the master's audio thread should act on. */
+ * -EAGAIN, and neither is anything the master's audio thread should act on.
+ *
+ * Since the pad became a hold, this is the LEAD's content only — the 512 frames at
+ * each stream start, where there is nothing that has been delivered yet to hold. The
+ * two are deliberately different: a hold of 11.6 ms is a DC step held long enough to
+ * be its own artefact, and the stream start is under the startup mute anyway, where a
+ * pad of 0.8 ms is a notch in the middle of the music and is not. */
 static void mirror_write_silence(snd_pcm_t *h, unsigned long frames)
 {
     if (h == NULL || frames == 0 || real_snd_pcm_writei == NULL)
@@ -1453,6 +1540,75 @@ static void mirror_write_silence(snd_pcm_t *h, unsigned long frames)
     if (frames > (unsigned long)MIRROR_PREFILL_FRAMES)
         frames = MIRROR_PREFILL_FRAMES;
     real_snd_pcm_writei(h, g_mirror_silence, (snd_pcm_uframes_t)frames);
+}
+
+/* Write `frames` copies of the last frame the mirror delivered: the pad's content,
+ * and the one part of the correction the operator asked for by name ("i would rather
+ * you repeat the last frame 100%").
+ *
+ * Silence is what this used to insert, and the measurement is why that was wrong. The
+ * pads do NOT arrive one frame at a time: snd_pcm_avail_update() on a hw PCM reports
+ * against hw_ptr, which the DMA advances a whole period (256 frames) at a time, so
+ * the level mirror_pad() samples is a sawtooth and nearly every correction is clamped
+ * at MIRROR_PAD_MAX. Measured on this unit: one pad every 5.2-5.5 s, averaging 34-38
+ * frames — 0.76-0.86 ms, ~145-157 ppm of the stream, about eleven a minute. A 0.8 ms
+ * hole of silence is not a small error, because it is the envelope going to zero and
+ * back: two steps, and the energy in between is simply gone.
+ *
+ * Holding the last delivered frame is a zero-order hold. One discontinuity remains —
+ * from the held frame to the frame that follows the pad — and it is the same order as
+ * the step the two clocks already impose on each other, with none of the notch. The
+ * samples the sink plays are then what a dropped-sample repair plays: the last thing
+ * that was true, held until the next true thing arrives.
+ *
+ * Silence survives as the fallback and is reachable in exactly one way: a pad that
+ * fires before any block has been delivered — an open whose ring starts draining
+ * before the first write reaches it. g_mirror_pad_silent counts those, so "the hold is
+ * running" is a reading off the log rather than an assumption about it.
+ *
+ * What is held is the last frame of the last block that was written, not of the block
+ * about to be written: the pad goes into the ring BEFORE this block, so holding the
+ * upcoming frame would jump the ring's timeline forward by a block and then back. */
+static void mirror_write_hold(unsigned long frames)
+{
+    unsigned long held;
+
+    if (g_mirror == NULL || frames == 0 || real_snd_pcm_writei == NULL)
+        return;
+    held = mirror_hold_fill(g_mirror_last, g_mirror_last_bytes, frames,
+                            g_mirror_hold, sizeof g_mirror_hold);
+    if (held == 0) {
+        g_mirror_pad_silent++;
+        mirror_write_silence(g_mirror, frames);
+        return;
+    }
+    real_snd_pcm_writei(g_mirror, g_mirror_hold, (snd_pcm_uframes_t)held);
+}
+
+/* Remember the frame the mirror's ring now ends on, for the next pad. Called with the
+ * pack's own byte and frame counts, AFTER the block has been written.
+ *
+ * The frame width comes from the pack rather than from a table of formats, which is
+ * the same reason s24pack() returns a byte count at all: one number describes both and
+ * cannot disagree with the buffer it describes. A width this shim cannot produce (a
+ * geometry changed out from under the call, i.e. never) records nothing rather than
+ * copying at a guessed offset.
+ *
+ * On a dropped or short block the frame recorded is that block's own last, up to one
+ * block of audio ahead of what the ring ends on. That is left as it is and said out
+ * loud: a dropped block is a FULL ring, where mirror_pad() asks for no padding at all,
+ * so the two never meet. */
+static void mirror_remember(unsigned bytes, unsigned frames)
+{
+    unsigned fb;
+
+    if (bytes == 0 || frames == 0)
+        return;
+    fb = bytes / frames;
+    if (fb == 0 || fb > sizeof g_mirror_last)
+        return;
+    memcpy(g_mirror_last, (const unsigned char *)g_mirror_packed + bytes - fb, fb);
+    g_mirror_last_bytes = fb;
 }
 
 /* Give the mirror a lead before it is asked to keep up: half the ring of silence,
@@ -1471,8 +1627,9 @@ static void mirror_prefill(snd_pcm_t *h)
     mirror_write_silence(h, g_mirror_prefill);
 }
 
-/* Hold the ring near half full while the mirror is up, by writing a few frames of
- * silence before the master's block when the level has fallen.
+/* Hold the ring near half full while the mirror is up, by writing a few frames of the
+ * last delivered sample — not of silence — before the master's block when the level
+ * has fallen.
  *
  * This is the drop's twin, and the measurement is why it exists: the vc4 HDMI sink
  * consumes ~6.9 frames a second faster than the FLX4 feeds the mirror — ~155 ppm,
@@ -1480,12 +1637,15 @@ static void mirror_prefill(snd_pcm_t *h)
  * drains away and the stream reaches XRUN in about 74 s. The recovery from that is a
  * prepare plus a re-prefill, i.e. an 11.6 ms gap in the monitor's audio every minute
  * and a quarter, which is exactly the kind of "works, mostly" this port does not
- * ship when the alternative is a few frames of silence per second.
+ * ship when the alternative is a few frames of hold per second.
  *
  * The correction is bounded by MIRROR_PAD_MAX and takes several blocks to work off,
- * so it cannot arrive as a burst; at the measured drift it is about one frame every
- * 0.2 s, which is 23 us of silence — a number this code does not get to choose,
- * because it follows from the two clocks.
+ * so it cannot arrive as a burst. This comment used to predict "about one frame every
+ * 0.2 s, which is 23 us of silence — a number this code does not get to choose". The
+ * unit then measured one pad every 5.2-5.5 s at 34-38 frames, ~0.8 ms at a time,
+ * because hw_ptr advances a period at a time and the level is a sawtooth against it.
+ * The *total* is still the drift and not a choice; only the granularity was wrong to
+ * predict, and at that granularity silence is audible. See mirror_write_hold().
  *
  * A device that will not report a level (no symbol, or -EPIPE on a stream that is
  * about to be retried anyway) simply gets no padding: the prefill and the RETRY
@@ -1502,7 +1662,7 @@ static void mirror_pad(void)
                             MIRROR_PAD_MAX);
     if (pad == 0)
         return;
-    mirror_write_silence(g_mirror, pad);
+    mirror_write_hold(pad);
     g_mirror_pads++;
     g_mirror_pad_frames_sum += pad;
 }
@@ -1614,6 +1774,12 @@ static int mirror_open_one(const char *dev)
      * same product the prefill is half of, and it is recorded rather than re-derived
      * because a device that grants no geometry must not have one invented for it. */
     g_mirror_buffer = (unsigned long)period * (unsigned long)periods;
+    /* Nothing has been delivered on this stream yet, so the first pad of it has
+     * nothing to hold and takes the silence fallback. Clearing the frame here rather
+     * than only zeroing the flag matters across a LOSS and reopen: the frame left in
+     * this buffer belongs to a stream that ended, and holding a stale sample at the
+     * head of a fresh ring is a click this correction would have introduced. */
+    g_mirror_last_bytes = 0;
     /* The precision is what bounds this: a candidate comes from g_mirror_cands,
      * which is this size, but -Wformat-truncation cannot see that and is right not
      * to guess. */
@@ -1801,6 +1967,11 @@ static void mirror_write(const int32_t *stereo, unsigned frames)
         return;
     }
 
+    /* The frame the ring now ends on, for the next pad to hold — after the write, so
+     * it is a frame that went out, and never recorded on the DOWN path above, where
+     * there is no ring left to hold anything in. See mirror_remember(). */
+    mirror_remember(bytes, frames);
+
     if (!g_mirror_written_once && g_mirror_frames > 0) {
         g_mirror_written_once = 1;
         alog("audioshim: mirror UP %s (first block delivered %ld of %u frames)\n",
@@ -1809,11 +1980,12 @@ static void mirror_write(const int32_t *stereo, unsigned frames)
 
     if ((g_mirror_blocks % 500) == 1)
         alog("audioshim: mirror #%lu blocks=%lu frames=%lu dropped=%lu short=%lu "
-             "retries=%lu lost=%lu pads=%lu padframes=%lu gain=%.3f dev=%s\n",
+             "retries=%lu lost=%lu pads=%lu padframes=%lu padsilent=%lu clips=%lu "
+             "gain=%.3f boost=%.2fdB dev=%s\n",
              g_mirror_blocks, g_mirror_blocks, g_mirror_frames, g_mirror_drops,
              g_mirror_shorts, g_mirror_retries, g_mirror_losses, g_mirror_pads,
-             g_mirror_pad_frames_sum, (double)g_mirror_gain,
-             g_mirror_dev);
+             g_mirror_pad_frames_sum, g_mirror_pad_silent, g_mirror_clips,
+             (double)g_mirror_gain, g_cfg.mirror_boost_db, g_mirror_dev);
 }
 
 /* Reopen a mirror that is down, if the backoff allows it. Runs on the audio
@@ -2649,6 +2821,25 @@ static inline float clamp01(float v)
     return v;
 }
 
+/* The mirror's sample after its gain, saturated to the domain in s24pack.h and
+ * counted when that had to happen. s24pack_clamp() does the clamping; this wrapper
+ * exists for the count, which is the only measurement that says whether the level
+ * lift is eating the peaks. It sits beside clamp01() because it is the same kind of
+ * thing — what to do with a value that came from someone else's arithmetic — and it
+ * is not inside the packer because the packer is shared with the master stream and
+ * is compiled into test_audio() on its own.
+ *
+ * Deliberately counting SAMPLES and not events: one loud transient is two counts
+ * (both channels), so a reader comparing this against the frame counters should
+ * halve it. That is the honest unit — what the device receives is samples. */
+static inline int32_t mirror_saturate(int32_t v)
+{
+    int32_t c = s24pack_clamp(v);
+    if (c != v)
+        g_mirror_clips++;
+    return c;
+}
+
 /* rbp's samples are right-justified 24-bit values whose top byte is zero, so the
  * raw word for -1 is the positive 0x00ffffff. This is the expression the SC Live
  * 4 version used, and it is load-bearing for every gain and every peak: multiply
@@ -2661,13 +2852,105 @@ static inline int32_t sext24(int32_t l)
     return (int32_t)(l << 8) >> 8;
 }
 
-/* No device: pace the caller with a sleep, so rbp's audio threads run at roughly
- * real time instead of spinning. Applied to *every* stream — the old code only
- * slept on the master path, which left the phone and booth threads busy-looping
- * whenever the device was missing. */
+/* How many blocks have paid for themselves — one per master write, which is one
+ * per block; see pace_without_device(). A count and not a wall-clock stamp,
+ * because what a secondary stream has to decide is not "how long ago" but "has a
+ * block been paid for since I last looked", and that question has an exact answer
+ * with no window to tune. */
+static unsigned long g_pace_paid;
+
+/* The block clock's deadline, in nanoseconds on the wall clock; 0 = no block has
+ * been paced yet. Held here rather than inside pace_without_device() so that the
+ * arithmetic itself lives in pace_policy.c, where a host test can drive a thousand
+ * blocks and assert what they cost. */
+static unsigned long long g_pace_deadline;
+
+/* The fake handles' shared memory of it (see pace_secondary). One is enough: they
+ * are not written per block, and a shared value can only make one of them pay
+ * more often than it needs to — never less. */
+static unsigned long g_fake_pace_seen;
+
+/* No device: hold the caller to one block's time per block — the block clock rbp
+ * would otherwise have got from the card (see pace_policy.h for the rule and for
+ * the measurement it was built from).
+ *
+ * This is the call that PAYS FOR A BLOCK, and it is the master's on purpose. The
+ * other streams are not independent clocks: stage_stream() writes nothing to a
+ * card, so a staged block goes out with the next master write, one block of each
+ * per master block. One block's time per block is therefore the whole of the
+ * pacing. Sleeping in each stream instead — which is what this function used to be
+ * called for — multiplies a block's cost by the number of streams rbp is running.
+ *
+ * A wall clock and not a monotonic one, for the reason now_ms() gives: this shim
+ * links libasound and nothing else. The deadline is re-derived from it every block
+ * and only the difference is used, so a step from the clock discipline is bounded
+ * by pace_next_deadline()'s clamp rather than accumulating. */
 static void pace_without_device(snd_pcm_uframes_t size)
 {
-    usleep((useconds_t)(size * 1000000L / 44100L));
+    struct timeval tv;
+    unsigned long long now, period, left;
+    struct timespec nap;
+
+    gettimeofday(&tv, NULL);
+    now = (unsigned long long)tv.tv_sec * 1000000000ULL
+        + (unsigned long long)tv.tv_usec * 1000ULL;
+    period = (unsigned long long)size * 1000000000ULL / 44100ULL;
+
+    g_pace_deadline = pace_next_deadline(now, period, g_pace_deadline);
+
+    left = g_pace_deadline > now ? g_pace_deadline - now : 0;
+    if (left > 0) {
+        nap.tv_sec = (time_t)(left / 1000000000ULL);
+        nap.tv_nsec = (long)(left % 1000000000ULL);
+        nanosleep(&nap, NULL);
+    }
+    g_pace_paid++;
+}
+
+/* A secondary stream — the phone, the booth, the fake handles. Its block is part
+ * of a master block, so it rides on the last one that was paid for and sleeps only
+ * when no block has been paid for since its own last call.
+ *
+ * The bug this exists for: every one of these used to sleep a full block on its
+ * own. That is invisible while a card is open, because with g_real_playback set
+ * none of them sleeps at all — the master's write blocks in the card and the card
+ * is the clock. It is wrong the moment the card goes, and wrong in a way nothing
+ * in this log reports: the writes of a block are sequential (phone, booth, master,
+ * from the one thread rbp's engine writes from — which is the only reason the
+ * sleeps could add up), so three sleeps of 1.45 ms made a block cost 4.55 ms and
+ * the whole engine ran at a THIRD of real time. Measured, with the FLX4 away:
+ * 384001 mirror blocks over the ~29 minutes it was gone, 220 blocks/s against the
+ * 689/s (44100/64) the same counter shows with a card open — and every counter
+ * healthy across it, dropped=0 short=0 lost=0 and written=64 on every line. The
+ * engine's rate is not content, so no counter that counts content can see it; the
+ * operator hears it, as a track playing at a third speed, from the HDMI mirror,
+ * which is fed one block per master block and so inherits the rate exactly.
+ *
+ * One sleep per block was not the end of it, and this is the half that took another
+ * round to find: a single sleep per block still made a block cost more than one
+ * block's time, because usleep() sleeps at least its argument and the block has
+ * work in it — 167 us of overhead on a 1451 us block, 617.9 blocks/s, 89.7 % of
+ * real time. The same mirror counters said so, as 7.38 frames of silence per
+ * 64-frame block injected into the monitor's ring against the 6.9 frames a second
+ * the two crystals need. pace_without_device() is a deadline now, and pace_policy.h
+ * carries the measurement and the rule.
+ *
+ * `seen` is this stream's own memory of g_pace_paid, one per stream: two streams
+ * sharing a block both have to ride on it, and a single shared value would make
+ * the second one pay. The rule degrades the right way. With no master write at all
+ * — the master retired, or a block that never reached it — nothing increments the
+ * counter, so every call pays its own block and a stream that finds itself alone
+ * paces itself exactly as it did before this existed, rather than spinning. A
+ * stream written twice in one block pays twice for it; that is also the old
+ * behaviour, and it is the safe direction to be wrong in. */
+static void pace_secondary(unsigned long *seen, snd_pcm_uframes_t size)
+{
+    if (*seen != g_pace_paid) {
+        *seen = g_pace_paid;
+        return;
+    }
+    pace_without_device(size);
+    *seen = g_pace_paid;
 }
 
 /* Stage one block from a secondary stream. No card access: the master owns the
@@ -2680,9 +2963,11 @@ static snd_pcm_sframes_t stage_stream(struct stage *st, const struct pair *pair,
     if (!pair_mapped(pair)) {
         /* Dropped on purpose (AUDIO_MAP's '-', or the card is too small). Nothing
          * to stage and nothing to say per block; resolve_pairs() already said it
-         * once. */
+         * once. Paced like a staged block, because it is one as far as rbp's
+         * clock is concerned: this call returns in place of a block that would
+         * have been staged. */
         if (!g_real_playback)
-            pace_without_device(size);
+            pace_secondary(&st->pace_seen, size);
         return (snd_pcm_sframes_t)size;
     }
 
@@ -2693,7 +2978,7 @@ static snd_pcm_sframes_t stage_stream(struct stage *st, const struct pair *pair,
     st->frames = (unsigned)size;
 
     if (!g_real_playback)
-        pace_without_device(size);
+        pace_secondary(&st->pace_seen, size);
     return (snd_pcm_sframes_t)size;
 }
 
@@ -2721,8 +3006,16 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
      * loop with master_gain: it is written by the controls shim from the MIDI
      * thread, and sampling it once per flush means every frame of a block is
      * scaled by the same value. Clamped because it arrives over the shared-state
-     * contract rather than from our own arithmetic. */
-    float mirror_gain = clamp01(g_mirror_gain);
+     * contract rather than from our own arithmetic.
+     *
+     * Multiplied by the configured lift, which is the ONLY thing on this port that
+     * puts the mirror above unity. The knob is an attenuator that is flat from 1
+     * o'clock on, so with the lift under it the mirror sits +4 dB above the master
+     * at the knob's unity and rises no further. The product is therefore allowed
+     * past 1.0 on purpose, and what keeps that from folding the waveform is
+     * mirror_saturate() in the loop below: a lifted sample that runs out of
+     * headroom clips, counted as g_mirror_clips. */
+    float mirror_gain = clamp01(g_mirror_gain) * (float)g_cfg.mirror_boost;
     snd_pcm_uframes_t i;
     unsigned long long t0 = g_startup_frames_done;
     unsigned long long mute = (unsigned long long)g_cfg.mute_frames;
@@ -2792,9 +3085,15 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
          * the buffer that mirror_write() picks up is always this block's. It is
          * outside the pair_mapped tests on purpose: the mirror is the master
          * OUTPUT, not a destination for the master PAIR, and must still carry
-         * audio if AUDIO_MAP's master pair is unmapped. */
-        g_mirror_out[i * 2 + 0] = (int32_t)(ol * mirror_gain);
-        g_mirror_out[i * 2 + 1] = (int32_t)(or_ * mirror_gain);
+         * audio if AUDIO_MAP's master pair is unmapped.
+         *
+         * Saturated and counted here rather than inside s24pack(), which cannot do
+         * either: the packers are modular by contract (they must not clamp a raw
+         * word — see s24pack.h), and the mirror is not their only caller. So the one
+         * point that can leave the domain is the one point that enforces it. The
+         * clamp is the safety; the count is the meter. */
+        g_mirror_out[i * 2 + 0] = mirror_saturate((int32_t)(ol * mirror_gain));
+        g_mirror_out[i * 2 + 1] = mirror_saturate((int32_t)(or_ * mirror_gain));
     }
     g_startup_frames_done += size;
 
@@ -2935,10 +3234,15 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
                  g_write_count, (unsigned long)size, out_bytes, (long)written,
                  s_peak_master, (double)master_gain, g_prepare_count);
     } else if (out) {
-        pace_without_device(size);
         /* No card: either one was never opened (a unit booted with the controller
          * unplugged) or it was lost above. Both recover the same way, and this is
-         * the only place a still-running thread already is. */
+         * the only place a still-running thread already is.
+         *
+         * This is the block's own time, the one the other streams ride on: with no
+         * card it is the whole of rbp's clock, and it is a deadline rather than a
+         * sleep so that the block's work comes out of the block's period
+         * (pace_without_device()). */
+        pace_without_device(size);
         reopen_try();
     }
 
@@ -2998,9 +3302,11 @@ snd_pcm_sframes_t snd_pcm_writei(snd_pcm_t *pcm, const void *buffer, snd_pcm_ufr
         /* The capture and the dummy: there is nowhere for this to go. The old code
          * treated any unrecognised handle as the master, which would put an
          * unknown stream onto the master pair; discarding it is the honest answer.
-         * Pace it, though, or rbp spins. */
+         * Pace it, though, or rbp spins — on the block clock, like the staged
+         * streams, so a block that the master or a stage has already paid for is
+         * not paid for twice (pace_secondary()). */
         if (!g_real_playback)
-            pace_without_device(size);
+            pace_secondary(&g_fake_pace_seen, size);
         return (snd_pcm_sframes_t)size;
     }
 

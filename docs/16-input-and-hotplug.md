@@ -28,7 +28,7 @@ nobody has run it yet.
 | 1 | up/down are inverted | **fixed** — the two arrows flipped; the sign itself is the operator's observation, not a measurement |
 | 2 | Enter should be a rotary push | **already was**; it was dead after one use because of the release defect, which is fixed |
 | 3 | `w` = PLAY deck 1, `s` = PLAY deck 2 | **bound**, additive to SPACE/N |
-| 4 | controllers should be hot-swappable | evdev: **fixed and verified** (per device, not whole-set); MIDI: verified on the unit; USB: was already; audio: **fixed in code, still unverified on the unit** ([§4](#4-hot-swap)) |
+| 4 | controllers should be hot-swappable | evdev: **fixed and verified** (per device, not whole-set); MIDI: verified on the unit; USB: was already; audio: **fixed and verified on the unit, 2026-09-28** — the pull that used to slow the track down now comes back sounding right on both of the operator's pulls, and the slowdown was the shim's cardless block clock rather than anything about the swap ([§4](#4-hot-swap)) |
 | 5 | the FLX4 pops/buzzes when rbp first opens the audio | **mute enabled by default** (1500/300) — **not yet heard with a card open**: the restarts on 08:39 and 08:41 ran with no FLX4 on the bus at all |
 | — | **a key release was lost, so a second press did nothing** | **fixed and verified**: a 120 ms press now delivers its release |
 | — | **the keyboard does nothing at all** | **fixed**: one variable chose one map, and under `flx4` no evdev reader was started ([below](#two-selections-not-one)) |
@@ -222,6 +222,34 @@ knobshim2: evdev[41302] /dev/input/event11 'rblive4-vkeyd' appeared; adding it
 Before the fix the device was never seen and every test had to begin with
 `systemctl restart rblive4`.
 
+**On a real USB keyboard the kernel makes that release first, and the reader's
+own synth path is the backup rather than the mechanism** (measured 2026-09-30
+22:59:14, the drill at S8.2). `Backspace` was held down and the keyboard was
+taken away in software (`usbhid/unbind` on `1-1.4:1.0`/`:1.1`, which reaches
+`input_unregister_device()` → `input_dev_release_keys()`, exactly as pulling the
+cable does), at a moment chosen by the log so the finger was still on the key:
+
+```
+knobshim2: kbd: evdev type=1 code=14 value=1 -> 0x420d press
+… 46 × value=2 -> 0x420d ignored           (the kernel's autorepeat while held)
+knobshim2: kbd: evdev type=1 code=14 value=0 -> 0x420d release   ← nobody typed this
+knobshim2: evdev[…] /dev/input/event6 went away (read: No such device); released 0 held key(s), 6 device(s) left
+```
+
+So the ordering is *release, then gone*, which is
+`input_dev_release_keys()` running inside the unregister — and it is measured on a
+**USB HID** device now, not only on the uinput one this was first seen with. The
+reader therefore had an empty table and reported **`released 0 held key(s)`**: the
+count is not a defect signal, and a drill that expects `released 1` is expecting
+the fallback to fire when the kernel has already done the job. The proof that the
+map's latch was cleared is in the word `release` itself — `map_kbd.c` prints
+`act_name[act]`, and that branch (`value == 0 && b->down`) is the only one that
+can clear `b->down` — so the next press of that key cannot be `ignored`. **A
+device number is not a device identity across a replug:** the three interfaces came
+back 5.45 s later with event6/7/8 reassigned to different names (the keyboard
+itself moved from event6 to event8), which is why the reader adds by name and
+`kbd_devices()` counts rather than indexes.
+
 **The mouse pointer is a separate path and was never broken.** `fbshim.so`'s
 `pointsrc.c` holds one absolute device, rescans when that one dies, and clears its
 touch state — but it is one device at a time and is unaffected by what the evdev
@@ -338,7 +366,10 @@ replay should reproduce exactly.
 
 The last line is the startup mute being re-armed, because the card thumps on a
 reopen exactly as it does on an open. It costs 1.8 s of silence per replug, which
-is a choice against a pop the operator has heard. The recovery line preceding it
+is a choice against a pop the operator has heard — and, as of 2026-09-30, a pop
+they no longer hear: asked what the startup thump sounded like now, they answered
+*"that audio popping thing is gone"* ([09](09-audio.md#startup-transient)). The
+recovery line preceding it
 is what makes it unambiguous, where before it could have been the silent path
 ([§5](#5-the-pop-when-rbp-first-opens-the-flx4s-audio)).
 
@@ -370,17 +401,42 @@ access this card refuses, leaving the handle configured and refusing every write
 Both are in [09](09-audio.md). The note and its "restart" advice survive for the
 one case they are true in — a card that really is 2-channel.
 
-**The cold half is measured; the mid-play pull is still owed, and there is one hole
-that is deliberately not fixed.** The cardless boot and the late plug-in were run
-on the unit on 2026-09-27 (S4.10/S4.11 in [13](13-raspberrypi4.md)) and the
-sequence quoted above is that run's. S8.6 — pull the FLX4 **mid-play**, expect
-`MASTER LOST` **once** rather than per block, then on replug `MASTER RECOVERED` and
-`written=64` with a non-zero `peak_m` — is the row that remains unrun. Separately,
+**Both halves are now measured, and the mid-play pull turned out to be a defect of
+its own — one that this section's expectations could not have described.** The
+cardless boot and the late plug-in were run on the unit on 2026-09-27
+(S4.10/S4.11 in [13](13-raspberrypi4.md)) and the sequence quoted above is that
+run's. S8.6 — pull the FLX4 **mid-play**, expect `MASTER LOST` **once** rather
+than per block, then on replug `MASTER RECOVERED` and `written=64` with a non-zero
+`peak_m` — **passed on 2026-09-28**, twice, on the operator's own pulls: one
+`MASTER LOST` per pull (`after 181536 write(s) on that handle`, then `after
+222629`), the reopen tried once a second with `res=-19` while the card was away,
+and on replug `MASTER RECOVERED` with the whole negotiation replayed and `writei …
+written=64 peak_m=159251`. Nothing here needed a restart. Separately,
 `snd_ctl_open` hands rbp a real `snd_ctl_t` for the card, which is just as stale;
 nothing recovers it, and `snd_ctl_pcm_info` never forwards, so if rbp re-probes
 the control interface it may learn nothing. A `grep -c snd_ctl_open` after a
 replug settles whether it is inert — if the count does not grow, rbp never asks
 again and the hole does not matter.
+
+**The symptom the operator reported — pulling the FLX4 *while a track is playing*
+slows the audio down rather than stopping it — was not a lost master at all, and
+it was neither of the two candidates first written here.** It was the shim's own
+cardless block clock. With no card, the only thing that can make a block take a
+block's time is the sleep the shim takes on rbp's behalf, and that sleep was a
+whole period per block *on top of* the block's own work and its wakeup latency,
+so the engine ran at **~627 blocks/s against real time's 689** — and the HDMI
+mirror, fed one block per master block, inherited the clock exactly and reported
+it as silence: **7.53–7.63 frames of pads per 64-frame block**, against the ~7 a
+*second* two crystals differ by. A slower engine, not a retuned tempo and not a
+differently-clocked device — every `set_rate_near req=44100` in the preserved log
+was accepted (`res=0 rate=44100`), which is why that log could not settle it.
+`pace_without_device()` is now a deadline per block rather than a sleep per block
+(S4.10), and the counter that reports this shape is one the logs already carry:
+the mirror's `pads`/`padframes`, where ~7 a second is the drift correction doing
+its job, and anything near a thousand times that with `writei` frozen is this
+defect ([09](09-audio.md#two-clocks-no-resampler)).
+After the fix the cardless mirror pads **0.0096 frames per block** — the
+card-present floor — and the operator's verdict on both pulls was by ear.
 
 ## 5. The pop when rbp first opens the FLX4's audio
 
@@ -481,8 +537,10 @@ Two traps that cost time here, both worth knowing before writing another one:
 **Writing *into* a device, not reading from it.** `vkeyd.py` creates its own
 input device, which is right for keys. For the *pointer* the panel's own node can
 be written to instead: `work/poke.py` writes `struct input_event`s to
-`/dev/input/event3` and the kernel's injection path feeds them to every client of
-that device, so pointsrc's reader receives them and the whole chain runs —
+**the panel's own node** — `/dev/input/event0`, `TSTP CTouch`, on this unit; the
+number is not fixed, so read it from the `pointsrc: absolute device …` line the
+shim writes at attach — and the kernel's injection path feeds them to every client
+of that device, so pointsrc's reader receives them and the whole chain runs —
 kernel → pointsrc → `point_xform_abs()` → `tscfake_emit()` → rbp — rather than
 only its last hop. That is what makes a shim-side change measurable without a
 finger, and it is how the x reflection's fix was proven: the *same* injection
@@ -504,7 +562,12 @@ Three things about writing into an evdev node cost time here:
   grew `move:` for it (a position with no touch, to prime the value), and it
   prints back every event it read on the same fd — so an absent `MT_X`/`ABS_X`
   line means *the position was dropped*, not that rbp ignored a touch. **Read the
-  echo, not the screen alone.**
+  echo, not the screen alone.** `drag:X0,Y0,X1,Y1[,STEPS]` is the same lesson
+  applied to a gesture: it primes both axes first, then presses at the start and
+  walks to the end, nudging any step that would otherwise repeat the previous
+  position on both axes — because a swipe is press → position changes with the
+  touch still down → release, and a dropped step shortens the gesture silently.
+  It is what measures the top menu's swipe ([07](07-touch.md#the-swipe-down-top-menu-menu_zonec-menu_drawc)).
 * The per-event filter is per **device**, not per client, which is why that echo
   is a valid self-check even though a client's read queue is private. The struct
   is 16 bytes on this unit (two 32-bit timeval fields + u16 type + u16 code + s32
@@ -535,9 +598,16 @@ fix. As of 2026-09-27 the file holds:
   it still writes a line per keypress and is not what to measure latency under.
 * `RB_MIDI_DUMP=/tmp/flx4.dump` — records every sequencer event the shim
   receives, so a control whose note number is only *published* is measured rather
-  than assumed. Its one open question is note 66, the SHIFT + browse push
-  ([15](15-flx4-midi.md)); a real press from the panel settles it, and the dump
-  is what makes that a one-press answer instead of an argument.
+  than assumed. Its open questions were note 66 (the SHIFT + browse push) and,
+  since 2026-09-29, the two shifted LOAD notes 104 and 122
+  ([15](15-flx4-midi.md#the-shift--load-bindings-and-the-edge-rbp-needs-that-a-tap-does-not-send)).
+  **Note 66 is answered** — a press from the panel settled it on 2026-09-30, and
+  the dump is what made that a one-press answer instead of an argument; **104 and
+  122 are answered too**, the same day, by the operator's own presses, which
+  brought up both screens. So no note number in the map now rests on the published
+  list alone — and the dump caught both of theirs on the wire too (`note=104` and
+  `note=122`, ch 6, vel 127, with no `vel=100` injected event anywhere in the
+  file), so nothing here rests on the screen alone.
 * `RB_POINT_DEBUG=1` — **removed again on 2026-09-27, after the pass it was kept
   for**, so expect to re-add it rather than find it on. It is the pointer path's
   per-event line, which since this date prints **both ends of the transform**
@@ -606,15 +676,17 @@ here:
 * **Two surfaces can drive the same rbp key.** The keyboard and the FLX4 map
   overlap on PLAY, CUE, SYNC, LOAD, SOURCE, BACK and the selector, each with its
   own held state. Holding the FLX4's PLAY and tapping SPACE therefore delivers two
-  presses and one release, and whether rbp's KeyManager acts on the redundant press
-  is not knowable from the source. **The operator ran it on 2026-09-26 and reported
-  playback undisturbed — a pass, so no aggregator was built and none is owed**
-  ([13](13-raspberrypi4.md) S8.5). One thing that pass does not carry is a log: the
-  same reboot wiped `/tmp`, and no surviving window contains a `KEY_SPACE` event at
-  all, so the result rests on the operator's report rather than on a record. The
-  corroboration, if it is ever wanted, is one press of `space` with the log live.
-  Absent that, the aggregator stays **unbuilt and unruled-out** — and it must not be
-  built speculatively.
+  presses and one release — and **that the redundant press is acted on is now
+  measured rather than wondered about** (2026-09-30): three PLAY press edges (two
+  on the controller, one from `space`) produced **three transport toggles, one for
+  one**, read off the audio as music → silence → music → silence
+  ([13](13-raspberrypi4.md) S8.5). rbp keeps **no per-(keycode, channel)
+  aggregation**, so `space` and the FLX4's PLAY are one press delivered twice —
+  which is also why the 2026-09-26 report ("playback undisturbed") was parity
+  rather than gating, an even number of edges netting the state it started in.
+  **The aggregator stays unbuilt, and it is now ruled *out* rather than merely
+  unruled-in**: it would make the keyboard's PLAY inert whenever the controller's
+  is held, and it must not be built speculatively.
 
 **Nothing here was fixed by the `kbd` map in the end.** The gap it was working
 around — no SOURCE binding — is closed on `flx4` now, by two bindings of its own:

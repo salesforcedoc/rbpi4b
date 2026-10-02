@@ -39,7 +39,16 @@ void add_note(int rch, int note, int key, int sch)
      note_map[note_map_n].key = key;
      note_map[note_map_n].sch = sch;
      note_map[note_map_n].pressed = 0;
+     note_map[note_map_n].repeat = 0;
      note_map_n++;
+}
+
+void add_note_repeat(int rch, int note, int key, int sch)
+{
+     if (note_map_n >= CTRL_NKEYS)
+          return;
+     add_note(rch, note, key, sch);
+     note_map[note_map_n - 1].repeat = 1;
 }
 
 void add_abs(int rch, int cc, int key, int sch)

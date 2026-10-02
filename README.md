@@ -1,6 +1,6 @@
 # rblive4
 
-[![Instagram: @i.erhan.es](https://img.shields.io/badge/Instagram-%40i.erhan.es-E4405F?logo=instagram&logoColor=white)](https://instagram.com/i.erhan.es)
+Credit to: [![Instagram: @i.erhan.es](https://img.shields.io/badge/Instagram-%40i.erhan.es-E4405F?logo=instagram&logoColor=white)](https://instagram.com/i.erhan.es) for the original base of this code.
 
 **Run the Pioneer DJ XDJ-RX3 *rekordbox* standalone player on a Raspberry Pi 4B.**
 
@@ -178,7 +178,9 @@ it says so; [docs/README](docs/README.md) explains the convention.
         │                    ( /opt/rblive4/rbx3-run )
         │
         ├── display  : rebuilt DirectFB fbdev module (the present path)
-        ├── pointing : fbshim.so    (evdev pointer → RX3 tsc2007 protocol)
+        ├── pointing : fbshim.so    (evdev pointer → RX3 tsc2007 protocol;
+        │                            also sends rbp's QUANTIZE keycode for the
+        │                            deck boxes rbp draws but does not bind)
         ├── controls : knobshim.so  (DDJ-FLX4 MIDI → rbp keycodes + LEDs)
         ├── audio    : audioshim.so (JUCE/ALSA → the FLX4's USB audio)
         ├── usb      : usb-watch.sh + native DeviceSQL import

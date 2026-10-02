@@ -516,9 +516,18 @@ static void check_leds(void)
            "loopin/loopout/autoloop are %d/%d/%d, were 37/38/39",
            n->n_loopin, n->n_loopout, n->n_autoloop);
 
-     CHECK(n->pad_ch == 4 && n->n_pad_first == 15,
-           "pads are notes from %d on channel %d, were 15 from 4",
-           n->n_pad_first, n->pad_ch);
+     CHECK(n->pad_ch == 4 && n->pad_ch2 == 5 && n->n_pad_base[0] == 15,
+           "pads are notes from %d on channels %d/%d, were 15 from 4/5",
+           n->n_pad_base[0], n->pad_ch, n->pad_ch2);
+     /* All four, and all the same one: this surface's pads keep their notes
+      * across pad modes. That is what the old single `n_pad_first = 15` said, and
+      * pinning it here is what stops the FLX4's per-mode table being copied onto
+      * a surface whose pads have never been measured moving. */
+     for (int m = 1; m < 4; m++)
+          CHECK(n->n_pad_base[m] == n->n_pad_base[0],
+                "the SC Live 4's pad base for mode %d is %d, not %d: its pads "
+                "have never been measured re-addressing", m, n->n_pad_base[m],
+                n->n_pad_base[0]);
      CHECK(n->pad_enc == LED_ENC_PRIME_6BIT,
            "the pad encoding is %d, was LED_ENC_PRIME_6BIT (%d)",
            n->pad_enc, (int)LED_ENC_PRIME_6BIT);

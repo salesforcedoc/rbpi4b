@@ -111,9 +111,8 @@ port.
 | `n` / `m` / `,` | the same three | deck 2 |
 | `w` / `s` | `0x4101` K_PLAY | deck 1 / 2 |
 | `1` / `2` | `0x4311` K_LOAD | deck 1 / 2 |
-| `5` / `6` / `7` | `0x0201` K_SOURCE / `0x0202` K_BROWSE / `0x0203` K_TAGLIST | global |
+| `5` / `6` / `7` / `8` / `9` | `0x0201` K_SOURCE / `0x0202` K_BROWSE / `0x0203` K_TAGLIST / `0x0204` K_PLAYLIST / `0x0205` K_SEARCH | global |
 | `0` | `0x0206` K_MENU | global |
-| `8` / `9` | **no rbp keycode exists** — PLAYLIST / SEARCH. Declared, so the press is logged by name, but nothing is sent | — |
 | `↑` / `↓` | `0x420c` K_SELECTOR, rotate ±1 (repeats while held) | global |
 | `Enter` | `0x420c` K_SELECTOR, press/release | global |
 | `Backspace`, mouse right button | `0x420d` K_BACK | global |
@@ -122,18 +121,54 @@ port.
 
 The browse keys sit on the rest of the digit row on purpose: `1`/`2` are LOAD, so
 the whole browse surface is one hand's worth of keys that need no mnemonic.
-`5`/`6`/`7`/`0` are the four rbp has keycodes for.
+All six browse keys now exist in `rbp_abi.h`.
 
-**`8`/`9` are declared rather than absent, and that is a deliberate half-step.**
-rbp has all six controls — the labels are in the binary as `Source`, `BROWSE`,
-`TAGLIST`, `PlayList`/`PLAYLIST`, `Search` and `menu` — but `rbp_abi.h` carries a
-keycode for only four of them, and the `MAPPING.md` it cites for the `0x020x`
-block is not in this repository. So the two rows exist with key `0` (the
-`ctrl_map.h` "a control rbp has no code for"), which makes a press *visibly*
-pending: `kbd_build()` says so at startup whether or not `KNOB_VERBOSE` is on,
-and under it the trace names the control. **The two unclaimed slots in that block
-(`0x0204`, `0x0205`) are a plausible-looking trap, not an answer** — measure one
-before writing it, and move the row up with the other four when you do.
+**`8`/`9` were the last two to be filled in, and only by measurement.** rbp has
+all six controls — the labels are in the binary as `Source`, `BROWSE`, `TAGLIST`,
+`PlayList`/`PLAYLIST`, `Search` and `menu` — but for one release `rbp_abi.h` had a
+keycode for only four of them, so the two rows existed with key `0` (`ctrl_map.h`'s
+"a control rbp has no code for"), which made a press *visibly* pending: `kbd_build()`
+said so at startup whether or not `KNOB_VERBOSE` was on, and under it the trace
+named the control. The two unclaimed slots in that block (`0x0204`, `0x0205`) were
+left as "a plausible-looking trap, not an answer" until the top menu's bench knob
+(`POINT_MENU_KEY_EXTRA`, below) put them on the wire on 2026-09-29:
+
+* **`0x0204` K_PLAYLIST** switches the browse view to the PLAYLIST view — the left
+  sidebar becomes BANK 1..4 + DELETE.
+* **`0x0205` K_SEARCH** opens the SEARCH view: the list area is replaced by a
+  search pane with an on-screen QWERTY keyboard.
+
+Both were sent from the blank browse screen *and* from the SOURCE screen and landed
+on the same screen each time — `0x0205` pixel-identically, `0x0204` differing only
+in the bottom 16-row hint band. The negative control is in the same runs: with the
+two buttons on their shipped `0` sentinel, a tap changed nothing at all, twice.
+`rbp_abi.h`'s `K_PLAYLIST`/`K_SEARCH` block carries the runs in full.
+
+**`0` K_MENU is real but narrow, and that is worth knowing before doubting it.**
+Measured the same day: from the SOURCE screen it toggles the MY SETTINGS panel
+(263,596 px each way, and still open 3 s later, so a toggle and not a timeout); from
+the BROWSE, TAG LIST and PERFORMANCE screens it changes nothing at all — 0 px, full
+frame. A MENU press that appears to do nothing is the screen it was pressed on.
+
+**The same keycode carries a second meaning, and rbp's own timer decides which.**
+Measured 2026-09-29 through the keyboard path, which sends `0x0206` on `CH_GLOBAL`
+exactly as the panel does: a press of 200 or 300 ms changes nothing (587 px of drift),
+**400 ms and up reach UTILITY** — ~804,000 px, the whole screen, from the SOURCE
+screen and from BROWSE — and a 16-band md5 sequence at ~200 ms resolution shows one
+whole-screen change at t ≈ 455 ms with no menu before it. So the threshold is
+**between 300 and 400 ms**, it lives in rbp, and nothing in the shim should try to
+reproduce it: `menu_zone.h`'s `MZ_HOLD_FINGER_MS` (350) is what the *finger* must do
+and `MZ_HOLD_KEY_MS` (500) is how long the panel then holds the key, so rbp's timer
+sees a hold whichever side of its threshold the finger landed on
+([07](07-touch.md#the-press-and-hold-and-the-clock-that-decides-it) has the unit
+evidence, including the clock that measures the finger). **Only MENU has a second
+meaning**: the other five were held 500 ms and compared with their own taps at a 2×2
+block mean — SOURCE 318, BROWSE 357, TAG LIST 243, PLAYLIST 195, SEARCH 0 differing
+blocks, all inside rbp's drifting deck rows — so a hold of them lands exactly where a
+tap lands, and the panel holds them too rather than carrying a per-button table.
+**The finger that has to do the 350 ms is the operator's, and they have now done it**:
+asked whether the delay was right, they said *"yes right amount of delay"*
+(2026-09-29), so the constant ships as measured and felt rather than as a guess.
 
 One kernel-ABI collision is worth knowing before editing the table: **`REL_WHEEL`
 is 8 and `KEY_7` is 8** — the same number in two namespaces. The binding loop
@@ -158,9 +193,12 @@ It is not a degraded version of the FLX4 map:
   same thing again: it is built once, and the front end logs that the MIDI map has
   no event handler rather than leaving the silence unexplained.)
 * **No panel.** There is no keyboard LED and no mouse meter, so there is nothing
-  for `rbp_led.c`/`rbp_vu.c` to drive. (`RB_LED_VU=0` is the setting for a
-  meterless target; the master-cue assertion `vu_thread` makes is unrelated and
-  still runs.)
+  for `rbp_led.c`/`rbp_vu.c` to drive. That is the *map's* answer rather than the
+  flag's — a surface whose table declares no meter row gets no hook installed and
+  no traffic whatever `RB_LED_VU` says, while the FLX4's table *does* declare one
+  (a host-driven level on CC 2), which is why its meter is live as of 2026-10-01
+  and `RB_LED_VU=0` is only a manual OFF switch now. The master-cue assertion
+  `vu_thread` makes is unrelated and still runs on every target.
 * **No rbp-side startup of its own.** `startup()` logs and returns: the JP21
   map's routing and Sound Color FX defaults exist for a surface with DECK/LINE
   switches and a Sweep knob, and the master level at unity is re-asserted for
@@ -353,7 +391,7 @@ The flags:
 | `JOG_VERBOSE=1` / `TEMPO_VERBOSE=1` | raw and normalised jog / pitch values side by side |
 | `LED_VERBOSE=1` | log every LED change (`led deckN noteM on/off`) |
 | `LED_DISABLE=1` | do not drive the panel LEDs at all |
-| `LED_VU=0` | skip the meter hook and its sends entirely (the default; the master-cue assertion still runs — see the VU section) |
+| `LED_VU=0` | manual OFF switch for the meter bridge (`RB_LED_VU` ships `1`). It is **not** a statement about the target: a surface whose map declares no meter row gets no hook installed and no traffic whatever this says, and the FLX4's map declares one — see the VU section |
 | `LED_VU_SEGMENTS=N` | rbp's meter height as the rescale assumes it (default 11) |
 | `LED_PADS=0` | do not illuminate the pads |
 | `PAD_BRIGHT=1` | bright range for pad illumination |
@@ -413,7 +451,7 @@ master-cue function instead (see below).
 | FWD | note 4 | `0x0201` K_SOURCE |
 | Browse knob push | note 6 | `0x420c` K_SELECTOR |
 | Browse knob turn | CC 5 | `0x420c` rotate |
-| MENU | note 13 | `0x0206` K_MENU |
+| MENU | note 13 | `0x0206` K_MENU — narrow by measurement: it toggles MY SETTINGS on the SOURCE screen and changes nothing (0 px, full frame) on BROWSE, TAG LIST and PERFORMANCE, so a MENU button that "does nothing" is the screen it was pressed on; **held** 400 ms or more it reaches UTILITY from any screen, on rbp's own timer (between 300 and 400 ms, measured). **UTILITY itself is the selector's screen, not the touch screen's** — a finger does nothing there (0 px on three targets, 2026-09-29) while the browse knob and its push drive it ([07](07-touch.md#utility-is-not-a-touch-screen)) |
 | VIEW | note 14 | `0x0202` K_BROWSE |
 | Crossfader | CC 14 | `0x6017` K_XFADER |
 | Main Vol | CC 20 | `g_master_gain` — audioshim, **ch0/1 only** |
@@ -485,6 +523,12 @@ The panel sends the position as the **note-on velocity of note 40**
 So: **Ch1 → 0, Ch2 → 1, Main → 5**. Ch3/Ch4 are inert — rbp has only two
 players, so there is nothing to route them to.
 
+**The FLX4's own lever has no Main position** — it is CH1 / CH2 / CH1&CH2 — and
+its third position is sent as **5** for the same reason Main is: 5 is the only
+value that means both decks at once, and an FLX4 operator reaching for "both" is
+asking for what the RX3's Main gives them. See
+[15](15-flx4-midi.md#the-map) for the lever's two-note encoding.
+
 #### Effect select
 
 `onEv_BeatEffectType(SW_BFX_TYPE)` is a **14-position switch** whose positions
@@ -530,24 +574,80 @@ PlayerInnards::execAutoBeatLoop(short padIndex, bool)        @0x300c64
   DjEngineIF::setAutoBeatLoop(ch, StAutoBeatLoop{numer,denom}, int, bool, bool)
 ```
 
-Size tables (base `0x4d3850`, codes resolved to beats):
+Size tables (base `0x4d3850`, codes resolved to beats). **The numbers below are
+as the table stores them, and they are the RECIPROCAL of the size the pad
+actually produces** — measured on the unit on 2026-10-01 by reading rbp's own pad
+grid off the framebuffer, all eight cells of two independent rows:
 
-| selector | 8 sizes |
-|---|---|
-| pad mode 1, `[this+0x7a] == 0` | **4, 2, 1, 1/2, 1/4, 1/8, 1/16, 1/32** |
-| pad mode 1, `[this+0x7a] != 0` | 4/3, 1, 2/3, 1/3, 1/5, 1/6, 1/7, 1/9 |
-| pad mode 2 (SLIP) | 16, 8, 4, 2, 1, 1/2, 3, 4/3 |
+| selector | as the table stores it | what the pads actually give (measured) |
+|---|---|---|
+| pad mode 1, `[this+0x7a] == 0` | 4, 2, 1, 1/2, 1/4, 1/8, 1/16, 1/32 | **1/4, 1/2, 1, 2, 4, 8, 16, 32** |
+| pad mode 1, `[this+0x7a] != 0` | 4/3, 1, 2/3, 1/3, 1/5, 1/6, 1/7, 1/9 | (not measured) |
+| pad mode 2 (SLIP) | 16, 8, 4, 2, 1, 1/2, 3, 4/3 | **1/16, 1/8, 1/4, 1/2, 1, 2, 1/3, 3/4** |
+
+Both measured rows are the stored row reversed term for term, eight out of eight,
+so the pair is almost certainly `StAutoBeatLoop`'s `{numer, denom}` read the other
+way round when this table was transcribed — but the *measurement* is what the
+right-hand column rests on, not that explanation. **The consequence is the one
+that matters:** rbp's fresh AUTO BEAT LOOP bank starts at a **quarter** beat, so a
+4-beat loop is **pad 5**, not pad 1 — pad 8 engaged a loop whose on-screen badge
+read `32`, which is what ties the labels to the applied size. The SLIP row's
+measurement is the same grid the mode button draws (SLIP LOOP cells 1/16 … 3/4),
+read the same way.
 
 `ui::PlayerInnards` is **not** reachable via `IUiObjManager::getPlayer()` (that
 returns `ui::Player`, channel byte 1/2). It is found by scanning writable
 mappings for its vptr, which is **`vtable+8`** (`0x4d1960`), then validating
-`+0x26` (channel 2/3), `+0x74` (pad mode) and `+0x30` (engine ptr).
+`+0x26` (channel 2/3), `+0x74` and `+0x30` (engine ptr). (`+0x74` was believed
+to be the pad-mode byte; the 2026-09-30 measurement below falsifies that label —
+the validation still discriminates the struct, but nothing should read that byte
+as the mode.)
 
 The pad keycode (`K_PAD1..8`) is only a beat loop **while rbp is in its
 AUTO/LOOPS pad mode**; `execAutoBeatLoop()` called directly from the shim's MIDI
 thread does not run the loop. The whole path is therefore gated behind
 `BEATLOOP=1`; the reliable workflow is to select rbp's LOOPS pad mode and drive
 the pad keycodes from the knob.
+
+On the FLX4 that mode is **one button press away, and the press works** — the
+operator's own eyes settled it on 2026-09-30, and their own fingers on 2026-10-01.
+**The binding is POSITIONAL and the unit's printed labels are deliberately
+ignored.** rbp's UI is an XDJ-RX3's, whose four pad-mode buttons run HOT CUE, BEAT
+LOOP, SLIP LOOP, BEAT JUMP — rbp's modes 0, 1, 2, 3 in that order, which is also
+how `map_jp21.c` binds the SC Live 4's four. This unit's row is HOT CUE, PAD FX 1,
+BEAT JUMP, SAMPLER, so each button selects the mode that occupies **its position**
+on the RX3: PAD FX 1 (note 30) stands in for BEAT LOOP, and **the 3rd button (its
+BEAT JUMP, note 32) gives SLIP BEAT LOOP while the 4th (its SAMPLER, note 34)
+gives BEAT JUMP** — the opposite way round from what those two labels suggest. The
+operator asked for exactly this on 2026-10-01: *"ignore the names on the FLX4, it
+should just map to the way the RX3 behaves by position for muscle memory"*. The
+**pad bases do not move** when the keycodes do: they follow the unit's own labels,
+and all four bases this map binds send the same `K_PAD1..8`, because rbp's pad
+keycodes mean whatever rbp's current mode says they mean — so what is rewritten is
+the base→mode correspondence (base 16 → mode 1, base 32 → mode 2, base 48 → mode
+3), not the pad rows.
+
+**rbp does act on every one of those keycodes.** One button per capture, read off
+rbp's framebuffer: note 27 puts deck 1's pad grid on `HOT CUE` (A–H), note 30 on
+`BEAT LOOP` (1/4 … 32), note 32 on `SLIP LOOP` (1/16 … 3/4) and note 34 on
+`BEAT JUMP` — the last two measured 2026-10-01 on the operator's own presses, with
+a live MIDI dump as the second witness (vel 127 is the panel's own) and rbp's
+pad-mode byte read continuously alongside (`work/padmode.py`). Note **32** is
+worth keeping in mind: it is the 3rd mode *button* on ch 0 and pad 1 of base 32 on
+ch 7, and only the channel tells the two apart.
+
+What does *not* move is `[this+0x74]`: polled 1.1 M times across all four mode
+buttons while the grid verifiably switched, it never left 0, so the earlier
+reading of this file — "the mode byte stays put" — was true of a byte that is not
+the mode. **The source of truth is `UiGetPadMode(ENUM_DECK)` @ `0xfd3cc`** (see
+[15](15-flx4-midi.md)), which needs no scan and no injection. The half still
+broken is the **feedback**: the unit's pad-mode LEDs are never driven, because
+`struct led_notes` has no field for them, so the mode changes silently, and the
+only thing the repair still needs is those four LED note numbers. The measurement
+is in S5.7 of [13](13-raspberrypi4.md). What a second press of the *same* button
+does is not a no-op: it takes rbp's pad-mode byte to a fifth value, `4`, through
+the size-bank path — a stable value and not a corrupt read, but not one of the four
+modes either ([15](15-flx4-midi.md#pads-list-ch-810--rch-79)).
 
 ### Not mapped (JP21)
 
@@ -585,9 +685,14 @@ not a dark LED but a phantom control press.
 
 ### How a controller's LEDs are addressed
 
-MIDI: Note On/Note Off with the velocity encoding colour/brightness
+MIDI: Note On with the velocity encoding colour/brightness
 (`(r<<4)|(g<<2)|b`, 2 bits per channel; `0x7F` = bright for the simple transport
-LEDs, Note Off = dark). On the previous target the surface was rawmidi
+LEDs, **Note On with velocity 0 = dark**). Dark is never sent as a Note Off
+message: the FLX4's LED hardware ignores a real Note Off outright (measured
+2026-10-01, see [15](15-flx4-midi.md)), so `midi_io.c`'s `midi_note()` builds a
+Note On for both edges — which is also the MIDI spec's own spelling of a Note Off,
+so it stays correct for the previous target. On the previous target the surface
+was rawmidi
 `hw:0,0` / seq `16:0`, and the two were interchangeable:
 
 ```sh
@@ -688,6 +793,19 @@ rbp keeps all LEDs in one table, so a shim can mirror it directly:
 State values: `0` = off, `1` = solid, `2` = blink, `3` = slip-mode dimming
 applied to whole groups.
 
+**`3` is not only that, though — measured 2026-10-01, and it is worth knowing
+before reading `3` as slip anything.** On the **pads**, `3` marks the *engaged*
+beat-loop pad: in AUTO BEAT LOOP all eight pads of a deck sit at `1` and the one
+whose loop is running goes to `3`, moving when the loop moves (pad 5 → id 22,
+then pad 7 → id 24 with id 22 back to `1`) and clearing when it is let go. That
+is one pad, not a whole group, and there is no slip loop in the picture. So `3`
+is best read as **"this control is the active one"** and its exact rendering
+decided per surface: the FLX4's deck LEDs count it as on, and its **pads blink**
+it (the panel has no brightness — all 350 LED rows are `0x00`/`0x7F` — so
+dimmer-than-its-neighbours cannot be sent). Record:
+`work/dumps/ledstat-2026-10-01-pad-engaged-loop.txt`, and
+[15](15-flx4-midi.md) for the pad semantics.
+
 LedStat id → control map (the `uif::LedDef::ID` numbering used by
 `PcControlLedData::LedDefID2Text` does not line up):
 
@@ -755,41 +873,56 @@ The master meter comes from rbp's own master meter rather than the audio shim's
 peak whenever the hook is capturing it, with the Main Vol applied in dB, so
 master and channels read consistently.
 
-### On the FLX4, whose meter is a different kind
+### On the FLX4, whose meter is a value rather than a bitmask
 
-The heading here used to read "which has no meters", and that is wrong: Pioneer's
-list documents a **CH LEVEL METER on CC 2**. What is true is that it is a
-*continuous value* (ramped `0x26`-`0x7F` across green/orange/red) while this
-bridge drives rbp's 11-segment **bitmask**, so one cannot be fed to the other
-without a new bridge — and the ramp has not been measured on the unit
-([15](15-flx4-midi.md#the-leds)).
+The heading here used to read "which has no meters", and then "whose meter is a
+different kind"; **both are wrong, and the second one only described the state
+before the bridge was finished.** Pioneer's list documents a **CH LEVEL METER**,
+and it is **host-driven**: the host sends **CC 2**, one per deck channel (0 and
+1), with a **level** in `0x26`..`0x7F` — below `0x26` is dark and it lights
+bottom-up — banded Green1 `0x26`-`0x40`, Green2 `0x41`-`0x56`, Orange1
+`0x57`-`0x64`, Orange2 `0x65`-`0x76`, Red `0x77`-`0x7F`. The unit does not send
+it. It is **pre-fader**, like rbp's, and it has **no master meter**: the list
+gives no second address for one, so `meter_master_ch` stays `-1` and the master
+CCs are never written on this target.
 
-`RB_LED_VU=0` (the shim's own default is on, because the SC Live 4 has meters),
-and that does more than silence output: `install_meter_hook()` patches rbp's
-**machine code**, so where the bridge cannot read the meter the patch is **not
-installed at all** — no `MonoLvMeter` prologue hook, no trampoline, no meter CCs,
-and therefore no `led_query_absolute()` either. Nothing polls rbp's meters when
-the answer cannot be displayed. `VU_TEST`/`VU_DEBUG` are diagnostic overrides of
-the *output* only; they do not bring the hook back.
+**That is a real difference from the SC Live 4, and it is a difference in the
+*encoding*, not in whether the bridge works.** The Prime wants a **segment
+bitmask** (`(1 << n) - 1`); the FLX4 wants a **level**. The *kind* is read from
+the map's own meter row (`meter_enc`), which is exactly the asymmetry this
+section used to describe as a gap: the numbers are no longer hard-coded in
+`rbp_vu.c` but come from the selected surface's `struct led_notes`
+(`meter_ch_first`, `n_meter_cc`, `meter_enc`, `meter_pre_fader`,
+`meter_master_ch`), and `METER_ENC_FLX4_LEVEL` anchors each of the six steps at
+its own band's bottom so the colour changes land where the document puts them.
+The **pre-fader** half matters too: the fader taper the Prime's meters get is
+applied only where the surface's own meter is post-fader, which the FLX4's is
+not. The band *boundaries* above are still the list's published values — what is
+measured is that the wiring carries them.
 
-What `LED_VU=0` deliberately does **not** skip is engine setup that has nothing
+**It is live, and the operator's own eye settled it (2026-10-01).** `RB_LED_VU`
+ships `1`; with `VU_TEST=1` sweeping the steps, the operator confirmed both
+channel meters stepping on the panel — which is the only thing that settles a
+meter, since a successful `midi_cc()` proves the message left the shim and
+nothing more. The startup line names the whole row: `VU bridge up: channels CC 2
+on ch 0/1 pre-fader, master CC -1/-1 on ch -1 (absent)`. `VU_TEST`/`VU_DEBUG` are
+diagnostic overrides of the *output* only.
+
+**What `LED_VU=0` actually means now.** It is a **manual OFF switch** on the meter
+bridge, not a statement about the target: a surface whose map declares **no meter
+row** gets no hook installed and no traffic whatever the flag says, and the FLX4's
+map declares one. So where the hook *is* installed the patch is up, and where it
+is not the reason is the map and not this unit. What it deliberately does **not**
+skip is engine setup that has nothing
 to do with meters: `vu_thread` still waits for rbp's mixer (`mixer_engine()`,
 which is how it knows the engine exists at all) and asserts the **master cue**
 and **stereo cue mode**, then returns. That is engine setup rather than meter
-work, so the meterless target must still get it, and it belongs to the thread
+work, so a surface with no meter row must still get it, and it belongs to the
+thread
 that waits for the mixer rather than to a map: rbp has no PFL keycode, and on
 the FLX4 — which *does* have a MASTER CUE button, bound in the map — a startup
 assertion from the map would be a second writer fighting the operator for the
 same engine state.
-
-**`rbp_vu.c` still holds the same doctrine violation the LED bridge just shed.**
-It hard-codes the SC Live 4's meter numbers — `midi_cc(15, 32/33, …)` and
-`midi_cc(m - 1, 10, …)` at `rbp_vu.c:317-327` — while `rbp_led.c` now takes every
-number from the selected map's table. Nothing is *wrong* on this target today,
-because `RB_LED_VU=0` means those sends never run; but the numbers belong in the
-map for the same reason the LED ones did, and a meter bridge (a value ramp rather
-than a bitmask) is what would force the move. Recorded here so the asymmetry is a
-known debt rather than a surprise.
 
 ## Key gestures added by the port
 
@@ -806,6 +939,156 @@ just an `event()` handler that sends a keycode rbp already understands:
 The SYNC hold sends nothing until the threshold is reached; sending the press
 early and suppressing the release would leave rbp with a stuck SYNC press and
 trigger its long-press action (**instant double**).
+
+## The QUANTIZE tap — a keycode rbp already has
+
+One gesture in this tree is not a map's. A press on either deck's on-screen
+QUANTIZE box is turned into `0x410b` `K_QUANTIZE` by the **pointer** path
+(`pointsrc.c` → `touch_zone.c` → `rbp_key.c`), because that widget is the one
+part of the performance screen rbp draws and does not bind to a touch of its own.
+The keycode, the binary reading it comes from, and the rectangle — with the one
+screen where that rectangle is already rbp's — are in
+[07 — Touch / pointing](07-touch.md#the-two-deck-quantize-boxes-touch_zonec).
+What belongs here is why it is a keycode and not an engine call.
+
+`PlayerInnards::onKey_Quantize` @ `0x3028bc` never looks at the keycode: it takes
+the deck from its own channel, flips
+`DjEngineIF::setDeckQuantizing(ch-1, !isDeckQuantizing(ch-1))`, and then calls
+into `IPlayerSetting` — and that last call is what repaints the widget. The
+engine-only route (the first one considered) does the audio half and leaves the
+screen showing the old state, so the operator's next look at the box would lie.
+Sending the key runs rbp's own path on the same channel numbering a hardware
+press uses — 1-based, as `map_flx4.c:385`'s `ch + 1` — so the two are the same
+gesture. A second consequence of that: it is a *toggle* rbp computes from its own
+state, so nothing in the shim tries to track the value.
+
+**The key goes out before the touch does**, and that ordering is not cosmetic.
+`IKeyManager::sendKey` @ `0x37ad64` fills **one** `IKeyInput` — the pointer at
+`KeyManager+132` — and only then walks its listener list, handing every listener
+that same mutable struct; rbp's own `TouchPanel` is a key source too, and it is
+the thread that will run for the report we are about to emit. So a key sent after
+the emit is a key whose keycode a concurrent writer can overwrite before the
+deck's `PlayerInnards` reads it. Sending first means rbp has not yet been told
+about this gesture when the send completes. The structural reading is what the
+ordering rests on: the two runs that motivated it (2/8 and 7/10 taps) were taken
+with an instrument that never delivered an x, so they are not evidence — see
+`pointsrc.c`'s comment on `quantize_tap` and
+[07](07-touch.md#the-position-the-reader-starts-from-seed_abs_position). What is
+measured with that fixed: **20 taps on deck 1 and 20 on deck 2 all flipping the
+deck's own quantize flag on the press, none on the release, a 10-tap control
+outside the rectangle flipping none, and a frame diff either side of a single tap
+changing 34 rows inside that deck's widget and nothing anywhere else** — 830 px
+of a 1280×800 frame on deck 1, 1038 px on deck 2.
+
+This is the **second** place in the tree where `fbshim.so` reaches into rbp, and
+it is why the key path is its own object: `rbp_key.{h,c}` is a leaf (`rbp_abi.h`
+and libc, nothing else) that both shims link, and `rbp_key.o` is compiled with
+**hidden** visibility so that fbshim does not export `send_rx_key` — fbshim is
+first in `LD_PRELOAD`, so a default-visibility copy there is the one knobshim's
+maps would bind to. See the `FBSHIM_OBJS` comment in `scripts/shims/Makefile` and
+the header of `rbp_key.h`.
+
+## The safe-eject button — a keycode rbp already has, on three edges
+
+`USB STOP` is the seventh column of the swipe-down top menu
+([07](07-touch.md#the-swipe-down-top-menu-menu_zonec-menu_drawc)), and the reason it
+is there is that **this rig has no other way to reach rbp's own safe eject**. The
+FLX4 has no such button; the keycode `0x8002` appears nowhere in the MIDI maps, the
+keyboard map's whitelist cannot carry it, and rbp's name for it — `UsbStop`, from
+`ui::KeyInput::keyCodeAsText()` — is the last entry of a 173-slot name table. The
+operator asked for it in exactly those terms: *"rekordbox has a stop button just for
+that purpose to safe eject, but its not mapped currently, so i really don't want to
+pull the USB as it might continue to corrupt the USB stick"*.
+
+| | |
+|---|---|
+| **Keycode** | `0x8002` `K_USBSTOP`, `CH_GLOBAL` (channel 1) |
+| **Reached by** | `UsbStorageManager::onKey` (entry **[2]** of the live handler table) → `ui::UsbStorageManager::onUsbStopKey` @ `0x325788` |
+| **Sent as** | **press + repeat + release**, back to back |
+
+**The three edges do three different things, and that is the whole finding.** The
+handler branches on the operation nibble of the key record, and only the middle one
+asks for the eject:
+
+| op | branch | what it does |
+|---|---|---|
+| 0 PRESS | `0x325828` (needs `[this+0x88] == 2`, i.e. media present) | `[this+0x8c] = 5`, `PlayerSkeleton::mute(true)` on both decks, `notifyMediaDisconnect(true)` ×2, `DbProxy::notifyMediaDisconnect` |
+| **1 REPEAT** | **`0x32588c`** | sets bit 7 of `[this+0x3d0]`; if `[0x88] ∈ {1,2}` builds an 800-byte `IDataSet` and calls **`UsbStorageManager::request_usb_stop` @ `0x324578`** — *this is the eject request* |
+| 2 RELEASE | `0x3257d0` | clears bit 7, unmutes both decks, resets `[0x8c]` to 0, 2 or 4 |
+
+So a plain press+release **tap is a silent no-op**, which is what the first attempt
+at this binding shipped and what the measurement below corrected. It is the same
+shape as SHIFT + LOAD 1's `K_TRACKFILTER` ([15](15-flx4-midi.md)) — rbp's handler
+reads the record's *state*, not which edge carried it — but it is not the same
+degree: TRACK FILTER needs *a* second edge, USB STOP needs **both** the press and
+the repeat, because the press does the muting half and the repeat does the eject
+half.
+
+**Measured live, 2026-10-01, through the real dispatch** (bench route: the panel's
+`SOURCE` column repointed at `0x8002` with `systemctl set-environment
+POINT_MENU_KEY_EXTRA=0x8002`, then held for 500 ms, sampling `UsbStorageManager` at
+1 kHz over `/proc/<pid>/mem`):
+
+```
+t=7.072  (op=0, [usb1+0x8c]=5, [usb1+0x88]=2)   <- PRESS: the body runs
+t=7.572  (op=2, [usb1+0x8c]=0, [usb1+0x88]=2)   <- RELEASE: unwinds it
+```
+
+`[usb1+0x8c]` reading **5 for exactly the 500 ms the key was held** is the proof the
+handler body ran; the release clearing it microseconds later is why a *tap* looks
+like nothing at all. Every other gate was checked and passes: `[km+0xa4] == 0`, the
+handler entry's mask is `0x8000`, `isOtherKey()` is `isCategory(0x8000)` and true for
+`0x8002`, and `[this+0x84]` is the input channel. (An earlier session concluded from
+a coarser sampler that "the press body never runs" — that was a sampling artifact,
+and the note is written where it was made.) `POINT_MENU_KEY_EXTRA` cannot send an
+OP_REPEAT at all, which is why *this* binding needed a build to test and why the
+hold in that trace went out as press → release with no repeat.
+
+**Pressed on the glass, twice, by the operator — 2026-10-01, and it works.** Both
+presses produced the same chain, read off the unit's own logs:
+
+| | press 1 | press 2 |
+|---|---|---|
+| `pointsrc` | `menu 'USB STOP' tapped (button 7) -> key 0x8002` | the same |
+| **the screen** | **the SOURCE screen cleared** — the operator's report, and the half no log line carries | — |
+| stick off the bus | `09:55:24` | `10:32:2x` |
+| `usb-watch` | `detach: notifying rbp` the same second, `umount -l` on both mounts a second later | the same |
+| stick back, remounted, re-bound | `09:55:30` | `10:32:31` |
+| rbp re-imported | `attach: rbp opened export.pdb` at `09:55:48` | `10:32:49` |
+
+So rbp reacts to the stop — the media goes off its screen — and it comes back on its
+own after a replug: **about 20 s end to end, no restart, no residue**. That is the
+feature doing what it was built for.
+
+**Two things stay distinct, and it is worth being exact about which is which.** The
+button *stops* the media in rbp; it does not release the host mount. A Pi has no port
+power switch, so on this rig the mounts are dropped by `usb-watch.sh` only once the
+kernel sees the device leave — one second *after* the physical pull, both lazily. The
+operator still does the pulling; the button is what makes that pull safe.
+
+**And the release-following-repeat question is still open** — these two cycles cannot
+answer it, because the stick was taken out by hand rather than by rbp. The release at
+`0x3257d0` always ends in the unmute path (`0x325970`), and whether it *cancels* the
+eject or the db unmount proceeds asynchronously once `request_usb_stop` has been
+issued needs one press with nothing pulled afterwards: if rbp's media state returns to
+present on its own, the release did not cancel it; if it stays stopped until a replug,
+the fix is a gap between the edges — `pointsrc.c`'s hold path is the shape with one,
+and it is a one-line change. The binding sends the release either way rather than
+abandoning the key, because the press path arms a `UiTimer` on the key's own record
+(`IKeyManager::onKey` @ `0x37b6cc`) and a key left down would leave that record live.
+
+**Do not try to answer that from `/proc/<pid>/fd`.** The symlink timestamps there are
+when the entry was first *looked at*, not when the fd was opened — measured 2026-10-01
+with a shell whose fd 0 and a fd opened three seconds later both stamped identically —
+so `usb-watch`'s `rbp opened export.pdb` check passes on a stale handle exactly as
+happily as on a fresh one, and rbp's own media fds read `09:40` across a `09:55`
+eject/remount. The grip question belongs to rbp's state (`[usb1+0x88]`, `[+0x8c]`,
+bit 7 of `[+0x3d0]`), not to the fd table.
+
+**A press on this column stops the media, so it is not a harmless button.** That is
+not a caveat about the implementation, it is the feature — it exists so the operator
+never has to pull live media — but it is worth saying plainly in the docs because
+every other column of that panel is safe to press.
 
 ## Keycode → rbp, and the absolute-control query
 

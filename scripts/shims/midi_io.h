@@ -42,8 +42,10 @@ void seq_setup(void);
  * plugged in after the shim starts is picked up. */
 void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev));
 
-/* Panel output: three-byte Note On/Off and control change, and the query that
- * makes the panel report its current absolute values. */
+/* Panel output: three-byte Note On and control change, and the query that makes
+ * the panel report its current absolute values. Every note goes out as a Note On
+ * -- velocity 0 is OFF, not a Note Off, because the FLX4's LEDs ignore a real
+ * Note Off (measured; see midi_io.c). */
 int midi_note(int midi_ch, int note, int val);
 int midi_cc(int midi_ch, int cc, int val);
 /* 1 if the query actually went out (only the rawmidi route carries it, and only

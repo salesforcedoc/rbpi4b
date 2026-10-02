@@ -117,4 +117,68 @@ unsigned long mirror_next_backoff(unsigned long backoff_ms, unsigned long reopen
 unsigned long mirror_pad_frames(long avail, unsigned long buffer,
                                 unsigned long target, unsigned long max_pad);
 
+/* Fill `out` with `frames` copies of the packed frame in `frame`, which is
+ * `frame_bytes` long — the content of one pad, i.e. the mirror's drift correction
+ * as a zero-order hold rather than as silence.
+ *
+ * Returns the number of frames actually placed (each one `frame_bytes` bytes), or 0
+ * when there is nothing to place: a NULL or empty frame, no frames asked for, or a
+ * buffer with no room for even one. `frames` is CLAMPED to what `out_bytes` holds
+ * rather than the caller being trusted — this is the one place in the correction
+ * that touches a caller-sized buffer, and an overrun here is a corruption that would
+ * read as a mixer fault.
+ *
+ * Why a hold and not silence: the unit measured the pads arriving one every 5.2-5.5 s
+ * at 34-38 frames (0.76-0.86 ms, ~145-157 ppm of the stream, ~11 a minute), not the
+ * "one frame every 0.2 s" the arithmetic predicted. A 0.8 ms gap of *silence* is the
+ * envelope dropping to zero and coming back — a tick — where holding the last
+ * delivered frame costs one step, to the frame that follows the pad, and no energy
+ * at all. See mirror_write_hold() in audioshim.c for the whole argument. */
+unsigned long mirror_hold_fill(const unsigned char *frame, unsigned frame_bytes,
+                               unsigned long frames, unsigned char *out,
+                               unsigned long out_bytes);
+
+/* The window RB_AUDIO_MIRROR_BOOST_DB is allowed to land in. A typo of one decimal
+ * place is a factor of ten — "+40" instead of "+4.0" is 100x, i.e. every sample
+ * pinned to a rail — so the setting is bounded rather than trusted. The top is
+ * 12 dB rather than the +4 the unit runs: this is the shim's guard rail, not a
+ * recommendation, and it leaves the operator room to go louder than the level the
+ * headroom measurement justified without leaving room for a mis-keyed value. The
+ * bottom is where "off" would be if 0 dB were not already off: below -24 dB the
+ * mirror is inaudible, so nothing is lost by refusing to go further. */
+#define MIRROR_BOOST_DB_MAX  12.0
+#define MIRROR_BOOST_DB_MIN  (-24.0)
+
+/* The mirror's fixed level lift, in dB, as a linear multiplier.
+ *
+ * This is the ONLY place the mirror is allowed to exceed unity, and it is not the
+ * knob: MASTER LEVEL stays a 0..1 attenuator (flx4_mastervol_gain()'s own law,
+ * pinned in test_flx4.c), so the room's control keeps the feel the operator
+ * confirmed and the mirror's floor above unity comes from configuration instead.
+ * The two multiply: the FLX4's knob attenuates *this* level rather than defining
+ * it.
+ *
+ * Why the mirror alone: the knob exists because it is downstream of the FLX4's USB
+ * audio, so the same music arrives at the monitor quieter than at the room's
+ * output. A level that made the room louder would be a level in the master path,
+ * where it would also attenuate the FLX4 — the double attenuation g_mirror_gain
+ * exists to avoid.
+ *
+ * Why this is safe to raise past unity: the mirror's samples are saturated to the
+ * domain in s24pack.h before they are packed (mirror_saturate() in audioshim.c,
+ * which also counts them), so a lifted sample that runs out of headroom CLIPS.
+ * Before that clamp existed the same gain WRAPPED instead — the loud, very
+ * distorted failure S4.6 measured — which is why the comment beside the knob's law
+ * used to say a boost was impossible until a clamp landed. It has landed; this is
+ * the boost. The clamp is at the gain rather than inside s24pack() because the
+ * packers are modular by contract and must stay that way; the header's
+ * S24PACK_SAMPLE_* comment is the argument.
+ *
+ * Non-finite input answers 1.0 (unity, i.e. no change) rather than propagating: a
+ * NaN here would not stay in one sample, it would multiply into every frame of the
+ * mirror for the life of the process. Out-of-window input is clamped, so this
+ * function cannot be the reason a unit is silent or screaming; the caller logs the
+ * value it was given. */
+double mirror_boost_gain(double db);
+
 #endif /* RBLIVE4_MIRROR_POLICY_H */

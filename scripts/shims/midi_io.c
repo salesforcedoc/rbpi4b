@@ -419,11 +419,28 @@ static int out_write(const unsigned char *m)
      return 0;
 }
 
+/* One LED. Velocity 0 means OFF, and it goes out as a Note On with velocity 0 --
+ * never as a Note Off (0x80).
+ *
+ * MEASURED ON THE FLX4, 2026-10-01, and it is the whole of "the LEDs stay lit
+ * when I turn the cue off": the panel's LED hardware IGNORES a real Note Off.
+ * Deck 1's channel CUE LED lit, `90 54 00` put it out; with that LED lit again,
+ * `80 54 00` left it on. Same channel, same note, the status byte the only
+ * difference. This function used to build off as `0x80 | ch`, so every LED the
+ * map lit stayed lit -- the wire carried the off and the panel did not act on it.
+ *
+ * Note On with velocity 0 is also the safer encoding in general, which is why
+ * there is no per-surface switch here: the MIDI spec defines Note On velocity 0
+ * as a Note Off, so a conforming surface must accept it, while a surface that
+ * special-cases its LEDs on Note On (this one) requires it. The previous target
+ * drove its LEDs through this same function and read the Note Off; nothing about
+ * that surface can be measured from this rig, and the spec-equivalent form is
+ * the one that satisfies both. */
 int midi_note(int midi_ch, int note, int vel)
 {
      unsigned char m[3];
 
-     m[0] = (unsigned char)((vel > 0 ? 0x90 : 0x80) | (midi_ch & 0x0f));
+     m[0] = (unsigned char)(0x90 | (midi_ch & 0x0f));
      m[1] = (unsigned char)(note & 0x7f);
      m[2] = (unsigned char)(vel & 0x7f);
      return out_write(m);

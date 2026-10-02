@@ -8,6 +8,7 @@
 #include "tscfake.h"
 #include "pointsrc.h"
 #include "fb_cursor.h"
+#include "menu_draw.h"
 #include "point_xform.h"
 #include "syscalls.h"
 
@@ -90,12 +91,33 @@ int tscfake_wire_x(int x)
 
 void tscfake_emit(int down, int x, int y)
 {
-    static int last_down = -1, last_x = 0, last_y = 0;
+    /* `primed` is not bookkeeping, and the initialiser it replaced was a defect.
+     * This was `last_down = -1`, meaning "nothing emitted yet" -- but the only
+     * thing that reads last_down is the dedup below and the up->down test, and
+     * -1 is *truthy*, so `down && !last_down` was FALSE for the process's first
+     * down. The first press of every process therefore went out as a SINGLE
+     * frame, which is the one thing this file's own header says must never
+     * happen: rbp's TouchAdValueHysteresis discards the first frame after a gap,
+     * so the first touch after rbp starts did nothing at all.
+     *
+     * Measured on the unit 2026-09-29, and it is the whole of work/menu17.sh's
+     * "press #1": seven presses at rbp's INFO control with the gate off, the
+     * first one (the first touch of that process) moved nothing, and all six
+     * after it flipped rbp's INFO view -- at 150, 150, 45, 45, 30 and 75 ms, so
+     * the press length was never the variable. See [[rbp-first-touch-lost]].
+     *
+     * rbp's touch stream starts *released* -- a device nobody is touching reads
+     * BTN_TOUCH=0 -- so the process's first down IS an up->down transition and
+     * gets the burst. `primed` keeps the dedup's other half honest independently
+     * of that: before the first emit there is nothing to dedup against, so an
+     * opening release at exactly (0,0) is still published rather than silently
+     * matching the initial state. */
+    static int last_down = 0, last_x = 0, last_y = 0, primed = 0;
     unsigned char buf[TSC_RECORD_LEN];
 
     x = tscfake_wire_x(x);
 
-    if (down == last_down && x == last_x && y == last_y)
+    if (primed && down == last_down && x == last_x && y == last_y)
         return;
 
     tscfake_record(down, x, y, buf);
@@ -110,6 +132,7 @@ void tscfake_emit(int down, int x, int y)
     last_down = down;
     last_x = x;
     last_y = y;
+    primed = 1;
 }
 
 static int ensure_pipe(void)
@@ -146,6 +169,12 @@ int tscfake_open(void)
      * the arrow has to be composited by the process that knows where the pointer
      * is and can map the page it is drawn on. */
     fb_cursor_start();
+
+    /* Same trigger again, and the same "start once" property: the top menu's panel
+     * is composited onto the same page by the same kind of thread, so it is
+     * started here for the same reason. Gated by POINT_MENU, which menu_draw.c
+     * explains. */
+    menu_draw_start();
 
     rd_end = real_dup(out_pipe[0]);
     if (rd_end < 0)

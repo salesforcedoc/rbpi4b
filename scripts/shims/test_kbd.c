@@ -240,14 +240,16 @@ static const struct step steps[] = {
      { "MENU down",            EV_KEY, KEY_0, 1, 1, { W(K_MENU, OP_PRESS, CH_GLOBAL, 0) } },
      { "MENU up",              EV_KEY, KEY_0, 0, 1, { W(K_MENU, OP_RELEASE, CH_GLOBAL, 0) } },
 
-     /* ---- PLAYLIST and SEARCH: declared, but with no rbp keycode, so the two
-      * must produce nothing at all. That is the assertion worth having -- a row
-      * that sends keycode 0 would be a keycode rbp never asked for, and these
-      * rows are what stop a later "helpful" edit from making it do that. ---- */
-     { "PLAYLIST down (no rbp keycode yet)", EV_KEY, KEY_8, 1, 0, { {0,0,0,0} } },
-     { "PLAYLIST up (no rbp keycode yet)",   EV_KEY, KEY_8, 0, 0, { {0,0,0,0} } },
-     { "SEARCH down (no rbp keycode yet)",   EV_KEY, KEY_9, 1, 0, { {0,0,0,0} } },
-     { "SEARCH up (no rbp keycode yet)",     EV_KEY, KEY_9, 0, 0, { {0,0,0,0} } },
+     /* ---- PLAYLIST and SEARCH: the last two rows of the digit-row browse
+      * surface to be filled in, and they were filled in only when their keycodes
+      * were measured on the unit (rbp_abi.h carries the runs). Until then these
+      * four rows pinned that a press produced *nothing* -- a row sending keycode
+      * 0 would be a keycode rbp never asked for -- and that is still what the
+      * `{0,0,0,0}` expectation shape is for. ---- */
+     { "PLAYLIST down",        EV_KEY, KEY_8, 1, 1, { W(K_PLAYLIST, OP_PRESS, CH_GLOBAL, 0) } },
+     { "PLAYLIST up",          EV_KEY, KEY_8, 0, 1, { W(K_PLAYLIST, OP_RELEASE, CH_GLOBAL, 0) } },
+     { "SEARCH down",          EV_KEY, KEY_9, 1, 1, { W(K_SEARCH, OP_PRESS, CH_GLOBAL, 0) } },
+     { "SEARCH up",            EV_KEY, KEY_9, 0, 1, { W(K_SEARCH, OP_RELEASE, CH_GLOBAL, 0) } },
 
      /* ---- the selector: the arrows and the wheel rotate, Enter pushes ----
       *

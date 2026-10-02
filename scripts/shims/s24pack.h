@@ -86,6 +86,43 @@ enum {
     AUDIO_FMT_SUBFRAME_LE   /* 4 bytes, value in the HIGH 3 — the vc4 HDMI DMA */
 };
 
+/* The sample domain: what rbp's words mean once audioshim.c has sign-extended
+ * them, and therefore the rails a value has to be inside to be a sample at all.
+ * Full scale is 2^23-1, the bottom is -2^23.
+ *
+ * The packers below do NOT apply this, and that is a decision rather than an
+ * omission. They read bits 23..0 and encode what they are given, which is what
+ * makes them insensitive to the missing sign extension in rbp's raw word — the
+ * property the opening paragraphs of this header rest on and test_audio.c pins.
+ * A clamp here would destroy exactly that: rbp's raw word for -1 is the positive
+ * 0x00ffffff, i.e. 16 777 215 counts past full scale, so a clamp would turn a
+ * quiet -1 into a full-scale positive sample on a 24-in-32 card that reads the low
+ * three bytes. That is the "aliased waveform at full level" class this port has
+ * already been bitten by once (S4.6), reached from the other side.
+ *
+ * So the domain is defined here, and it is ENFORCED at the one place on this port
+ * that can leave it: the HDMI mirror's gain, which is the only gain that is
+ * allowed past unity (mirror_saturate() in audioshim.c, counting what it pulled
+ * back as `clips=`). Every other sample the shim packs is inside the domain by
+ * construction — the buffers are sign-extended and the master's gains are
+ * clamp01()'d — which is why the packers can go on being modular. */
+#define S24PACK_SAMPLE_MAX  8388607
+#define S24PACK_SAMPLE_MIN  (-8388608)
+
+/* Saturate one sample to that domain. Out of range is not a quiet condition on
+ * this port: a word even one count past full scale loses its top byte to the
+ * S24_LE container, aliases into a different sample in S24_3LE and the IEC958
+ * subframe, and wraps to the opposite rail in S16_LE — which is why the mirror
+ * asks before it hands a lifted sample on. */
+static inline int32_t s24pack_clamp(int32_t v)
+{
+    if (v > S24PACK_SAMPLE_MAX)
+        return S24PACK_SAMPLE_MAX;
+    if (v < S24PACK_SAMPLE_MIN)
+        return S24PACK_SAMPLE_MIN;
+    return v;
+}
+
 /* Bytes per sample, or 0 for an unknown format. */
 int s24pack_bytes(int fmt);
 

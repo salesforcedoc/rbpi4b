@@ -69,7 +69,9 @@
  *     documented as something the *application* sets -- see the LED block);
  *   - the Sound Color FX TYPE (the unit has CFX knobs but no CFX buttons), which
  *     is why flx4_startup() picks Filter for both channels;
- *   - rbp's ALOOP/SLIPLOOP pad modes (see the pad block in flx4_build());
+ *   - the unit's extra pad modes: rbp has four and this section has more, so
+ *     KEYBOARD, PAD FX 2, BEAT LOOP and KEY SHIFT reach nothing at all (see the
+ *     pad block in flx4_build());
  *   - CUE/LOOP CALL: rbp's keycode for those buttons is not identified. They are
  *     in the table as log-only, and in docs/15's open questions.
  *
@@ -138,9 +140,9 @@
 #define CH_FXB    5   /* list ch 6  -- FX CH SELECT leg B (and the CH2 FX leg) */
 #define CH_MIX    6   /* list ch 7  -- mixer knobs, browse, LOAD, MASTER CUE */
 #define CH_PADS1  7   /* list ch 8  -- deck 1 pads, current mode */
-#define CH_PADS1S 8   /* list ch 9  -- deck 1 pads, +SHIFT (unbound, see build) */
+#define CH_PADS1S 8   /* list ch 9  -- deck 1 pads, +SHIFT (HOT CUE only, see dispatch) */
 #define CH_PADS2  9   /* list ch 10 -- deck 2 pads, current mode */
-#define CH_PADS2S 10  /* list ch 11 -- deck 2 pads, +SHIFT (unbound) */
+#define CH_PADS2S 10  /* list ch 11 -- deck 2 pads, +SHIFT (HOT CUE only) */
 
 /* ---- deck buttons ---------------------------------------------------------
  * Every one of these has a +SHIFT variant on the same channel (a different
@@ -160,10 +162,32 @@
 #define N_SYNC       88   /* BEAT SYNC, sent on RELEASE (footnote *3) */
 #define N_SYNC_LONG  92   /* BEAT SYNC long press */
 #define N_CH_CUE     84   /* channel CUE        (+SHIFT 104) */
-#define N_MODE_HOT   27   /* pad mode HOT CUE   (+SHIFT 105) */
-#define N_MODE_PFX1  30   /* pad mode PAD FX 1  (+SHIFT 107) */
-#define N_MODE_JUMP  32   /* pad mode BEAT JUMP (+SHIFT 109) */
-#define N_MODE_SMPL  34   /* pad mode SAMPLER    (+SHIFT 111) */
+/* The pad-mode buttons, and the four rbp modes they select. **The binding is
+ * POSITIONAL, and this unit's own printed labels are deliberately ignored.**
+ *
+ * rbp's UI is an XDJ-RX3's, and the RX3's four pad-mode buttons run HOT CUE,
+ * BEAT LOOP, SLIP LOOP, BEAT JUMP -- which is rbp's modes 0, 1, 2, 3 in that
+ * order, and is the order map_jp21.c binds its own four in for the same reason.
+ * This unit's row is HOT CUE, PAD FX 1, BEAT JUMP, SAMPLER, so each button
+ * selects the mode that occupies ITS POSITION on the RX3: PAD FX 1 stands in for
+ * BEAT LOOP, and the 3rd and 4th buttons give SLIP BEAT LOOP and BEAT JUMP --
+ * the opposite way round from what those two labels suggest.
+ *
+ * The operator asked for exactly this on 2026-10-01, in their own words:
+ * "ignore the names on the FLX4, it should just map to the way the RX3 behaves by
+ * position for muscle memory". Muscle memory is the whole argument: the hand goes
+ * to the third button for a slip loop because that is where the RX3 keeps one,
+ * and a binding that reads well in a table but sits on the wrong button defeats
+ * the point of driving a familiar UI.
+ *
+ * The four SHIFT variants of these buttons (KEYBOARD, PAD FX 2, BEAT LOOP and
+ * KEY SHIFT, on notes 105/107/109/111) reach nothing: rbp has no such modes and
+ * no keycodes for them. rbp has no PAD FX and no sampler pads at all -- see the
+ * pad block in flx4_build() and docs/15-flx4-midi.md. */
+#define N_MODE_HOT   27   /* 1st -> HOT CUE        (RX3 position 1) (+SHIFT 105) */
+#define N_MODE_PFX1  30   /* 2nd -> AUTO BEAT LOOP (RX3 position 2) (+SHIFT 107) */
+#define N_MODE_JUMP  32   /* 3rd -> SLIP BEAT LOOP (RX3 position 3) (+SHIFT 109) */
+#define N_MODE_SMPL  34   /* 4th -> BEAT JUMP      (RX3 position 4) (+SHIFT 111) */
 
 /* ---- mixer / browse (all on list ch 7 unless noted) ---------------------- */
 #define N_MASTER_CUE  99  /* MASTER CUE         (+SHIFT 120) */
@@ -171,6 +195,22 @@
 #define N_BROWSE_PUSH_SHIFT 66  /* SHIFT + browse knob push -> rbp's SOURCE screen */
 #define N_LOAD1       70  /* LOAD deck 1        (+SHIFT 104) */
 #define N_LOAD2       71  /* LOAD deck 2        (+SHIFT 122) */
+/* The two SHIFT + LOAD notes. PROVENANCE: the note NUMBERS 104/122 started out
+ * published-only; the operator's own presses settled them on 2026-09-30, and
+ * both ways at once -- SHIFT + LOAD 1 and SHIFT + LOAD 2 each brought up their
+ * screen on the glass, AND RB_MIDI_DUMP caught both edges on the wire as
+ * `NOTEON ch=6 note=104 vel=127` and `note=122 vel=127` in a file with no
+ * vel=100 event in it at all (seqinject2 sends 100, the panel 127). The screen
+ * is the corroboration rather than the proof: a wrong note number could not have
+ * fired anything, because each of these two keycodes is bound by exactly one row
+ * in this map, both on CH_MIX.
+ *
+ * Note 104 means two different things and the CHANNEL is the whole of the
+ * separation: on the deck channels it is SHIFT + channel CUE (N_CH_CUE above,
+ * 84 -> 104), and on the mixer's list channel it is SHIFT + LOAD 1. Neither row
+ * may be moved to the other's channel. 122 is used nowhere else in this map. */
+#define N_LOAD1_SHIFT 104 /* SHIFT + LOAD deck 1 -> rbp's TRACK FILTER panel */
+#define N_LOAD2_SHIFT 122 /* SHIFT + LOAD deck 2 -> rbp's SHORTCUT view */
 #define N_SMART_CFX   0   /* SMART CFX          (+SHIFT 8)  -- no rbp equivalent */
 #define N_SMART_FADER 1   /* SMART FADER        (+SHIFT 9)  -- no rbp equivalent */
 #define N_MONO_STEREO 109 /* Android MONO/STEREO            -- no rbp equivalent */
@@ -178,7 +218,8 @@
 /* ---- Beat FX (list ch 5, with a second leg on ch 6) --------------------- */
 #define N_FXCH_1     16   /* FX CH SELECT leg A (ch 5) */
 #define N_FXCH_2     17   /* FX CH SELECT leg B (ch 6) */
-#define N_FX_SELECT  99   /* FX SELECT         (+SHIFT 100) */
+#define N_FX_SELECT  99   /* FX SELECT         (+SHIFT 100, see below) */
+#define N_FX_SELECT_SHIFT 100  /* SHIFT + FX SELECT: the same step backwards */
 #define N_FX_BEATPREV 74  /* BEAT <            (+SHIFT 102) */
 #define N_FX_BEATNEXT 75  /* BEAT >            (+SHIFT 107) */
 #define N_FX_ONOFF   71   /* FX ON/OFF, one leg per target channel (+SHIFT 67) */
@@ -256,11 +297,17 @@ static int tempo_verbose = 0;
 static int tempo_rev = 0;       /* invert pitch polarity */
 
 /* The Beat FX type cursor: rbp's switch has 14 positions and the unit's FX
- * SELECT is a button, so the map keeps the position and steps it. It is NOT
- * seeded from rbp's current effect (map_jp21.c reads that through
- * ADDR_GET_BFX_TYPE; this map deliberately keeps rbp addresses out of itself),
- * so the first press selects switch position 0 -- whatever effect that turns out
- * to be -- rather than stepping on from what is already playing. */
+ * SELECT is a button, so the map keeps the position and steps it -- forward on
+ * the button, backward on SHIFT+FX SELECT, the two directions the RX3's
+ * FX-select rotary has.
+ *
+ * It is seeded from what rbp is already playing, so the first press steps on
+ * from the current effect instead of jumping to position 0 -- a position that
+ * holds a different effect, and on a live deck an audible one. The read is
+ * rbp_bridge.h's rbp_beatfx_type() and the table is rbp_abi.h's
+ * bfx_type_to_pos[], the same table map_jp21.c's rotary seeds from. Keeping
+ * rbp's addresses out of this map is what makes the seeding a stub the host
+ * test can drive (see test_flx4.c) rather than a call it would segfault on. */
 static int fx_pos = -1;
 
 /* ---- the jog -------------------------------------------------------------
@@ -305,11 +352,25 @@ static struct pitch_ctrl pitch_state[2] = {
 
 /* ---- the FX CH SELECT lever ---------------------------------------------
  * Two legs, which is how the list encodes a three-position lever: leg A is
- * list ch 5 note 16, leg B is list ch 6 note 17. CH1 = A on, CH2 = B on,
+ * list ch 5 note 16, leg B is list ch 6 note 17. CH1 = leg A on, CH2 = B on,
  * CH1&CH2 = both. (The other two notes of that group, ch 5 note 17 and ch 6
- * note 16, are OFF in every position the list gives.) */
+ * note 16, are OFF in every position the list gives.)
+ *
+ * The three positions do NOT map one-to-one onto what rbp can be told: rbp's
+ * Beat FX has ONE target channel, so CH1 and CH2 are its two players and CH1&CH2
+ * has no value of its own. That position is sent as MASTER -- the output both
+ * decks reach, which is the value the operator asked for and the same one
+ * map_jp21.c sends for the previous unit's Main position.
+ *
+ * Because of that, the state kept here is the LEVER's position and not the last
+ * keycode sent: stepping from CH1&CH2 to one of the single-deck positions is a
+ * real move even when that deck is what rbp was told about last.
+ *
+ * All three values are measured on rbp's own screen rather than inferred: its
+ * Beat FX panel reads **1**, **2** and **MASTER** for them (2026-09-28, docs/13
+ * S5.6). rbp's `EnBeatEffectSelectChannel` enum is in rbp_abi.h. */
 static int fxch_leg1, fxch_leg2;
-static int fxch_last = -1;      /* last target sent to rbp, for the log only */
+static int fxch_pos = -1;       /* 0 = CH1, 1 = CH2, 2 = CH1&CH2; -1 = unread */
 
 /* ---- the note table's dispatch ------------------------------------------ */
 
@@ -403,37 +464,61 @@ static void flx4_note(int ch, int note, int on)
      /* FX CH SELECT (list ch 5/6 notes 16/17): see the leg note above. */
      if ((ch == CH_FXA || ch == CH_FXB) &&
          (note == N_FXCH_1 || note == N_FXCH_2)) {
+          int pos;
           if (ch == CH_FXA && note == N_FXCH_1)
                fxch_leg1 = on;
           else if (ch == CH_FXB && note == N_FXCH_2)
                fxch_leg2 = on;
           else
                return;                 /* ch5 note17 / ch6 note16: always OFF */
-          if (fxch_leg1 && fxch_leg2) {
-               /* rbp's Beat FX has one target channel, so "both decks" has no
-                * value to send. Leave rbp where it was rather than pick one.
-                * TODO: unverified -- nothing on the unit says which position
-                * the lever is in at connect, so this only acts on a move. */
-               klog("knobshim2: FX CH SELECT CH1&CH2 has no rbp equivalent; "
-                    "target left at %d\n", fxch_last);
-               return;
-          }
-          if (!fxch_leg1 && !fxch_leg2)
+
+          if (fxch_leg1 && fxch_leg2)
+               pos = 2;                /* CH1&CH2 */
+          else if (fxch_leg1)
+               pos = 0;                /* CH1 */
+          else if (fxch_leg2)
+               pos = 1;                /* CH2 */
+          else
                return;                 /* mid-slide: both legs momentarily off */
-          int want = fxch_leg1 ? 0 : 1;   /* EnBeatEffectSelectChannel: 0/1 */
-          if (want == fxch_last)
+
+          if (pos == fxch_pos)
                return;                 /* the whole group is re-sent on every
                                         * move; only a change is a move */
-          fxch_last = want;
+          fxch_pos = pos;
+          /* CH1&CH2 -> MASTER, the two single positions -> their own player.
+           * TODO: unverified -- nothing on the unit says which position the
+           * lever is in at connect, so this acts on the first message that
+           * names a position, whether that is a move or the device's own
+           * state. */
+          int want = (pos == 2) ? BFX_CH_MASTER : pos;
           send_rx_key(K_BFXCH, OP_VALUE, CH_GLOBAL, want);
-          klog("knobshim2: FX CH SELECT -> Beat FX target deck %d\n", want + 1);
+          klog("knobshim2: FX CH SELECT -> Beat FX target %s\n",
+               pos == 2 ? "MASTER (5)" :
+               (pos == 0 ? "deck 1 (0)" : "deck 2 (1)"));
           return;
      }
 
-     /* FX SELECT (list ch 5 note 99): step rbp's 14-position effect switch. */
-     if (ch == CH_FXA && note == N_FX_SELECT) {
+     /* FX SELECT (list ch 5 note 99) and SHIFT+FX SELECT (note 100): step rbp's
+      * 14-position effect switch, forward and back -- the RX3's FX-select
+      * rotary's two directions, which a button needs a modifier for. The +SHIFT
+      * note is a distinct note on the same channel rather than a state this map
+      * tracks (see the deck-button note at the top), so the backward step needs
+      * no SHIFT bookkeeping at all. */
+     if (ch == CH_FXA && (note == N_FX_SELECT || note == N_FX_SELECT_SHIFT)) {
+          int step = (note == N_FX_SELECT_SHIFT) ? -1 : 1;
           if (on) {
-               fx_pos = (fx_pos + 1) % BFX_TYPE_POSITIONS;
+               if (fx_pos < 0) {
+                    int t = rbp_beatfx_type();
+                    /* If rbp cannot be asked, or answers a type no position
+                     * reaches, the cursor starts at 0 -- what every first press
+                     * did before the seeding existed, and the honest answer to
+                     * "nobody said". */
+                    fx_pos = (t > 0 && t <= BFX_TYPE_POSITIONS &&
+                              bfx_type_to_pos[t] >= 0)
+                             ? bfx_type_to_pos[t] : 0;
+               }
+               fx_pos = (fx_pos + step + BFX_TYPE_POSITIONS)
+                        % BFX_TYPE_POSITIONS;
                send_rx_key(K_BFXTYPE, OP_VALUE, CH_GLOBAL, fx_pos);
                klog("knobshim2: FX SELECT -> type position %d\n", fx_pos);
           }
@@ -455,6 +540,33 @@ static void flx4_note(int ch, int note, int on)
           return;
      }
 
+     /* +SHIFT + a HOT CUE pad (list ch 9/11 -> rch 8/10): delete that pad's
+      * cue. These rows are NOT in note_map[] and cannot be, because the gesture
+      * is not a keycode: rbp has none for it -- its own 0x4124 deletes a fixed
+      * slot nothing ever fills -- and the per-pad delete it does have is reached
+      * by no key this shim can send, so hotcue_delete() calls it directly
+      * (rbp_bridge.c carries both negatives and the derivation). This is
+      * therefore the one shape a table row cannot express, and it is handled the
+      * way this map handles the FX CH SELECT lever: a named case above the loop.
+      *
+      * The layer's note numbers are MEASURED, not published: the operator's own
+      * press with RB_MIDI_DUMP on (2026-10-01) put the shifted pad on the wire as
+      * `NOTEON ch=8 note=0 vel=127` inside a SHIFT-held window (note 63 down at
+      * 610.514, released 611.118), so the shifted note REPLACES its base note --
+      * there is no ch 7 note 0 beside it. vel 127 is the panel; seqinject2 sends
+      * at 100, which is how the two are told apart in a dump.
+      *
+      * Only the HOT CUE base (notes 0..7) is bound, and that restriction is the
+      * operator's own explicit instruction (2026-10-01), not an oversight: the
+      * other three bases the unshifted layer carries (16 PAD FX 1, 32 BEAT JUMP,
+      * 48 SAMPLER) mean nothing as a delete, so a shifted press on one of them
+      * logs as unmapped rather than guessing an action. */
+     if ((ch == CH_PADS1S || ch == CH_PADS2S) && note >= 0 && note < 8) {
+          if (on)
+               hotcue_delete(ch == CH_PADS1S ? 0 : 1, note + 1);
+          return;
+     }
+
      /* Everything else is a table row: a plain button, pressed and released. */
      for (int i = 0; i < note_map_n; i++) {
           if (note_map[i].rch != ch || note_map[i].note != note)
@@ -468,9 +580,20 @@ static void flx4_note(int ch, int note, int on)
           if (on && !*p) {
                *p = 1;
                send_rx_key(key, OP_PRESS, note_map[i].sch, 0);
+               /* The rows rbp needs a second edge for (rbp_abi.h's OP_REPEAT --
+                * today only K_TRACKFILTER). It goes out on the press rather than
+                * on the release because rbp's handler reads the record's *state*,
+                * not which edge carried it: state 2 -> 3 opens the panel, and a
+                * release after that finds the state already cleared and does
+                * nothing. Sending it here also means a tap and a hold behave
+                * alike, so a note-off that never arrives cannot leave the key
+                * stuck half-pressed. */
+               if (note_map[i].repeat)
+                    send_rx_key(key, OP_REPEAT, note_map[i].sch, 0);
                if (verbose)
-                    klog("knobshim2: ch%d note%d -> 0x%04x press (sch%d)\n",
-                         ch, note, key, note_map[i].sch);
+                    klog("knobshim2: ch%d note%d -> 0x%04x press%s (sch%d)\n",
+                         ch, note, key, note_map[i].repeat ? "+repeat" : "",
+                         note_map[i].sch);
           } else if (!on && *p) {
                *p = 0;
                send_rx_key(key, OP_RELEASE, note_map[i].sch, 0);
@@ -687,14 +810,21 @@ static double mastervol_mid = MIRROR_GAIN_MID_DEFAULT;
  * the middle the HDMI was too quiet to use. Unity belongs at the working point,
  * so the travel above it becomes headroom that this path cannot spend.
  *
- * It cannot spend it because gain > 1 would clip: the mirror's samples are
- * packed by s24pack(), which does NOT clamp -- its own comment describes what a
- * sample pushed past 24 bits sounds like, and it is the wrapped, aliased
- * waveform S4.6 found. rbp's master does peak below full scale (measured, the
- * loudest window of a run: 3229776 of 8388608, about -8 dBFS), so a boost is
- * possible in principle; it needs a saturating clamp in s24pack() first, and
- * that is not this change. Until then clamp01() in audioshim.c is a ceiling and
- * not a limit to be raised.
+ * This law cannot spend it, because this law is a 0..1 attenuator and that is
+ * what the room's knob should be: above the knee it is flat, and the top of the
+ * travel is worth exactly the knee. The mirror's level above unity therefore
+ * comes from configuration instead -- RB_AUDIO_MIRROR_BOOST_DB, applied in
+ * audioshim.c as a multiplier UNDER this gain, so the knob attenuates the lifted
+ * level rather than setting it. Two things are what made that lift safe, and
+ * neither was true when this comment first said a boost was impossible: the
+ * mirror's samples are saturated to the 24-bit domain at the gain
+ * (mirror_saturate(), which counts what it caught as `clips=`), so running out
+ * of headroom CLIPS rather than WRAPS -- the loud, aliased waveform S4.6
+ * measured -- and rbp's master does peak below full scale (measured, the loudest
+ * window of a run: 3229776 of 8388608, about -8.3 dBFS), so a +4 dB lift lands
+ * its peaks near -4.3 dBFS with the knob at unity. The clamp is at the gain and
+ * deliberately NOT inside s24pack(), whose modularity is a pinned contract; see
+ * the S24PACK_SAMPLE_* comment in s24pack.h.
  *
  * `mid` is a fraction so the working point can be dialled by ear without a
  * rebuild (MIRROR_GAIN_MID). MID=1.0 reproduces the old law exactly, which makes
@@ -785,21 +915,42 @@ static void flx4_build(void)
           add_note(rch, N_IN, K_LOOPIN, sch);       /* manual loop in */
           add_note(rch, N_OUT, K_LOOPOUT, sch);     /* manual loop out */
           /* 4 BEAT / EXIT -> rbp's RELOOP/EXIT: it exits a running loop and
-           * re-enters a stored one. Starting a fresh 4-beat loop needs rbp's
-           * AUTO LOOP pad mode, which this map does not enter -- see the pad
-           * block below. TODO: unverified. */
+           * re-enters a stored one. A FRESH 4-beat loop is a pad rather than a
+           * keycode: enter rbp's AUTO BEAT LOOP with the PAD FX 1 pad-mode
+           * button below and press pad 5. **Not pad 1** -- MEASURED on the unit,
+           * 2026-10-01, by reading the grid off rbp's own framebuffer while the
+           * operator pressed all eight: rbp's AUTO BEAT LOOP bank is
+           * 1/4, 1/2, 1, 2, 4, 8, 16, 32 across pads 1..8, so pad 1 is a
+           * QUARTER beat and 4 beats is the fifth pad. The applied size matched
+           * the label (pad 8 engaged a loop whose badge read `32`), so this is
+           * the grid's own order and not a display quirk. docs/08-controls.md's
+           * size table gives that bank as 4, 2, 1, 1/2, 1/4, ... -- a different
+           * bank, or the same one read in the other direction; either way the
+           * table is not what a fresh entry into this mode shows. */
           add_note(rch, N_4BEAT, K_RELOOP, sch);
           /* The pad-mode buttons select rbp's pad mode, which is what makes the
-           * pad keycodes below mean HOT CUE and BEAT JUMP. */
+           * pad keycodes below mean whatever rbp's grid says they mean. The four
+           * rows map to the RX3's four modes BY POSITION, not by this unit's
+           * printed labels -- the constants above carry that argument, and it is
+           * the one thing about this block that is not obvious from the table.
+           * All four are plain press/release rows: rbp's mode setters are
+           * idempotent toggles that re-read their own state, so pressing the
+           * button of the mode it is already in switches that mode's SIZE BANK
+           * instead of re-entering it (onKey_AutoBeatLoop's [+0x7a] and
+           * friends) -- the RX3's own behaviour, which the shim must not try to
+           * compute for rbp. MEASURED on the unit 2026-10-01: pressing HOT CUE
+           * while already in HOT CUE takes rbp's pad-mode byte to **4**, a value
+           * outside the documented 0..3, and pressing it again returns it to 0.
+           * So 4 is that bank path seen from the outside, and anything reading
+           * this mode must not treat 4 as a corrupt read. */
           add_note(rch, N_MODE_HOT, K_HOTCUE, sch);
-          add_note(rch, N_MODE_JUMP, K_BEATJUMP, sch);
-          /* Known, deliberately not routed (key 0): the two pad modes rbp has
-           * no equivalent for (PAD FX 1/2 and SAMPLER are rekordbox features),
-           * the SHIFT button, and CUE/LOOP CALL > -- rbp's keycode for the call
-           * buttons is not identified. See docs/15's open questions. */
+          add_note(rch, N_MODE_PFX1, K_ALOOP, sch);
+          add_note(rch, N_MODE_JUMP, K_SLIPLOOP, sch);
+          add_note(rch, N_MODE_SMPL, K_BEATJUMP, sch);
+          /* Known, deliberately not routed (key 0): the SHIFT button and
+           * CUE/LOOP CALL > -- rbp's keycode for the call buttons is not
+           * identified. See docs/15's open questions. */
           add_note(rch, N_SHIFT, 0, sch);
-          add_note(rch, N_MODE_PFX1, 0, sch);
-          add_note(rch, N_MODE_SMPL, 0, sch);
           /* ...with one exception. CALL < is BACK, and it is the only spare
            * button on this unit: the FLX4 has no BACK and no SOURCE button at
            * all, and without a BACK the browse screen is a one-way door --
@@ -826,25 +977,48 @@ static void flx4_build(void)
       * pad is 0..7. rbp's pad keycodes K_PAD1..8 mean whatever rbp's own pad
       * mode says they mean, and that mode is set by the mode buttons above.
       *
-      * So only the two ranges rbp has a mode for are bound -- HOT CUE (base 0)
-      * and BEAT JUMP (base 32), which are the two modes bound above. The other
-      * six are deliberately unbound: PAD FX 1/2 and KEYBOARD have no rbp mode,
-      * and BEAT LOOP (base 96) and KEY SHIFT are reached by a SHIFT + mode
-      * button combination whose correspondence the list does not state (it
-      * gives four extra modes and four shift notes, but never pairs them), so
-      * binding them would be a guess about which button puts rbp in which
-      * mode. An unbound pad produces nothing and logs as unmapped.
-      * TODO: unverified -- the whole base+pad encoding, and the SHIFT pairing.
+      * A base is therefore bound iff the map puts rbp in a mode for it, which
+      * is why FOUR of the eight are bound -- and, since the mode buttons are
+      * bound POSITIONALLY (see their block above), which rbp mode each base
+      * carries follows that same order rather than the unit's labels: HOT CUE
+      * (base 0 -> rbp mode 0), AUTO BEAT LOOP by way of the unit's PAD FX 1
+      * (base 16 -> mode 1), SLIP BEAT LOOP by way of its BEAT JUMP button (base
+      * 32 -> mode 2), and BEAT JUMP by way of its SAMPLER (base 48 -> mode 3).
+      * The keycodes are the same eight in all four bases: rbp's K_PAD1..8 mean
+      * whatever rbp's own mode says they mean, so swapping two bases' meaning is
+      * a swap of LABELS here and nothing else. Without these rows the mode
+      * buttons would be worse than dead: the unit really does switch its pads to
+      * the new base, so PAD FX 1 would put rbp in a mode whose eight pads
+      * produced nothing at all.
+      *
+      * The other four are deliberately unbound, because their BUTTONS reach no
+      * rbp mode: KEYBOARD and PAD FX 2 have no rbp equivalent at all, and BEAT
+      * LOOP (base 96) and KEY SHIFT are reached by a SHIFT + mode button
+      * combination whose correspondence the list does not state (it gives four
+      * extra modes and four shift notes, but never pairs them), so binding them
+      * would be a guess about which button puts rbp in which mode -- and there
+      * is no rbp mode for their pads to act in either way. An unbound pad
+      * produces nothing and logs as unmapped.
+      * MEASURED, all four bases, 2026-10-01: eight pads pressed in each of HOT
+      * CUE, AUTO BEAT LOOP, the BEAT JUMP button's mode and SAMPLER's, with a
+      * dump running and rbp's own pad-mode byte read back each time -- bases 0,
+      * 16, 32 and 48 all arrived at base+pad as this block claims, and rbp acted
+      * on every one of the 32 presses. (The pads act in whatever mode rbp is in,
+      * so a press in the wrong mode is a wrong action rather than nothing.) The
+      * SHIFT pairing -- the note numbers, not the bases -- is still unmeasured.
       *
       * The pads' +SHIFT layer is a second channel per deck (list ch 9/11 ->
-      * rch 8/10) carrying the same eight ranges. It is unbound for the same
-      * reason, so shift-layer pads produce nothing. */
+      * rch 8/10) carrying the same eight ranges. Its HOT CUE base is bound
+      * above the loop rather than here, because the action it stands for is not
+      * a keycode; the other three bases are deliberately left unbound. */
      for (int d = 0; d < 2; d++) {
           int rch = CH_PADS1 + 2 * d;
           int sch = 1 + d;
           for (int p = 0; p < 8; p++) {
-               add_note(rch, 0 + p, K_PAD1 + p, sch);
-               add_note(rch, 32 + p, K_PAD1 + p, sch);
+               add_note(rch,  0 + p, K_PAD1 + p, sch);  /* HOT CUE                    */
+               add_note(rch, 16 + p, K_PAD1 + p, sch);  /* PAD FX 1 -> AUTO BEAT LOOP */
+               add_note(rch, 32 + p, K_PAD1 + p, sch);  /* BEAT JUMP -> SLIP BEAT LOOP */
+               add_note(rch, 48 + p, K_PAD1 + p, sch);  /* SAMPLER -> BEAT JUMP       */
           }
      }
 
@@ -880,6 +1054,19 @@ static void flx4_build(void)
       * browse/Load keys are global, and the deck is in the send channel. */
      add_note(CH_MIX, N_LOAD1, K_LOAD, 1);
      add_note(CH_MIX, N_LOAD2, K_LOAD, 2);
+     /* SHIFT + LOAD. The operator's own ask on the glass: "please also make shift
+      * load 1 the track filter and shift load 2 the shortcut menu". Both are
+      * CH_GLOBAL, like every other browse/library key in this map.
+      *
+      * The two are NOT the same shape, and the difference is measured rather than
+      * stylistic. SHORTCUT (0x0210) opens on a plain press+release. TRACK FILTER
+      * (0x420f) does not: rbp's UiKey_Filter gates on its record reaching state 3
+      * and measurably refuses at state 2 -- which a press+release produces -- so
+      * its row carries add_note_repeat(). rbp_abi.h's OP_REPEAT has the whole
+      * derivation and the five failed drills behind it; a reader who changes this
+      * row to add_note() will get 0 px and no error. */
+     add_note_repeat(CH_MIX, N_LOAD1_SHIFT, K_TRACKFILTER, CH_GLOBAL);
+     add_note(CH_MIX, N_LOAD2_SHIFT, K_SHORTCUT, CH_GLOBAL);
      /* Known, deliberately not routed (key 0): rekordbox's SMART CFX and SMART
       * FADER and the Android MONO/STEREO output switch have no rbp equivalent
       * (MONO is the mono sum of both channels, not the L=cue/R=master split
@@ -1002,41 +1189,156 @@ static void flx4_event(const struct snd_seq_event *ev)
      }
 }
 
-/* The DDJ-FLX4's panel LEDs -- every row -1, and deliberately so. The block at
- * the top of this file says why: this unit's illumination notes for the
- * transport, the pads, the channel CUE and the loops are not published and not
- * guessable, and a wrong number here does not produce a dark LED, it produces a
- * phantom control. rbp_led.c sends nothing for a -1 row, so the bridge can run
- * with these unfilled and the panel simply stays dark until the probe in
- * docs/15's LED section has named a note for each. Each is then a one-line edit.
+/* The DDJ-FLX4's panel LEDs -- **three rows measured, the rest still -1**. The
+ * block at the top of this file says why they were left unguessed: this unit's
+ * illumination notes for the transport, the pads, the channel CUE and the loops
+ * are not published, and a wrong number here does not produce a dark LED, it
+ * produces a phantom control. rbp_led.c sends nothing for a -1 row, so the
+ * bridge runs with the rest unfilled and those LEDs simply stay dark until the
+ * probe in docs/15's LED section has named a note for each. Each is then a
+ * one-line edit -- as these three were: measured 2026-10-01, wired the same day,
+ * and they are the surface's first lit LEDs.
  *
  * KEY LOCK, SLIP and the four Sound Color FX rows are -1 for a different reason:
  * the unit has no such control, so it has no such LED and never will. Recording
  * them as absent rather than omitting them is the point -- an omission is what a
- * future reader fills in by guessing. */
+ * future reader fills in by guessing.
+ *
+ * ONE GROUP IS NOT HERE AT ALL, and it is not an oversight: the unit's seven
+ * pad-mode buttons (HOT CUE, PAD FX 1/2, BEAT JUMP, SAMPLER, BEAT LOOP, KEY
+ * SHIFT) have no field in struct led_notes to be -1 in, so nothing can drive
+ * them and nothing pretends to. They are also the one group with state behind
+ * them -- what the light should say is *which* rbp pad mode is current -- so
+ * wiring them needs a new field, the buttons' LED notes, and a source of truth
+ * for that mode. The obvious candidate, `[player+0x74]` (which scan_plinn()
+ * locates and logs as `padmode=%d`), is measured NOT to track the displayed pad
+ * mode -- polled 1.1 M times across all four mode buttons while rbp's grid
+ * verifiably switched HOT CUE -> BEAT LOOP, it never left 0 -- so that read is
+ * still to be found. Until then the FLX4 lights the button that
+ * was pressed on its own, which happens to be correct whenever the mode was
+ * chosen from these buttons and wrong when rbp's screen moves the mode instead.
+ * The operator asked for this and it is deliberately still open: see S9.9 in
+ * docs/13-raspberrypi4.md. */
 static const struct led_notes flx4_leds = {
-     .deck_ch = -1,            /* unmeasured: the deck LEDs' send channel */
-     .n_sync = -1,             /* pending: BEAT SYNC is input note 88 ch 0 */
-     .n_cue = -1,              /* pending: CUE is input note 12 ch 0 */
-     .n_play = -1,             /* pending: PLAY is input note 11 ch 0 */
+     /* THE FIRST THREE ROWS EVER MEASURED ON THIS SURFACE, 2026-10-01, and they
+      * are the same numbers the same buttons send: the panel's LED for a control
+      * uses that control's own input note on its own input channel. Probed by
+      * playing a one-note MIDI file into the FLX4 from the host with `aplaymidi
+      * -p 28:0` -- the sequencer route, because amidi is EBUSY while the shim
+      * holds the port -- one candidate at a time, and read off the panel by eye:
+      * `84/0` lit deck 1's channel CUE, `84/1` lit deck 2's, `99/6` lit MASTER
+      * CUE, and velocity 0 turned each back off (which is the value rbp_led.c
+      * sends for "off", so the two agree). Wired rather than left as a note
+      * because the driver for both rows was already here and already correct:
+      * rbp_led.c reads rbp's own `me_get_cue(m)` and `me_get_master_cue()` every
+      * tick and sends only on a change, with both caches starting `-1` so the
+      * first tick sends the truth -- the lights therefore agree with rbp from
+      * boot, not from the first press.
+      *
+      * THE DECK ROWS, MEASURED THE SAME DAY AND THE SAME WAY, with one thing the
+      * first three could not show: this panel wants the message REPEATED. The
+      * first pass held each candidate 1.2 s with a single message and lit one of
+      * four; the second held the same four 3 s with the message re-sent every
+      * 100 ms and lit all four. rbp_led.c's LED_RESEND_TICKS is that finding --
+      * without it these rows would be bound and still dark. So `11/0`, `12/0`,
+      * `16/0`, `17/0` and `88/0` are PLAY, CUE, LOOP IN, LOOP OUT and BEAT SYNC on
+      * deck 1, and the rule above puts the same notes on ch 1 for deck 2, which is
+      * what `.deck_ch = 0` encodes as `deck_ch + i`.
+      *
+      * `n_autoloop` (4 BEAT / EXIT, note 77) stayed dark through that same 100 ms
+      * stream, and it is now settled rather than pending: Pioneer's list gives it
+      * an EMPTY receive column, so it has no LED to light -- see the field's own
+      * comment below. The pad group and the Beat FX group remain unwired, and
+      * nothing here is a guess dressed as a measurement. */
+     .deck_ch = 0,             /* MEASURED: deck 1 = ch 0, deck 2 = ch 1 */
+     .n_sync = 88,             /* MEASURED: 88/0 = deck 1 BEAT SYNC */
+     .n_cue = 12,              /* MEASURED: 12/0 = deck 1 CUE (the DECK cue,
+                                * not the mixer strip's -- that is n_strip_cue) */
+     .n_play = 11,             /* MEASURED: 11/0 = deck 1 PLAY */
      .n_keylock = -1,          /* absent: the unit has no KEY LOCK button */
      .n_vinyl = -1,            /* pending, not absent: documented note 23, no button */
      .n_slip = -1,             /* absent: the unit has no SLIP button */
-     .n_loopin = -1,           /* pending: the unit HAS LOOP IN (input note 16) */
-     .n_loopout = -1,          /* pending: ...and LOOP OUT (input note 17) */
-     .n_autoloop = -1,         /* pending: ...and 4 BEAT / EXIT (input note 77) */
+     .n_loopin = 16,           /* MEASURED: 16/0 = deck 1 LOOP IN */
+     .n_loopout = 17,          /* MEASURED: 17/0 = deck 1 LOOP OUT */
+     .n_autoloop = -1,         /* ABSENT, and now settled: 4 BEAT / EXIT has NO
+                                * LED to light. Pioneer's own "List of MIDI
+                                * Messages" gives note 77 (and +SHIFT 80) an
+                                * EMPTY receive column -- the button sends and
+                                * receives nothing back -- and the panel agreed:
+                                * 77/0 held for 1 s with the same 100 ms stream
+                                * that lit every other row stayed dark. So this
+                                * is not an unmeasured number to chase; leaving
+                                * it -1 is the correct final state. The same
+                                * empty receive column covers SHIFT (63), platter
+                                * touch (54/103), CUE/LOOP CALL (81/83, +SHIFT
+                                * 61/62), BEAT SYNC long-press (92) and the FX
+                                * section's 74/75/99-102 on ch 4/5 -- none of
+                                * those have a host-driven LED either. */
 
-     .pad_ch = -1,             /* unmeasured: hot-cue pad 1 is input note 0 ch 7 */
-     .n_pad_first = -1,
-     .pad_enc = LED_ENC_NONE,  /* and the colour encoding is open question 3 */
+     /* The four pad-mode buttons, indexed by rbp's own mode value. MEASURED ON
+      * THE GLASS 2026-10-01: each of the four was lit alone from the host and
+      * the operator read the button it lit -- 27 the 1st, 30 the 2nd, 32 the
+      * 3rd, 34 the 4th, in order, with deck 1's CUE (84/0) flashing as the
+      * positive control in the same run. The numbers are the four buttons' own
+      * INPUT notes on the deck channel, which is the LED rule this map already
+      * measured twice (84/0, 84/1 and 99/6), so the rule now holds 4 for 4 on
+      * this surface.
+      *
+      * The index is RBP's mode and not the button's printed name, and the two
+      * deliberately disagree: the positional rebind of the same day makes the
+      * 3rd button rbp's SLIP BEAT LOOP and the 4th its BEAT JUMP, so the 3rd
+      * light comes on when rbp is in SLIP LOOP. That is the whole point of the
+      * positional doctrine -- the light says which RX3 position is active, not
+      * what Pioneer printed under it. */
+     .n_mode = { 27, 30, 32, 34 },
 
-     .strip_ch_first = -1,     /* unmeasured: CH CUE is input note 84 ch 0 */
-     .strip_count = 0,
-     .n_strip_cue = -1,
+     /* The eight performance pads. Their notes are their own INPUT notes -- the
+      * LED rule again, which now holds 4 for 4 on this surface -- but unlike
+      * every other group here they are not one note each: the unit re-addresses
+      * the whole eight when a mode button is pressed, so the base belongs to the
+      * MODE and there are four of them.
+      *
+      * MEASURED ON THE PANEL 2026-10-01, all four bases, every pad pressed with
+      * the dump running: HOT CUE sent 0..7 on ch 7, PAD FX 1 sent 16..23, the
+      * BEAT JUMP button 32..39 and SAMPLER 48..55, each press at vel 127 with
+      * its own release and rbp acting on every one. So `16 * mode` is not a
+      * guess about this unit, and the four bases are exactly the four the mode
+      * rows above put rbp into -- which is what makes this a lighting of rbp's
+      * modes rather than of the unit's printed labels.
+      *
+      * The two channels are NOT adjacent: deck 1's pads are ch 7 and deck 2's
+      * are ch 9, because 8 and 10 are the same eight pads' +SHIFT layer, unbound
+      * in build(). The `pad_ch + deck` this table said until now would have sent
+      * deck 2's pads to the shift channel.
+      *
+      * A pad is LIT OR DARK here and never coloured, and that is this panel
+      * rather than a gap in the wiring: rbp hands over an RGB per pad, but the
+      * FLX4's pads have no colour to put it in. Pioneer's own list gives every
+      * one of its 350 LED rows as `OFF=0x00, ON=0x7F`, and the ONLY row in the
+      * whole document that carries a value range is the CH LEVEL METER
+      * (0x26..0x7F, banded) -- which this table models separately, in
+      * meter_enc. So `LED_ENC_NONE` is this row's FINAL value and not a
+      * placeholder: the RGB is read and discarded, and 0x7f lights a pad.
+      * (docs/15's open question 3 asked which velocity means which colour; the
+      * answer is that the question does not apply to this surface.)
+      *
+      * What replaces the colour as the on/off signal is rbp's own "nothing
+      * assigned here" flag -- see rbp_abi.h's LED_ENTRY_OFF_UNASSIGNED. It has
+      * to: rbp keeps an empty hot-cue pad at State 1, so on State alone all
+      * eight pads light in HOT CUE and an unassigned pad is indistinguishable
+      * from a loaded one. The operator's panel showed exactly that. */
+     .pad_ch = 7,              /* MEASURED: deck 1 pads, notes base + 0..7 */
+     .pad_ch2 = 9,             /* MEASURED: deck 2 pads (+SHIFT is 8 and 10) */
+     .n_pad_base = { 0, 16, 32, 48 },   /* indexed by rbp's mode; all measured */
+     .pad_enc = LED_ENC_NONE,  /* final: the pads are on/off, they have no colour */
 
-     .master_ch_first = -1,    /* unmeasured: MASTER CUE is input note 99 */
-     .master_ch_count = 0,
-     .n_master_cue = -1,
+     .strip_ch_first = 0,      /* MEASURED: 84/0 = deck 1, 84/1 = deck 2 */
+     .strip_count = 2,
+     .n_strip_cue = 84,
+
+     .master_ch_first = 6,     /* MEASURED: 99/6 lights MASTER CUE */
+     .master_ch_count = 1,
+     .n_master_cue = 99,
 
      .fx_ch = -1,              /* pending: the unit HAS Beat FX ON/OFF (note 71) */
      .n_fx = {
@@ -1046,6 +1348,34 @@ static const struct led_notes flx4_leds = {
           [LED_FX_CFX_NOISE]   = -1,   /* absent, ditto */
           [LED_FX_CFX_SWEEP]   = -1,   /* absent, ditto */
      },
+
+     /* The meter -- the one row of this table the unit does not SEND, and the
+      * only row whose confirmation was a finger rather than a dump. Pioneer's
+      * list, item 3-15 "CH LEVEL METER": deck 1 receives `B0 02 hh` and deck 2
+      * `B1 02 hh`, with the value banded Green1 0x26-0x40, Green2 0x41-0x56,
+      * Orange1 0x57-0x64, Orange2 0x65-0x76, Red 0x77-0x7F, "lights up from the
+      * bottom", dark below 0x26. Zero-indexed that is CC 2 on channel 0 and
+      * channel 1, which is the whole of this row.
+      *
+      * MEASURED ON THE PANEL 2026-10-01: with VU_TEST=1 sweeping the steps, the
+      * operator's own eye confirmed both channel meters stepping, which is the
+      * only thing that settles a meter -- a successful midi_cc() proves the
+      * message left the shim and nothing more. So the wiring is confirmed and
+      * the band boundaries above remain the list's published values; if the
+      * panel lights but the top is unreachable or the bottom is dead, this is
+      * still the row to correct.
+      *
+      * Master is deliberately absent. The manual's `[Level Meter]` switch picks
+      * channel or master for the SAME two meters, and the list gives no separate
+      * master meter address -- so lighting ch 15 like the Prime would be
+      * inventing an address, which is the one thing this table must not do. */
+     .meter_ch_first = 0,      /* decks 1/2 -> channels 0/1 */
+     .n_meter_cc = 2,
+     .meter_enc = METER_ENC_FLX4_LEVEL,
+     .meter_pre_fader = 1,
+     .meter_master_ch = -1,
+     .n_meter_master_l = -1,
+     .n_meter_master_r = -1,
 };
 
 const struct ctrl_map map_flx4 = {

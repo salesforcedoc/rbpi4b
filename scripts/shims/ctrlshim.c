@@ -66,6 +66,13 @@ const struct led_notes *ctrl_sel_leds(void)
      return g_midi ? g_midi->leds : NULL;
 }
 
+/* Both halves of "is there a table yet" -- see the declaration in ctrl_map.h for
+ * why the NULL from ctrl_sel_leds() is not enough on its own. */
+int ctrl_sel_ready(void)
+{
+     return g_midi != NULL;
+}
+
 /* MIDI_DUMP */
 static FILE *dump_f;
 static unsigned long long dump_t0;

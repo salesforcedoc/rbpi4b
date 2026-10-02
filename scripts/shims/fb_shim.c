@@ -10,7 +10,8 @@
  *     syscall() to bypass it. Do not "fix" this.
  *   FBIOGET_FSCREENINFO -> line_length = 2560 (1280 * 16 bpp / 8).
  *   FBIOPUT_VSCREENINFO -> accepted and ignored: the real mode is the kernel's.
- *   FBIOPAN_DISPLAY -> the frame pacer (see below).
+ *   FBIOPAN_DISPLAY -> the frame pacer (see below). Not reached on this unit.
+ *   FBIO_WAITFORVSYNC -> the top menu's compositor, before the wait (see below).
  *   /dev/mem -> EACCES, which is how an mmap of it ends up anonymous.
  *   gpiodrv -> one zero byte per read, and poll() sleeps instead of spinning.
  *
@@ -21,6 +22,20 @@
  * each pan to a 60 Hz budget is what fixed it. It is env-gated as PAN_PACER_MS
  * (fractional, default 16.666666; 0 disables it) so the behaviour can be turned
  * off for an experiment without a rebuild.
+ *
+ * MEASURED 2026-09-29, and it corrects what this comment used to claim: with
+ * RB_DFB_PRESENT=off, FBIOPAN_DISPLAY is never issued on this unit at all. Every
+ * distinct framebuffer ioctl that reached this switch over a whole session was
+ * logged at its first occurrence -- 0x4600 FBIOGET_VSCREENINFO, 0x4602
+ * FBIOGET_FSCREENINFO, 0x4601 FBIOPUT_VSCREENINFO, 0x4604 FBIOGETCMAP, 0x4605
+ * FBIOPUTCMAP and 0x40044620 FBIO_WAITFORVSYNC -- and 0x4606 is not among them.
+ * It is not DirectFB's panstep early-out either: this unit's vc4drmfb reports
+ * xpanstep 1 / ypanstep 1, so that test passes; the call simply does not happen.
+ * So on this configuration the pacer above is dead code, and the boundary that
+ * really paces rbp's render thread is the vsync wait, at a measured 57.1/s. The
+ * pacer is kept because it governs the present modes that do pan -- it is what
+ * the docs/13 frame-rate fix rests on -- but nothing may hang off it, and the
+ * top menu does not: it draws from the vsync case below.
  *
  * Removed in the M2a split: an unused `pthread_mutex_t fb_lock` (dead since the
  * pacer became lock-free — hence "zero mutexes" below), and the touch emulation,
@@ -33,6 +48,7 @@
 #define _GNU_SOURCE
 #include "tscfake.h"
 #include "fbdev.h"
+#include "menu_draw.h"
 #include "syscalls.h"
 #include "envutil.h"
 
@@ -50,6 +66,16 @@ static char is_gpio_fd[MAX_GPIO_FDS];
 /* 1280 * 16 / 8. Every consumer of FSCREENINFO (DirectFB's pitch, rbp's stride
  * arithmetic) assumes the logical width, not the panel's. */
 #define FB_LOGICAL_LINE_LENGTH 2560
+
+/* The toolchain's linux/fb.h predates this uapi entry, so it is spelled out here
+ * -- and its value is not a guess: _IOW('F', 0x20, __u32) is (1<<30)|(4<<16)|
+ * ('F'<<8)|0x20 = 0x40044620, which is the number measured arriving at this
+ * switch from rbp's render thread at 57.1/s. The case below is dead code if this
+ * is ever wrong, and dead code here means the top menu loses its frame boundary,
+ * not that anything breaks. */
+#ifndef FBIO_WAITFORVSYNC
+#define FBIO_WAITFORVSYNC 0x40044620UL
+#endif
 
 #define PAN_PACER_DEFAULT_MS 16.666666
 
@@ -199,6 +225,18 @@ int ioctl(int fd, unsigned long request, ...)
     }
     case FBIOPUT_VSCREENINFO:
         return 0;
+    case FBIO_WAITFORVSYNC:
+        /* The frame boundary rbp actually drives its render loop from on this unit
+         * -- measured at 57.1/s -- and, unlike the pan below, the boundary that is
+         * really reached. menu_frame_tick() runs BEFORE the wait, not after, and
+         * that is the whole reason this is the right side of rbp's frame: whether
+         * the loop is `draw; wait` or `wait; draw`, the entry of the wait comes
+         * immediately after a completed draw, so the panel is composited just
+         * after rbp has finished a frame and then has the whole inter-frame gap to
+         * itself. Painting after the wait would put it immediately before the next
+         * draw, i.e. under it. menu_draw.c has the rest. */
+        menu_frame_tick();
+        return real_ioctl(fd, request, arg);
     case FBIOPAN_DISPLAY: {
         long pace_ns = pan_pacer_ns();
         if (pace_ns > 0) {

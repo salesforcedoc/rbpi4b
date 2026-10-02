@@ -124,33 +124,29 @@ static struct kbd_bind binds[] = {
      { EV_KEY, KEY_1,     K_LOAD, 1, 0, 0 },
      { EV_KEY, KEY_2,     K_LOAD, 2, 0, 0 },
 
-     /* ---- the browse screen's buttons, on the rest of the digit row: 5/6/7
-      * SOURCE / BROWSE / TAG LIST and 0 MENU. All four are rbp's *global*
-      * browse-area keycodes (rbp_abi.h's 0x020x block), sent the way this map
-      * already sends SOURCE and BACK -- CH_GLOBAL, the channel rbp's own
-      * browse keys arrive on -- and they are press/release buttons, not steps.
+     /* ---- the browse screen's buttons, on the rest of the digit row: 5/6/7/8/9
+      * SOURCE / BROWSE / TAG LIST / PLAYLIST / SEARCH and 0 MENU. All six are
+      * rbp's *global* browse-area keycodes (rbp_abi.h's 0x020x block), sent the
+      * way this map already sends SOURCE and BACK -- CH_GLOBAL, the channel
+      * rbp's own browse keys arrive on -- and they are press/release buttons,
+      * not steps.
       *
       * They sit on the digit row on purpose: 1/2 are LOAD, so the whole browse
       * surface is one hand's worth of keys that need no mnemonic to remember.
       *
-      * rbp has these six controls -- the labels are in the binary as Source,
-      * BROWSE, TAGLIST, PlayList/PLAYLIST, Search and menu -- but rbp_abi.h
-      * carries a keycode for only four of them. ---- */
+      * 8 and 9 were the last two to be filled in, and only because rbp_abi.h
+      * has no keycode for them until they were *measured*: rbp has all six
+      * controls -- the labels are in the binary as Source, BROWSE, TAGLIST,
+      * PlayList/PLAYLIST, Search and menu -- but a name in a pool is not a
+      * keycode, so they shipped with a 0 sentinel (ctrl_map.h's "a control rbp
+      * has no code for", named in the log, sending nothing) until the top menu's
+      * bench knob measured 0x0204 and 0x0205 on the unit. rbp_abi.h carries the
+      * runs. ---- */
      { EV_KEY, KEY_5,     K_SOURCE,  CH_GLOBAL, 0, 0 },
      { EV_KEY, KEY_6,     K_BROWSE,  CH_GLOBAL, 0, 0 },
      { EV_KEY, KEY_7,     K_TAGLIST, CH_GLOBAL, 0, 0 },
-
-     /* ---- 8 and 9: PLAYLIST and SEARCH. TODO: rbp has both controls and this
-      * map has the keys, but rbp_abi.h has no keycode for either, and the
-      * MAPPING.md it cites for the 0x020x block is not in the repository. These
-      * two rows are declared with key 0 -- ctrl_map.h's "a control rbp has no
-      * code for" -- so the keys are *visibly* pending rather than silently
-      * absent: kbd_input() names the control and sends nothing. Replace the 0
-      * with the real keycode and move the row up once one is measured; do not
-      * guess a value into the 0x020x block, whose two unclaimed slots (0x0204,
-      * 0x0205) are a plausible-looking trap rather than an answer. ---- */
-     { EV_KEY, KEY_8,     0,         CH_GLOBAL, 0, 0 },   /* PLAYLIST */
-     { EV_KEY, KEY_9,     0,         CH_GLOBAL, 0, 0 },   /* SEARCH */
+     { EV_KEY, KEY_8,     K_PLAYLIST, CH_GLOBAL, 0, 0 },
+     { EV_KEY, KEY_9,     K_SEARCH,  CH_GLOBAL, 0, 0 },
 
      { EV_KEY, KEY_0,     K_MENU,    CH_GLOBAL, 0, 0 },
 
@@ -271,10 +267,14 @@ static void log_unmapped(int type, int code, int value)
      s->suppressed = 0;
 }
 
-/* The name of a control this map can see but cannot drive yet. Only the two
- * browse keys with no keycode are in here (see the bindings above); naming them
- * is the difference between a log that says which control is dead and one that
- * says only which number was pressed. */
+/* The name of a control this map can see but cannot drive -- ctrl_map.h's `key`
+ * 0 contract, which keeps a control in the table with nothing behind it.
+ *
+ * No binding in this map carries a key of 0 any more: 8 and 9 were the last two,
+ * and they were filled in when their keycodes were measured on 2026-09-29. The
+ * branch below and this table therefore do nothing today and are kept for the
+ * contract, not for a caller -- the next control rbp has no code for gets a row
+ * with a name here instead of a silent number in the log. */
 static const char *pending_name(int code)
 {
      switch (code) {
@@ -302,9 +302,9 @@ static void kbd_input(int type, int code, int value)
            * track and sending 0 would be a keycode rbp never asked for. */
           if (b->key == 0) {
                if (verbose)
-                    klog("knobshim2: kbd: %s pressed (evdev code=%d) but rbp "
-                         "has no keycode for it yet -- nothing sent; see the "
-                         "TODO in map_kbd.c\n", pending_name(code), code);
+                    klog("knobshim2: kbd: %s pressed (evdev code=%d) but this "
+                         "map has no rbp keycode for it -- nothing sent\n",
+                         pending_name(code), code);
                return;
           }
 
@@ -374,12 +374,13 @@ static void kbd_build(void)
           "PLAY/CUE/SYNC deck 1/2 (w/s also PLAY 1/2), 1/2 = LOAD, "
           "arrows/wheel + Enter = selector, "
           "Backspace/Esc/right-button = BACK/SOURCE\n");
-     /* Said at build time and not only under KNOB_VERBOSE=1, because the two
-      * pending keys are otherwise indistinguishable from working ones until
-      * someone presses them and watches nothing happen. */
-     klog("knobshim2: kbd: 5/6/7/0 = SOURCE/BROWSE/TAG LIST/MENU; "
-          "8/9 = PLAYLIST/SEARCH are declared but have no rbp keycode yet, "
-          "so pressing them sends nothing (TODO in map_kbd.c)\n");
+     /* Said at build time and not only under KNOB_VERBOSE=1: this is the only
+      * place the whole browse surface is written down, and a key that sends
+      * nothing is indistinguishable from a working one until someone presses it
+      * and watches nothing happen. */
+     klog("knobshim2: kbd: 5/6/7/8/9 = SOURCE/BROWSE/TAG LIST/PLAYLIST/SEARCH, "
+          "0 = MENU (all six measured; MENU toggles MY SETTINGS and only on the "
+          "SOURCE screen)\n");
 }
 
 static void kbd_startup(void)
