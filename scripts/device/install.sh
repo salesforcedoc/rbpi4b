@@ -137,7 +137,22 @@ fi
 # The list is explicit rather than a glob: this directory also holds install.sh
 # itself, plus README.md and the build-side inputs, none of which belong on the
 # unit.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh boot-trim.sh rb.conf; do
+#
+# healthwatch.sh was missing from this list until 2026-10-06, and that is a gap
+# worth naming rather than quietly closing: the watchdog's unit WAS enabled on
+# the measured unit, so `systemctl status healthwatch` answered and the service
+# was running -- but the script it runs had been scp'd by hand, so a unit
+# installed from the tarball alone came up with a unit whose ExecStart pointed at
+# nothing. A missing file and a running service look the same from `status`.
+#
+# uninstall.sh travels with the tree for the same reason: it is the inverse of
+# this script, and the one moment it is needed is the moment nobody wants to go
+# looking for it.
+# install.sh copies itself too, so the deploy root is the complete set: a future
+# reader standing at the machine finds the installer that made the tree, not a
+# gap where it used to be. Copying a running shell script is fine -- sh reads it
+# a line at a time and holds its own descriptor.
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh install.sh uninstall.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
@@ -145,6 +160,19 @@ for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh b
     warn "$s not found in $HERE -- not installed"
   fi
 done
+
+# journald-persistent.conf is not a script, so it is not in the list above (that
+# loop chmods 755). It travels anyway, as the copy of record: both doctor.sh and
+# uninstall.sh identify the installed drop-in by comparing against it, and
+# uninstall in particular has to make that comparison ON the unit -- the moment
+# it runs is the moment a checkout of this repository may already be gone.
+if [ -f "$HERE/journald-persistent.conf" ]; then
+  cp "$HERE/journald-persistent.conf" "$DEPLOY/journald-persistent.conf"
+  chmod 644 "$DEPLOY/journald-persistent.conf"
+else
+  warn "journald-persistent.conf not found in $HERE -- kept out of the deploy root,
+  where uninstall.sh looks for it to identify the installed drop-in"
+fi
 
 # rb.conf, just replaced, is the SHIPPED default: it is overwritten here and again
 # by the `tar -xzf` above, because it travels inside the tarball. A value measured
@@ -178,6 +206,134 @@ LOCAL
   say "created $DEPLOY/rb.local.conf for machine-local overrides (empty)"
 fi
 
+# --- deploy-root runtime artifacts ------------------------------------------
+#
+# THE STALE DEPLOY TRAP, closed here rather than documented again.
+#
+# start-rb.sh's install_override() copies six files from the deploy root into the
+# chroot at EVERY launch, and skips each one in silence when its source is
+# absent. That is deliberate -- it is how you iterate on one shim without
+# rebuilding the tarball -- but it has a consequence this installer had never
+# dealt with: **the deploy-root copies are authoritative**. A file left there by
+# a hand scp overrides whatever the tarball put inside the chroot, forever, and
+# nothing in the tree said so. That is how a build can be correct, deployed, and
+# not running.
+#
+# So the artifacts are installed deliberately, from a source this script knows,
+# and every one that is replaced is kept as <name>.prev first -- the idiom already
+# on the unit.
+#
+# Sources, first hit wins. RB_ARTIFACT_DIR names one directory holding all of
+# them, for a build done on the Linux host that produced the tarball:
+#
+#   fbshim.so knobshim.so audioshim.so crashcatch.so ccexit
+#       scripts/shims/             (make -C scripts/shims)
+#   libdirectfb_fbdev-rot16.so
+#       work/dfb/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so
+#           (tools/build-directfb/README.md; `work/` is not committed, so this one
+#           is absent unless the DirectFB build has been run here)
+#
+# A source that is missing is NOT an error: a clean install from the tarball
+# alone is the supported path and needs none of this. It says so, once, per file.
+#
+# AND rbp-audio IS DELIBERATELY NOT IN THIS LIST. It is stage 1 of a two-stage
+# patch to the player, and it is the name start-rb.sh copies over the installed
+# player at every launch -- so installing it would put back the getPcController()
+# NULL-deref that kills rbp about a second in, with no display and no log. A file
+# of that name at the deploy root does not sit there; it wins. If one is present
+# this script says so rather than removing it, because the person who put it there
+# may be mid-investigation (doctor.sh hashes it against all three stages).
+
+SHIM_SRC="${RB_ARTIFACT_DIR:-$HERE/../shims}"
+DFB_SRC="${RB_ARTIFACT_DIR:-$HERE/../../work/dfb/lib/directfb-1.4-6/systems}"
+
+install_artifact() {
+  name=$1
+  src=$2
+  dst="$DEPLOY/$name"
+
+  if [ ! -f "$src" ]; then
+    say "  $name: no source at $src -- leaving whatever is deployed alone"
+    return 0
+  fi
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    say "  $name: already current"
+    return 0
+  fi
+  # Staged beside the target and renamed into place, so the deploy root never
+  # holds a half-written .so. It matters more here than it looks: start-rb.sh
+  # copies this directory into the chroot at every launch, so a truncated file
+  # would not merely sit there -- it would be installed, and the next launch would
+  # load it. A rename within one directory is atomic; a cp is not.
+  tmp="$dst.new.$$"
+  if ! install -m 755 -o root -g root "$src" "$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    warn "could not install $name from $src -- $dst is UNCHANGED"
+    return 0
+  fi
+
+  # The backup is taken only once the staged copy is known good, so .prev always
+  # means "the build that was running before the last change that actually
+  # happened". Taking it earlier would spend the rollback point on a run that
+  # then failed, and quietly walk the good generation off the end of the chain.
+  #
+  # Refuse to replace without it: an install that cannot be taken back is worse
+  # than an install that did not happen, because the way back is one `mv` and
+  # nobody is at the machine to do it by hand.
+  was_present=0
+  if [ -f "$dst" ]; then
+    was_present=1
+    if ! cp -p "$dst" "$dst.prev"; then
+      rm -f "$tmp" 2>/dev/null || true
+      warn "could not write $dst.prev -- refusing to replace $name, because the
+  deployed copy would then have no way back. $dst is UNCHANGED"
+      return 0
+    fi
+  fi
+
+  mv -f "$tmp" "$dst"
+  if [ "$was_present" = 1 ]; then
+    say "  $name: replaced (previous kept as $name.prev)"
+  else
+    say "  $name: installed (was not present)"
+  fi
+}
+
+say "deploy-root runtime artifacts (these override the copies inside the chroot)"
+
+# Whether there is anything to install at all is asked once, up front. The common
+# deploy -- the tarball plus this directory, nothing built locally -- has no build
+# outputs anywhere near it, and six "no source" lines on every install would train
+# the reader to skip the one line that matters on the day there is. (Note the
+# explicit `if`, not `[ -f ... ] && found=1`: under `set -e` a bare `&&` list whose
+# test fails is a failing command, and would end the install.)
+_found=0
+for a in fbshim.so knobshim.so audioshim.so crashcatch.so ccexit; do
+  if [ -f "$SHIM_SRC/$a" ]; then _found=1; fi
+done
+if [ -f "$DFB_SRC/libdirectfb_fbdev.so" ]; then _found=1; fi
+
+if [ "$_found" = 0 ]; then
+  say "  no build outputs under $SHIM_SRC or $DFB_SRC, so nothing to install over"
+  say "  them. The copies build-chroot.sh placed inside the chroot stand as built."
+  say "  Set RB_ARTIFACT_DIR=<dir> to install a local build over them."
+else
+  install_artifact fbshim.so    "$SHIM_SRC/fbshim.so"
+  install_artifact knobshim.so  "$SHIM_SRC/knobshim.so"
+  install_artifact audioshim.so "$SHIM_SRC/audioshim.so"
+  install_artifact crashcatch.so "$SHIM_SRC/crashcatch.so"
+  install_artifact ccexit       "$SHIM_SRC/ccexit"
+  install_artifact libdirectfb_fbdev-rot16.so "$DFB_SRC/libdirectfb_fbdev.so"
+fi
+
+if [ -f "$DEPLOY/rbp-audio" ]; then
+  warn "$DEPLOY/rbp-audio is present, and start-rb.sh copies it over the installed
+  player AT EVERY LAUNCH. If it is not the build you mean to run, rbp will start
+  the wrong binary and may die about a second in with no display and no log. It
+  was NOT touched by this installer. Ask doctor which stage it is:
+    sh $HERE/doctor.sh"
+fi
+
 # --- systemd autostart ------------------------------------------------------
 #
 # The unit is installed from here rather than shipped in the tarball, so the
@@ -198,6 +354,24 @@ else
   warn "rblive4.service is not in $HERE -- the player will NOT start at boot"
 fi
 
+# The health watchdog, a unit of its own on purpose: it exists to keep recording
+# while everything else on the box is starved (healthwatch.sh's header), so it has
+# to be a process the player cannot take down with it -- which is exactly what it
+# could not be if it were a thread inside the player.
+#
+# It is gated with the player rather than installed-and-left, because a watchdog
+# for a player that is not autostarted watches nothing and only writes to the
+# journal.
+HW_UNIT=/etc/systemd/system/healthwatch.service
+if [ -f "$HERE/healthwatch.service" ]; then
+  install -m 644 -o root -g root "$HERE/healthwatch.service" "$HW_UNIT"
+  say "installed $HW_UNIT"
+else
+  warn "healthwatch.service is not in $HERE -- a wedged unit will leave no record.
+  This is the unit that writes /opt/rblive4/log/health.log and /tmp/health.log,
+  and its log is the only thing that survives the wedge it is there to describe."
+fi
+
 # Persistent journal: the file's own header says why (a brownout's evidence is
 # otherwise in RAM). Installed unconditionally; it is capped at 200M and the way
 # to undo it is to delete the file.
@@ -207,6 +381,26 @@ if [ -f "$HERE/journald-persistent.conf" ]; then
   install -m 644 -o root -g root "$HERE/journald-persistent.conf" \
           /etc/systemd/journald.conf.d/persistent.conf
   say "journal is now persistent (/etc/systemd/journald.conf.d/persistent.conf)"
+
+  # A second drop-in under an earlier name for the same file, which an install
+  # that predates the rename left behind. journald reads the directory in
+  # alphabetical order and later wins, and "9" sorts after "p" -- so a stale
+  # 99-persistent.conf is read INSTEAD of the one just installed, and the two look
+  # identical right up until they do not. Byte-identical to what we ship is the
+  # proof it is ours; anything else is left alone and said so.
+  JD=/etc/systemd/journald.conf.d
+  if [ -f "$JD/99-persistent.conf" ]; then
+    if cmp -s "$HERE/journald-persistent.conf" "$JD/99-persistent.conf"; then
+      rm -f "$JD/99-persistent.conf"
+      say "removed $JD/99-persistent.conf (the same file under its old name)"
+    else
+      warn "$JD/99-persistent.conf differs from the drop-in just installed and is
+  not ours to judge -- it is left alone. It sorts AFTER persistent.conf, so
+  journald reads it INSTEAD. Compare them before trusting the journal settings:
+    diff $HERE/journald-persistent.conf $JD/99-persistent.conf"
+    fi
+  fi
+
   systemctl restart systemd-journald 2>/dev/null || \
     warn "could not restart systemd-journald; the journal becomes persistent on the next boot"
 fi
@@ -227,6 +421,21 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl disable rblive4.service >/dev/null 2>&1 || true
     say "rblive4.service installed but DISABLED (RB_AUTOSTART=${RB_AUTOSTART:-1})"
     say "  it is still startable by hand: systemctl start rblive4"
+  fi
+
+  # healthwatch follows the player's decision, and says which one it made.
+  if [ -f "$HW_UNIT" ]; then
+    if [ "${RB_AUTOSTART:-1}" = "1" ]; then
+      if systemctl enable healthwatch.service >/dev/null 2>&1; then
+        say "healthwatch.service enabled -- the wedge record starts at boot"
+      else
+        warn "could not enable healthwatch.service; start it by hand with
+  systemctl enable --now healthwatch.service"
+      fi
+    else
+      systemctl disable healthwatch.service >/dev/null 2>&1 || true
+      say "healthwatch.service installed but DISABLED with the player (RB_AUTOSTART=${RB_AUTOSTART:-1})"
+    fi
   fi
 fi
 
@@ -345,6 +554,18 @@ After the reboot the player starts on its own. Day to day:
   systemctl restart rblive4     # re-launch (also the way to pick up a new build)
   systemctl stop rblive4        # stop, and release the media mounts
   systemctl start getty@tty1    # stop the player and get the local console back
+
+healthwatch runs alongside it and records WHY the box wedges, if it does. It
+writes to disk and to tmpfs, because the journal stops at the same instant:
+
+  systemctl status healthwatch
+  tail -40 /opt/rblive4/log/health.log    # survives a reboot
+  tail -40 /tmp/health.log                # read BEFORE rebooting: /tmp is tmpfs
+
+To take all of this back off the machine, in the one order that is safe:
+
+  sh /opt/rblive4/uninstall.sh --dry-run   # print the plan, change nothing
+  sh /opt/rblive4/uninstall.sh             # stop, revert the boot trim, unmount, remove
 
 To run it by hand instead (a target without the unit enabled):
 

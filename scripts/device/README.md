@@ -1,8 +1,12 @@
 # scripts/device/
 
-Everything that runs **on the Raspberry Pi 4**, as root. These ship inside the
-deploy tarball and land at the deploy root (`/opt/rblive4` by default) beside the
-`rbx3-run/` chroot:
+Everything that runs **on the Raspberry Pi 4**, as root.
+
+Note where these come from, because it is not the tarball: the deploy tarball
+carries only `rb.conf` and the `rbx3-run/` chroot, and `install.sh` — which is
+itself in this directory, run from wherever you scp'd it — copies the scripts
+below into the deploy root (`/opt/rblive4` by default). So a unit needs
+`scripts/device/` present at install time, not just a tarball:
 
 ```
 /opt/rblive4/
@@ -10,11 +14,15 @@ deploy tarball and land at the deploy root (`/opt/rblive4` by default) beside th
 ├── rb.local.conf    machine-LOCAL overrides, sourced last; never overwritten
 ├── lib.sh           shared: rb.conf loading, the /proc process lookup
 ├── install.sh       one-time (and idempotent) deploy: untar, verify, fix-dev
+├── uninstall.sh     the inverse, in the one safe order: stop, revert the trim,
+│                    unmount and PROVE, then remove
 ├── doctor.sh        check a deployed unit and report; changes NOTHING
 ├── fix-dev.sh       bind mounts + device stubs; run again after every reboot
 ├── start-rb.sh      the launcher: services, shims, edb_streamd, rbp, USB watcher
 ├── usb-watch.sh     media hotplug -> mount -> bind into the chroot -> notify rbp
 ├── display-watch.sh monitor geometry change -> restart the unit
+├── boot-trim.sh     the boot-time trim, and its own inverse
+├── healthwatch.sh   the wedge recorder, run by healthwatch.service
 ├── log/             rbp.log, edb_streamd.log, usbwatch.log, displaywatch.log
 ├── media/usb1/sda1  where a stick is mounted (host side)
 └── rbx3-run/        the soft-float ARM32 chroot: player, shims, DirectFB
@@ -29,7 +37,9 @@ deploy tarball and land at the deploy root (`/opt/rblive4` by default) beside th
 | `usb-watch.sh` | `start`/`stop`/`status`/`run`. Watches for USB mass storage, mounts it, binds it into the chroot at the path baked into the player, and notifies rbp through `/tmp/udev_usb1`, retrying until rbp opens `export.pdb`. |
 | `display-watch.sh` | `start`/`stop`/`status`/`run`/`baseline` (`--dry-run` on the first two). Compares the framebuffer's geometry against the one `rbp` was launched with and restarts the unit when it changes — the driver and the pointer each read the real geometry once and hold it, so a monitor swap otherwise leaves a sheared or blank picture until someone intervenes. Bounded by a cooldown and a per-boot cap, so a flapping monitor cannot become a restart loop. |
 | `boot-trim.sh` | `apply`/`revert`/`status`/`report` (`items`: `services cloudinit apt unit bootfiles`). The boot-time trim, run by `install.sh` and reversible: it persists the service masks so the launcher's step 1 stops reloading systemd for no-ops, turns cloud-init off, takes the apt timers off the boot path, and ensures the `/boot/firmware` tokens and directives. `report` prints the boot's monotonic milestones so a before/after is a diff. |
-| `lib.sh` | Sourced by the other five — not run directly. |
+| `healthwatch.sh` | Run by `healthwatch.service`, not by hand. Records *why* the unit wedges: a seq-numbered round every 15 s to `/opt/rblive4/log/health.log` (survives a reboot) **and** `/tmp/health.log` (survives a disk stall — read it before rebooting), probing the symptom itself with a loopback `:22` banner read. A gap in the sequence numbers is itself evidence that the recorder was not scheduled either. |
+| `uninstall.sh` | `--dry-run`/`--yes`/`--purge`. The inverse of `install.sh`, and the reason it is a script is the order: stop the units, `boot-trim.sh revert` **before** anything is deleted (it lives inside the tree being removed, and it is the only thing that knows how to restore `/boot/firmware` and re-enable the services the trim disabled), then unmount the six mounts under the deploy root and **re-read `/proc/mounts` and refuse while anything remains** — an `rm -rf` over a live bind mount descends through it, and one of the six is the host's own `/dev`. Preserves `rb.local.conf` to `/root` unless `--purge`, and never writes to, deletes from or repairs the USB media. |
+| `lib.sh` | Sourced by seven of the others (`boot-trim`, `display-watch`, `doctor`, `fix-dev`, `install`, `start-rb`, `usb-watch`) — not run directly. `healthwatch.sh` deliberately does not: it has to keep working when the rest of the box does not. |
 
 ## Notes
 

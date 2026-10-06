@@ -290,12 +290,20 @@ if [ -d "$JD" ]; then
     say "removing the persistent-journal drop-in"
     x_rm "$JD/persistent.conf"
     if [ -f "$JD/99-persistent.conf" ]; then
-        if [ -f "$JD_OURS" ] && cmp -s "$JD_OURS" "$JD/99-persistent.conf"; then
+        if [ ! -f "$JD_OURS" ]; then
+            # "differs from ours" and "we cannot tell" are different answers and
+            # must not read as the same one -- the first is a judgement, the
+            # second is a gap in this script's reach.
+            warn "no copy of the drop-in to compare against (looked for
+  $HERE/journald-persistent.conf and $DEPLOY/journald-persistent.conf), so
+  $JD/99-persistent.conf cannot be identified either way -- leaving it. It sorts
+  AFTER persistent.conf, so journald reads it INSTEAD."
+        elif cmp -s "$JD_OURS" "$JD/99-persistent.conf"; then
             say "removing $JD/99-persistent.conf (the same file under its old name)"
             x_rm "$JD/99-persistent.conf"
         else
-            warn "$JD/99-persistent.conf is not byte-identical to the copy we ship,
-  so it is not ours to judge -- leaving it alone."
+            warn "$JD/99-persistent.conf differs from the copy we ship, so it is not
+  ours to judge -- leaving it alone."
         fi
     fi
     # Only ever succeeds when the directory is empty, and we are what created it.
