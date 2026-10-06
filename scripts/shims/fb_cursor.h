@@ -13,9 +13,9 @@
  * pointsrc_cursor() — because an absolute digitiser reports where it is being
  * touched and needs no arrow, while a mouse is unusable without one.
  */
-#ifndef RBLIVE4_FB_CURSOR_H
-#define RBLIVE4_FB_CURSOR_H
+#ifndef RBPI4B_FB_CURSOR_H
+#define RBPI4B_FB_CURSOR_H
 
 int fb_cursor_start(void);
 
-#endif /* RBLIVE4_FB_CURSOR_H */
+#endif /* RBPI4B_FB_CURSOR_H */

@@ -45,8 +45,8 @@
  * tscfake_emit() puts on the wire. rbp's UI and the operator's hand agree on
  * logical space; the reflection exists for rbp's benefit alone (see tscfake.h).
  */
-#ifndef RBLIVE4_TOUCH_ZONE_H
-#define RBLIVE4_TOUCH_ZONE_H
+#ifndef RBPI4B_TOUCH_ZONE_H
+#define RBPI4B_TOUCH_ZONE_H
 
 /* One call per pointer report, in the order the events happened.
  *
@@ -77,4 +77,4 @@ int touch_zone_feed(int down, int x, int y);
  * release here (the gesture is already complete), so this cannot strand one. */
 void touch_zone_reset(void);
 
-#endif /* RBLIVE4_TOUCH_ZONE_H */
+#endif /* RBPI4B_TOUCH_ZONE_H */

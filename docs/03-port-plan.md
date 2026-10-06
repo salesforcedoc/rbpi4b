@@ -222,8 +222,8 @@ ssh pi@<host>
 #   see tools/build-directfb/README.md
 
 # assemble the chroot, deploy, launch
-#   scripts/build-chroot.sh            # -> work/rblive4-pi4.tgz
-#   ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rblive4-pi4.tgz'
+#   scripts/build-chroot.sh            # -> work/rbpi4b-pi4.tgz
+#   ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rbpi4b-pi4.tgz'
 #   ssh pi@<host> 'sudo sh /opt/rblive4/start-rb.sh'
 ```
 

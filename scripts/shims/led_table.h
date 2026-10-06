@@ -27,8 +27,8 @@
  * pointer chain, the interval, the sleep) and this owns the decision, so the
  * decision can be tested with a fabricated torn table -- see test_led_table.c.
  */
-#ifndef RBLIVE4_LED_TABLE_H
-#define RBLIVE4_LED_TABLE_H
+#ifndef RBPI4B_LED_TABLE_H
+#define RBPI4B_LED_TABLE_H
 
 #include "rbp_abi.h"   /* LED_ENTRY_SIZE, LED_DUMP_MAX: the table's shape */
 
@@ -70,4 +70,4 @@ const unsigned char *led_find(const unsigned char *tbl, unsigned int count,
 int led_blink_on(unsigned long long now_ms, unsigned int period_ms,
                  unsigned int fallback_ms);
 
-#endif /* RBLIVE4_LED_TABLE_H */
+#endif /* RBPI4B_LED_TABLE_H */

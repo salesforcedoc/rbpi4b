@@ -1,6 +1,6 @@
 # 00 — Overview
 
-rblive4 runs the **Pioneer DJ XDJ-RX3 standalone rekordbox player** (`rbp`,
+rbpi4b runs the **Pioneer DJ XDJ-RX3 standalone rekordbox player** (`rbp`,
 called `rb` internally) on a **Raspberry Pi 4B**. The XDJ-RX3 firmware builds
 its player as **soft-float ARM32**; a Pi executes soft-float EABI ELF natively —
 the same arrangement the Prime GO and SC Live 4 ports relied on. What that needs

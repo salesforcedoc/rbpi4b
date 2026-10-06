@@ -10,8 +10,8 @@
  * Note what is *not* here: the SC Live 4's own note numbers and CCs, which
  * belong to the controller map, not to rbp, and are still in rbp_led.c.
  */
-#ifndef RBLIVE4_RBP_ABI_H
-#define RBLIVE4_RBP_ABI_H
+#ifndef RBPI4B_RBP_ABI_H
+#define RBPI4B_RBP_ABI_H
 
 #define UI_OBJ_MGR_GLOBAL 0x2685f2cUL
 #define KEY_MANAGER_OFF   100
@@ -744,4 +744,4 @@ static const signed char bfx_type_to_pos[15] = {
 
 #define RBP_METER_SEGMENTS 11
 
-#endif /* RBLIVE4_RBP_ABI_H */
+#endif /* RBPI4B_RBP_ABI_H */

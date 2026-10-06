@@ -23,8 +23,8 @@
  * fine -- both get every event -- which is why the mouse can drive the pointer
  * and BTN_RIGHT at the same time.
  */
-#ifndef RBLIVE4_EVDEV_IO_H
-#define RBLIVE4_EVDEV_IO_H
+#ifndef RBPI4B_EVDEV_IO_H
+#define RBPI4B_EVDEV_IO_H
 
 /*
  * Start the reader thread. Returns 0 if it was created, -1 otherwise (and then
@@ -52,4 +52,4 @@
  */
 int evdev_start(void (*on_event)(int type, int code, int value));
 
-#endif /* RBLIVE4_EVDEV_IO_H */
+#endif /* RBPI4B_EVDEV_IO_H */

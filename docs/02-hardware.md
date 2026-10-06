@@ -192,5 +192,5 @@ tarball that carries it:
 | **Total** | **~60 MB** |
 
 The extracted tree is the larger figure — around 150–250 MB on disk depending on
-the card's block size — plus `work/rblive4-pi4.tgz` on the workstation. Budget a
+the card's block size — plus `work/rbpi4b-pi4.tgz` on the workstation. Budget a
 few hundred MB, and keep the tarball anywhere convenient.

@@ -1,11 +1,11 @@
 #!/bin/sh
-# install.sh — deploy rblive4 onto a Raspberry Pi 4.
+# install.sh — deploy rbpi4b onto a Raspberry Pi 4.
 #
 # Run as root on the Pi:
 #
-#   scp work/rblive4-pi4.tgz pi@<host>:/tmp/
+#   scp work/rbpi4b-pi4.tgz pi@<host>:/tmp/
 #   scp -r scripts/device pi@<host>:/tmp/
-#   ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rblive4-pi4.tgz'
+#   ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rbpi4b-pi4.tgz'
 #
 # Untars the deploy root to RB_DEPLOY_ROOT (default /opt/rblive4), copies the
 # device scripts in beside it, installs the systemd unit that starts the player
@@ -17,12 +17,12 @@
 # the unit but leaves it disabled, for a target being brought up by hand.
 #
 # RB_DEPLOY_ROOT overrides the destination:
-#   sudo RB_DEPLOY_ROOT=/srv/rblive4 sh install.sh /tmp/rblive4-pi4.tgz
+#   sudo RB_DEPLOY_ROOT=/srv/rblive4 sh install.sh /tmp/rbpi4b-pi4.tgz
 
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-TARBALL="${1:-/tmp/rblive4-pi4.tgz}"
+TARBALL="${1:-/tmp/rbpi4b-pi4.tgz}"
 DEPLOY="${RB_DEPLOY_ROOT:-/opt/rblive4}"
 
 say()  { echo "install: $*"; }
@@ -65,7 +65,7 @@ say "deploying to $DEPLOY"
 mkdir -p "$DEPLOY"
 tar -C "$DEPLOY" -xzf "$TARBALL"
 
-[ -d "$DEPLOY/rbx3-run" ] || die "tarball did not contain rbx3-run/ -- is it a rblive4-pi4.tgz?"
+[ -d "$DEPLOY/rbx3-run" ] || die "tarball did not contain rbx3-run/ -- is it a rbpi4b-pi4.tgz?"
 [ -f "$DEPLOY/rb.conf" ]  || die "tarball did not contain rb.conf -- rebuild with scripts/build-chroot.sh"
 
 # rb.conf's location on the device is the authority from here on: it is what the
@@ -237,16 +237,16 @@ fi
 # chroot's glibc 2.13. Running one answers it definitively. A failure here means
 # the kernel lacks 32-bit emulation -- use Pi OS Lite 32-bit.
 say "testing the chroot..."
-if ! chroot "$CHROOT" /bin/busybox echo "  chroot executes: ok" 2>/tmp/rblive4-chroot-test.err; then
-  cat /tmp/rblive4-chroot-test.err >&2 2>/dev/null || true
-  rm -f /tmp/rblive4-chroot-test.err
+if ! chroot "$CHROOT" /bin/busybox echo "  chroot executes: ok" 2>/tmp/rbpi4b-chroot-test.err; then
+  cat /tmp/rbpi4b-chroot-test.err >&2 2>/dev/null || true
+  rm -f /tmp/rbpi4b-chroot-test.err
   die "the chroot could not execute a 32-bit binary.
   The most likely cause is a 64-bit kernel with 32-bit emulation disabled.
   Install Pi OS Lite 32-bit (armhf) -- see docs/13-raspberrypi4.md.
   Do NOT retry with a 64-bit userland: every shim and the player itself are
   ARM32 soft-float, and there is no 64-bit build of rbp."
 fi
-rm -f /tmp/rblive4-chroot-test.err
+rm -f /tmp/rbpi4b-chroot-test.err
 
 # --- kernel interfaces rbp needs --------------------------------------------
 

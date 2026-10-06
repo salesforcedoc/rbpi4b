@@ -1,4 +1,4 @@
-# rblive4 midi dump v1 -- t is seconds since the first event
+# rbpi4b midi dump v1 -- t is seconds since the first event
 #
 # A HAND-WRITTEN fixture, not a recording: no DDJ-FLX4 was attached when it was
 # written and no rbp was running. It exists so that `make test` can drive the real

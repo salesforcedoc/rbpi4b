@@ -79,8 +79,8 @@
  * no scale parameter anywhere in this interface, because a scaled bitmap is what
  * this file exists to stop doing.
  */
-#ifndef RBLIVE4_MENU_FONT_H
-#define RBLIVE4_MENU_FONT_H
+#ifndef RBPI4B_MENU_FONT_H
+#define RBPI4B_MENU_FONT_H
 
 #include <stddef.h>          /* size_t, for the table walk below */
 
@@ -922,4 +922,4 @@ static inline int menu_font_selfcheck(void)
     return end == sizeof menu_font_coverage;
 }
 
-#endif /* RBLIVE4_MENU_FONT_H */
+#endif /* RBPI4B_MENU_FONT_H */

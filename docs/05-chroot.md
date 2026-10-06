@@ -17,7 +17,7 @@ comfortable; the deploy is not the thing that fills it.
 ## Build (host, WSL/Linux)
 
 [`scripts/build-chroot.sh`](../scripts/build-chroot.sh) assembles the whole
-deploy root and tars it to `work/rblive4-pi4.tgz`:
+deploy root and tars it to `work/rbpi4b-pi4.tgz`:
 
 1. **RX3 rootfs** (`extracted/XDJRX3-rootfs`) — soft-float glibc 2.13,
    libstdc++, DirectFB, freetype, ALSA, `edb_streamd`, busybox.
@@ -48,7 +48,7 @@ goes to `$OUT` (default `work/`).
 
 ```sh
 RX3=/path/to/extracted DFB=$PWD/work/dfb scripts/build-chroot.sh
-# -> work/rblive4-pi4.tgz
+# -> work/rbpi4b-pi4.tgz
 ```
 
 ## Deploy
@@ -59,8 +59,8 @@ one-time (and idempotent) entry point — it untars the deploy root to
 `/opt/rblive4`, puts the device scripts beside it, and runs `fix-dev.sh`:
 
 ```sh
-scp work/rblive4-pi4.tgz scripts/device pi@<host>:/tmp/
-ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rblive4-pi4.tgz'
+scp work/rbpi4b-pi4.tgz scripts/device pi@<host>:/tmp/
+ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rbpi4b-pi4.tgz'
 ```
 
 `RB_DEPLOY_ROOT` overrides the destination. Re-running upgrades in place.

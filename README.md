@@ -1,10 +1,10 @@
-# rblive4
+# rbpi4b
 
 Credit to: [![Instagram: @i.erhan.es](https://img.shields.io/badge/Instagram-%40i.erhan.es-E4405F?logo=instagram&logoColor=white)](https://instagram.com/i.erhan.es) for the original base of this code.
 
 **Run the Pioneer DJ XDJ-RX3 *rekordbox* standalone player on a Raspberry Pi 4B.**
 
-rblive4 runs the ARM32 `rekordbox` player application (`rbp`, called `rb`
+rbpi4b runs the ARM32 `rekordbox` player application (`rbp`, called `rb`
 internally) extracted from **XDJ-RX3 firmware v1.20** on a **Raspberry Pi 4B**
 running **Pi OS Lite 32-bit**, with an **HDMI monitor** and a **Pioneer
 DDJ-FLX4** over USB.
@@ -13,7 +13,7 @@ The port started from a working Denon SC Live 4 port, which in turn derived from
 the Prime GO work; the differences between them are the whole reason this was
 tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 
-> rblive4 is an **interoperability / preservation** project. It contains **no
+> rbpi4b is an **interoperability / preservation** project. It contains **no
 > Pioneer/AlphaTheta firmware, no `rbp` binary, no Denon software and no
 > rekordbox content.** You supply your own extracted assets. See
 > [NOTICE.md](NOTICE.md).
@@ -239,7 +239,7 @@ What does have to change is everything that named a device:
 ## Repository layout
 
 ```
-rblive4/
+rbpi4b/
 ├── README.md                 you are here
 ├── TUTORIAL.md               build → deploy → run, end to end
 ├── NOTICE.md                 copyright / legal notes
@@ -276,12 +276,12 @@ Full instructions live in **[TUTORIAL.md](TUTORIAL.md)**. The short version:
 
 # 2. build the soft-float chroot (rootfs + rbp-audio + shims + DirectFB
 #    + directfbrc + touch calibration)
-RX3=/path/to/extracted scripts/build-chroot.sh   # -> work/rblive4-pi4.tgz
+RX3=/path/to/extracted scripts/build-chroot.sh   # -> work/rbpi4b-pi4.tgz
 
 # 3. deploy (the tarball carries rb.conf; install.sh puts it in place)
-scp work/rblive4-pi4.tgz pi@<host>:/tmp/
+scp work/rbpi4b-pi4.tgz pi@<host>:/tmp/
 scp -r scripts/device    pi@<host>:/tmp/
-ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rblive4-pi4.tgz'
+ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rbpi4b-pi4.tgz'
 
 # 4. launch
 ssh pi@<host> 'sudo sh /opt/rblive4/start-rb.sh'
@@ -289,7 +289,7 @@ ssh pi@<host> 'sudo sh /opt/rblive4/start-rb.sh'
 
 ## What is *not* in this repo
 
-To stay clean, rblive4 deliberately excludes:
+To stay clean, rbpi4b deliberately excludes:
 
 * any `.UPD`, `.iso`, firmware image or `rbp` executable,
 * Denon / Engine OS files,
@@ -300,7 +300,7 @@ To stay clean, rblive4 deliberately excludes:
 
 ## Related projects
 
-rblive4 is one of several XDJ-RX3 `rb` porting projects. Firmware acquisition,
+rbpi4b is one of several XDJ-RX3 `rb` porting projects. Firmware acquisition,
 decryption and key handling are **out of scope** here; the separate **PrimeBox**
 project (the Prime GO port) covers that pipeline, and **rb2go** / **chromebit**
 explore other targets. Root-shell access to a Denon unit is covered by

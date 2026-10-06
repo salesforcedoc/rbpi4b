@@ -3,13 +3,13 @@
 rbp_patch.py - apply the interoperability patches to a stock
 XDJ-RX3 `rbp` binary.
 
-rblive4 does NOT ship Pioneer/AlphaTheta binaries. You must supply your own
+rbpi4b does NOT ship Pioneer/AlphaTheta binaries. You must supply your own
 extracted XDJ-RX3 `pdj/rbp` (see docs/04-firmware-assets.md) and run this
 script against it.
 
 The table below is the *complete* set of instruction-level changes that
 turn the stock `rbp` from firmware v1.20 into the "rbp-audio" build used
-by rblive4 (display, touch, controls, USB and audio all working).
+by rbpi4b (display, touch, controls, USB and audio all working).
 
 Usage:
     python3 rbp_patch.py <stock-rbp> [-o rbp-audio] [--check]

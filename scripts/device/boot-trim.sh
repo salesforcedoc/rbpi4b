@@ -439,7 +439,7 @@ apt_apply() {
         d="/etc/systemd/system/$t.d"
         mkdir -p "$d" || { warn "apt: could not create $d"; continue; }
         write_if_changed "$d/rblive4-defer.conf" apt <<'EOF'
-# Installed by rblive4's boot-trim.sh. Boot cost, not policy: Persistent=true
+# Installed by rbpi4b's boot-trim.sh. Boot cost, not policy: Persistent=true
 # makes a missed window fire the moment the timer is activated, which is boot.
 # The calendar window is untouched, so the update still runs whenever the unit is
 # up at its slot -- deferred, not disabled.
@@ -567,7 +567,7 @@ unit_revert() {
     fi
     mkdir -p "$(dirname "$ORDER_DROPIN")" || { warn "unit: could not create $(dirname "$ORDER_DROPIN")"; return 1; }
     write_if_changed "$ORDER_DROPIN" unit <<'EOF' || return 1
-# Installed by rblive4's boot-trim.sh, by `revert unit`. It puts the launcher
+# Installed by rbpi4b's boot-trim.sh, by `revert unit`. It puts the launcher
 # back behind multi-user.target -- the ordering the unit had before the boot trim.
 #
 # A drop-in rather than an edit to /etc/systemd/system/rblive4.service because
@@ -761,7 +761,7 @@ config_apply() {
     _tmp="$CONFIG.rblive4.new"
     {
         cat "$CONFIG"
-        printf '\n# rblive4 boot trim -- revert with: sh boot-trim.sh revert bootfiles\n'
+        printf '\n# rbpi4b boot trim -- revert with: sh boot-trim.sh revert bootfiles\n'
         printf '%s' "$_add"
     } > "$_tmp" || { warn "bootfiles: could not write $_tmp"; return 1; }
 

@@ -1,8 +1,8 @@
 # 04 — Firmware assets (external)
 
-rblive4 does **not** cover firmware acquisition, decryption or key handling —
+rbpi4b does **not** cover firmware acquisition, decryption or key handling —
 those are handled by the related projects (see [NOTICE.md](../NOTICE.md)).
-rblive4 starts from an already-extracted XDJ-RX3 v1.20 tree.
+rbpi4b starts from an already-extracted XDJ-RX3 v1.20 tree.
 
 ## What you need
 

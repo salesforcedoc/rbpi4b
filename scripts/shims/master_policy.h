@@ -33,8 +33,8 @@
  *   cardless path (paced, silent, and returning success) takes over and a card
  *   that appears later is found by reopen_try().
  */
-#ifndef RBLIVE4_MASTER_POLICY_H
-#define RBLIVE4_MASTER_POLICY_H
+#ifndef RBPI4B_MASTER_POLICY_H
+#define RBPI4B_MASTER_POLICY_H
 
 /* One ALSA device name. Must hold DEV_MAX (160, audioshim.c) plus the eight bytes
  * of "plughw:" that the caller prepends to a hw: device. */
@@ -128,4 +128,4 @@ unsigned long long master_fail_frames_next(unsigned long long have,
 /* Whether that counter has run out. A limit of 0 disables the rule. */
 int master_is_dead(unsigned long long fail_frames, unsigned long long limit);
 
-#endif /* RBLIVE4_MASTER_POLICY_H */
+#endif /* RBPI4B_MASTER_POLICY_H */

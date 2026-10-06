@@ -18,8 +18,8 @@
  * what `max - min + 1` evaluates to, and the two dimensions cross over because
  * that panel was portrait while rbp's UI is 1280x800).
  */
-#ifndef RBLIVE4_POINT_XFORM_H
-#define RBLIVE4_POINT_XFORM_H
+#ifndef RBPI4B_POINT_XFORM_H
+#define RBPI4B_POINT_XFORM_H
 
 /* The logical space. rbp renders 1280x800 landscape; the shim feeds it logical
  * coordinates and the display layer (DirectFB/the fbdev present path) is what
@@ -102,4 +102,4 @@ void point_xform_rel(const struct point_xform *x, int dx, int dy,
 void point_fit(int logical_w, int logical_h, int fb_w, int fb_h, int stretch,
                int *dw, int *dh, int *bx, int *by);
 
-#endif /* RBLIVE4_POINT_XFORM_H */
+#endif /* RBPI4B_POINT_XFORM_H */

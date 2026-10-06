@@ -31,8 +31,8 @@
  * controls shim and the audio shim can never drift apart by both writing out
  * their own `extern` line by hand (which is how it worked before).
  */
-#ifndef RBLIVE4_SHMSTATE_H
-#define RBLIVE4_SHMSTATE_H
+#ifndef RBPI4B_SHMSTATE_H
+#define RBPI4B_SHMSTATE_H
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -193,4 +193,4 @@ static inline void shmstate_require(const char *who)
     _exit(1);
 }
 
-#endif /* RBLIVE4_SHMSTATE_H */
+#endif /* RBPI4B_SHMSTATE_H */

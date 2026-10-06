@@ -47,8 +47,8 @@
  * period (12x of margin at the measured 0.19 ms) and, past that, the fastest rate
  * the unit can actually hold, never a burst.
  */
-#ifndef RBLIVE4_PACE_POLICY_H
-#define RBLIVE4_PACE_POLICY_H
+#ifndef RBPI4B_PACE_POLICY_H
+#define RBPI4B_PACE_POLICY_H
 
 /*
  * The next block's deadline, in nanoseconds on the caller's clock.
@@ -76,4 +76,4 @@ unsigned long long pace_next_deadline(unsigned long long now,
                                       unsigned long long period,
                                       unsigned long long deadline);
 
-#endif /* RBLIVE4_PACE_POLICY_H */
+#endif /* RBPI4B_PACE_POLICY_H */

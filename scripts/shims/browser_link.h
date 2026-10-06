@@ -34,8 +34,8 @@
  * cheap way to do that across two processes with no lock is a sequence word the
  * writer bumps after the pixels are down and the reader re-reads afterwards.
  */
-#ifndef RBLIVE4_BROWSER_LINK_H
-#define RBLIVE4_BROWSER_LINK_H
+#ifndef RBPI4B_BROWSER_LINK_H
+#define RBPI4B_BROWSER_LINK_H
 
 #include <stddef.h>
 
@@ -88,4 +88,4 @@ int bl_cmd(const char *line);
  * so a stale frame is not mistaken for a fresh one the next time it opens. */
 void bl_reset(void);
 
-#endif /* RBLIVE4_BROWSER_LINK_H */
+#endif /* RBPI4B_BROWSER_LINK_H */

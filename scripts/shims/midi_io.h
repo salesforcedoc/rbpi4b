@@ -16,8 +16,8 @@
  * The absolute-control dedupe cache used to live here (as `struct abs_ctrl
  * abs_map[]`); it is in ctrl_map.h now, with the binding tables it belongs to.
  */
-#ifndef RBLIVE4_MIDI_IO_H
-#define RBLIVE4_MIDI_IO_H
+#ifndef RBPI4B_MIDI_IO_H
+#define RBPI4B_MIDI_IO_H
 
 #include <sound/asequencer.h>   /* struct snd_seq_event */
 
@@ -60,4 +60,4 @@ int led_query_absolute(void);
  * is decided here. */
 int midi_out_ready(void);
 
-#endif /* RBLIVE4_MIDI_IO_H */
+#endif /* RBPI4B_MIDI_IO_H */

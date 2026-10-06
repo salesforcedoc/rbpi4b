@@ -38,8 +38,8 @@
  * key-up event (this one has a finger, not a switch) is a mode with no way out that
  * an operator can see.
  */
-#ifndef RBLIVE4_MENU_KEYBOARD_H
-#define RBLIVE4_MENU_KEYBOARD_H
+#ifndef RBPI4B_MENU_KEYBOARD_H
+#define RBPI4B_MENU_KEYBOARD_H
 
 #include "menu_window.h"    /* MW_W, MW_CONTENT_Y, MW_CONTENT_H */
 
@@ -117,4 +117,4 @@ const char *menu_keyboard_cap(int i, char *buf, int n);
  * test_keyboard.c uses it to assert the shift moves exactly the twenty-six. */
 int  menu_keyboard_is_letter(int i);
 
-#endif /* RBLIVE4_MENU_KEYBOARD_H */
+#endif /* RBPI4B_MENU_KEYBOARD_H */

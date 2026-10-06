@@ -14,7 +14,7 @@ Two kinds of tool live here:
 | [`aseqdump2dump.py`](aseqdump2dump.py) | the Pi or a workstation | Python | turn an `aseqdump` capture into a replayable MIDI dump, and print the inventory and arithmetic a controller map is written from |
 | [`pi-bringup/`](pi-bringup/) | **the Pi** | Python / shell | drive the input path on the unit: a virtual keyboard with a chosen hold time, a raw evdev reader, a state probe, a key-and-capture harness |
 
-Firmware acquisition, decryption and key handling are out of scope for rblive4;
+Firmware acquisition, decryption and key handling are out of scope for rbpi4b;
 start from the extracted assets described in
 [`docs/04-firmware-assets.md`](../docs/04-firmware-assets.md).
 
@@ -48,8 +48,8 @@ plus `gcc-arm-linux-gnueabi` (**armel/soft-float**, never `…hf`) and
 test binaries come from one place.
 
 ```bash
-docker build -t rblive4-build tools/build-toolchain/
-docker run --rm -v "$PWD:/src" -w /src rblive4-build \
+docker build -t rbpi4b-build tools/build-toolchain/
+docker run --rm -v "$PWD:/src" -w /src rbpi4b-build \
     make -C scripts/shims RX3=/src/extracted/XDJRX3-rootfs test
 ```
 

@@ -41,8 +41,8 @@
  * "away" dismissal that closed every open drawer; the operator reversed it (*"the
  * side bar should stay up until i swipe them away"*), so it is gone.
  */
-#ifndef RBLIVE4_SIDE_ZONE_H
-#define RBLIVE4_SIDE_ZONE_H
+#ifndef RBPI4B_SIDE_ZONE_H
+#define RBPI4B_SIDE_ZONE_H
 
 #include "menu_zone.h"       /* MZ_LOGICAL_W, MZ_LOGICAL_H, MZ_STRIP_Y1, MZ_FEED_* */
 
@@ -476,4 +476,4 @@ void side_tap_point(int side, int *x, int *y);
 void side_reset(int side);
 void side_reset_all(void);
 
-#endif /* RBLIVE4_SIDE_ZONE_H */
+#endif /* RBPI4B_SIDE_ZONE_H */

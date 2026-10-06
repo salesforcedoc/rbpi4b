@@ -66,7 +66,7 @@ binds. `install.sh` checks for it and says what to look for in `dmesg`
 
 ## Deploy layout
 
-`scripts/build-chroot.sh` produces `work/rblive4-pi4.tgz`, which unpacks to the
+`scripts/build-chroot.sh` produces `work/rbpi4b-pi4.tgz`, which unpacks to the
 deploy root (`/opt/rblive4` by default):
 
 ```
@@ -88,11 +88,11 @@ Deploy:
 
 ```bash
 # on the workstation
-scripts/build-chroot.sh                 # -> work/rblive4-pi4.tgz
-scp work/rblive4-pi4.tgz scripts/device/* pi@<host>:/tmp/
+scripts/build-chroot.sh                 # -> work/rbpi4b-pi4.tgz
+scp work/rbpi4b-pi4.tgz scripts/device/* pi@<host>:/tmp/
 
 # on the Pi
-sudo sh /tmp/install.sh /tmp/rblive4-pi4.tgz
+sudo sh /tmp/install.sh /tmp/rbpi4b-pi4.tgz
 sh /opt/rblive4/start-rb.sh
 ```
 
@@ -578,7 +578,7 @@ Two consequences. First, the pacer is kept — it is what the frame-rate fix on 
 previous target rests on — but nothing new may hang off it. Second, anything that
 needs "immediately after rbp has finished a frame" hangs off the `FBIO_WAITFORVSYNC`
 case instead, which is what the top menu does (see
-[07 — touch](07-touch.md#the-swipe-down-top-menu)); that switch now has a second
+[07 — touch](07-touch.md#the-swipe-down-top-menu-menu_zonec-menu_drawc)); that switch now has a second
 caller, and its comment is where the reasoning lives.
 
 The shim's "lie" is load-bearing and must not be "cleaned up": it reports a

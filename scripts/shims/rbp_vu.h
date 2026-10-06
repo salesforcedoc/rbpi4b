@@ -5,8 +5,8 @@
  * because rbp meters pre-fader and the panel meters post-fader: the fader is an
  * input to the meter scaling, so it belongs with the meter code.
  */
-#ifndef RBLIVE4_RBP_VU_H
-#define RBLIVE4_RBP_VU_H
+#ifndef RBPI4B_RBP_VU_H
+#define RBPI4B_RBP_VU_H
 
 /* Rescales rbp's meter bitmask (and the audioshim's cue/master gains) onto the
  * selected panel's CC-driven meters, in the shape that panel's map asks for
@@ -42,5 +42,5 @@ extern int g_fader_seen[3];   /* set once a surface has reported a fader */
  * clamped to 0..1023. */
 void fader_state_set(int ch, int v);
 
-#endif /* RBLIVE4_RBP_VU_H */
+#endif /* RBPI4B_RBP_VU_H */
 

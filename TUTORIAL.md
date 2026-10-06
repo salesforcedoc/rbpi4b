@@ -4,7 +4,7 @@ End-to-end: from the extracted XDJ-RX3 assets to `rbp` running on the Pi.
 Everything targets a **Pi 4B on Pi OS Lite 32-bit (Bookworm)** with an HDMI
 monitor and a DDJ-FLX4.
 
-> rblive4 does not cover firmware acquisition, decryption or keys — start from
+> rbpi4b does not cover firmware acquisition, decryption or keys — start from
 > the extracted tree described in [docs/04](docs/04-firmware-assets.md).
 
 ## 0. Prerequisites
@@ -56,7 +56,7 @@ applies `directfb-full.diff` and installs into `work/dfb/lib/`.
 
 ```sh
 RX3=/path/to/extracted DFB="$PWD/work/dfb" scripts/build-chroot.sh
-# -> work/rblive4-pi4.tgz
+# -> work/rbpi4b-pi4.tgz
 ```
 
 It builds the shims from [`scripts/shims/`](scripts/shims/) if needed, applies
@@ -72,9 +72,9 @@ chroot can execute a 32-bit binary, checks `/dev/fb0` and `/dev/snd/seq`, and
 runs `fix-dev.sh`. It is idempotent — re-running upgrades in place.
 
 ```sh
-scp work/rblive4-pi4.tgz pi@<host>:/tmp/
+scp work/rbpi4b-pi4.tgz pi@<host>:/tmp/
 scp -r scripts/device    pi@<host>:/tmp/
-ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rblive4-pi4.tgz'
+ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rbpi4b-pi4.tgz'
 ```
 
 `RB_DEPLOY_ROOT` overrides the destination if you would rather not use

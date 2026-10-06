@@ -38,8 +38,8 @@
  * headers drifting, and the numbers below were read out of libdrm 2.4.114 rather
  * than typed from memory. Nothing here is linked -- every call is a raw ioctl.
  */
-#ifndef RBLIVE4_DRMBAND_H
-#define RBLIVE4_DRMBAND_H
+#ifndef RBPI4B_DRMBAND_H
+#define RBPI4B_DRMBAND_H
 
 #include <stddef.h>
 #include <sys/ioctl.h>
@@ -258,4 +258,4 @@ void drm_band_hide(struct drm_band *b);
  * drawer closing leaves the other drawer's plane on the glass. */
 void drm_band_teardown(struct drm_band *b);
 
-#endif /* RBLIVE4_DRMBAND_H */
+#endif /* RBPI4B_DRMBAND_H */

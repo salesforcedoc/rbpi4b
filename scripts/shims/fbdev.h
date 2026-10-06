@@ -11,8 +11,8 @@
  * duplication that drifts silently — a wrong sizeof here is an ioctl that fills
  * the wrong bytes and returns success.
  */
-#ifndef RBLIVE4_FBDEV_H
-#define RBLIVE4_FBDEV_H
+#ifndef RBPI4B_FBDEV_H
+#define RBPI4B_FBDEV_H
 
 #ifndef FBIOGET_VSCREENINFO
 #define FBIOGET_VSCREENINFO 0x4600
@@ -52,4 +52,4 @@ struct fb_fix_screeninfo {
     unsigned short reserved[2];
 };
 
-#endif /* RBLIVE4_FBDEV_H */
+#endif /* RBPI4B_FBDEV_H */

@@ -12,8 +12,8 @@
  * interpose. That matters for `make check`, which fails the build if a shim
  * references any GLIBC version above 2.7 — syscall() is GLIBC_2.4.
  */
-#ifndef RBLIVE4_SYSCALLS_H
-#define RBLIVE4_SYSCALLS_H
+#ifndef RBPI4B_SYSCALLS_H
+#define RBPI4B_SYSCALLS_H
 
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -101,4 +101,4 @@ static inline void *real_mmap(void *addr, size_t len, int prot, int flags,
     return (void *)r;
 }
 
-#endif /* RBLIVE4_SYSCALLS_H */
+#endif /* RBPI4B_SYSCALLS_H */

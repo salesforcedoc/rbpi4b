@@ -64,8 +64,8 @@
  * logical (where the finger is); the two disagree by at most a pixel on a scaled
  * panel, which is invisible and documented rather than papered over.
  */
-#ifndef RBLIVE4_MENU_PAINT_H
-#define RBLIVE4_MENU_PAINT_H
+#ifndef RBPI4B_MENU_PAINT_H
+#define RBPI4B_MENU_PAINT_H
 
 /* For MZ_COLS, which sizes struct menu_layout's arrays. The dependency runs one way
  * -- menu_zone.h is pure geometry with no includes of its own -- and it is the honest
@@ -233,4 +233,4 @@ unsigned int menu_get(const struct menu_view *v, int fx, int fy);
  * an unknown depth is treated as 16 bpp, which is what this port's panel is. */
 unsigned int menu_pixel(int bpp, int cls);
 
-#endif /* RBLIVE4_MENU_PAINT_H */
+#endif /* RBPI4B_MENU_PAINT_H */

@@ -20,8 +20,8 @@
  * gated by POINT_MENU: with the menu off there is nothing to composite, so the
  * thread is not created.
  */
-#ifndef RBLIVE4_MENU_DRAW_H
-#define RBLIVE4_MENU_DRAW_H
+#ifndef RBPI4B_MENU_DRAW_H
+#define RBPI4B_MENU_DRAW_H
 
 /* Start the paint thread. Once per process (a second call is a no-op), and
  * returns 0 whether or not a thread was created -- the only failure it reports is
@@ -36,4 +36,4 @@ int menu_draw_start(void);
  * idempotent. */
 void menu_frame_tick(void);
 
-#endif /* RBLIVE4_MENU_DRAW_H */
+#endif /* RBPI4B_MENU_DRAW_H */

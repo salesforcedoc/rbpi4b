@@ -10,7 +10,7 @@
  *
  * The format is one event per line, greppable and hand-editable:
  *
- *   # rblive4 midi dump v1 -- t is seconds since the first event
+ *   # rbpi4b midi dump v1 -- t is seconds since the first event
  *   0.000000 NOTEON ch=0 note=36 vel=127
  *   0.001234 CONTROLLER ch=4 cc=17 val=64
  *   2.000000 SKIP type=8
@@ -25,15 +25,15 @@
  * no logging, no syscalls.h. That is what lets `make test` link it together with
  * a map and drive the real code path on a bench.
  */
-#ifndef RBLIVE4_MIDIDUMP_H
-#define RBLIVE4_MIDIDUMP_H
+#ifndef RBPI4B_MIDIDUMP_H
+#define RBPI4B_MIDIDUMP_H
 
 #include <stddef.h>
 #include <stdio.h>
 #include <sound/asequencer.h>   /* struct snd_seq_event */
 
 /* The header line written at the top of a dump. */
-#define MIDIDUMP_HEADER "# rblive4 midi dump v1 -- t is seconds since the first event"
+#define MIDIDUMP_HEADER "# rbpi4b midi dump v1 -- t is seconds since the first event"
 
 /* Render one event as one line (without the newline), with `t_us` microseconds
  * since the start of the dump. Always succeeds: a type the format cannot carry
@@ -58,4 +58,4 @@ void mididump_write(FILE *f, const struct snd_seq_event *ev,
 int mididump_replay(const char *path, double speed,
                     void (*on_event)(const struct snd_seq_event *ev));
 
-#endif /* RBLIVE4_MIDIDUMP_H */
+#endif /* RBPI4B_MIDIDUMP_H */

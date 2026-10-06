@@ -20,8 +20,8 @@
  * unless the process is rbp, and every send_rx_key*() is a no-op on NULL. So a
  * caller does not have to know whether it is running inside the player.
  */
-#ifndef RBLIVE4_RBP_KEY_H
-#define RBLIVE4_RBP_KEY_H
+#ifndef RBPI4B_RBP_KEY_H
+#define RBPI4B_RBP_KEY_H
 
 /* Are we running inside rbp? Cheap (one /proc read), used as a guard by every
  * thread and by install_meter_hook(). */
@@ -40,4 +40,4 @@ void send_rx_key_f(int keycode, int op, int ch, long param, float fval);
 void send_rx_key_fl(int keycode, int op, int ch, long param, float fval,
                     long lval);
 
-#endif /* RBLIVE4_RBP_KEY_H */
+#endif /* RBPI4B_RBP_KEY_H */

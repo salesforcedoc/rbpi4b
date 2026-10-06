@@ -1,4 +1,4 @@
-# rblive4 shim build
+# rbpi4b shim build
 #
 # All shims must be soft-float EABI5 and reference only GLIBC_2.4/2.7, because
 # they are LD_PRELOADed into the XDJ-RX3 soft-float glibc-2.13 chroot.

@@ -1,7 +1,7 @@
 #!/bin/bash
 # build-chroot.sh — assemble the soft-float XDJ-RX3 chroot for the Raspberry Pi 4.
 #
-# Run on a Linux host (WSL is fine). Produces work/rblive4-pi4.tgz, which holds
+# Run on a Linux host (WSL is fine). Produces work/rbpi4b-pi4.tgz, which holds
 # the complete deploy root, ready for the Pi's install.sh to untar into
 # /opt/rblive4:
 #
@@ -333,11 +333,11 @@ if command -v file >/dev/null 2>&1; then
   file "$CHROOT/lib/ld-2.13.so" "$CHROOT/bin/busybox" "$CHROOT/root/pdj/rbp" | sed 's#.*: #  #'
 fi
 
-echo "== tar -> $OUT/rblive4-pi4.tgz =="
+echo "== tar -> $OUT/rbpi4b-pi4.tgz =="
 mkdir -p "$OUT"
-tar -C "$STAGE" -czf "$OUT/rblive4-pi4.tgz" .
-echo "== done: $(du -h "$OUT/rblive4-pi4.tgz" | cut -f1) =="
+tar -C "$STAGE" -czf "$OUT/rbpi4b-pi4.tgz" .
+echo "== done: $(du -h "$OUT/rbpi4b-pi4.tgz" | cut -f1) =="
 echo
 echo "deploy on the Pi:"
-echo "  scp $OUT/rblive4-pi4.tgz pi@<host>:/tmp/"
-echo "  ssh pi@<host> 'sudo sh /path/to/install.sh /tmp/rblive4-pi4.tgz'"
+echo "  scp $OUT/rbpi4b-pi4.tgz pi@<host>:/tmp/"
+echo "  ssh pi@<host> 'sudo sh /path/to/install.sh /tmp/rbpi4b-pi4.tgz'"

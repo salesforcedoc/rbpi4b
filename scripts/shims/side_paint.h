@@ -14,8 +14,8 @@
  * plane is placed at the panel's screen rectangle. `side` is what turns one into the
  * other, and it is the only reason this function takes it.
  */
-#ifndef RBLIVE4_SIDE_PAINT_H
-#define RBLIVE4_SIDE_PAINT_H
+#ifndef RBPI4B_SIDE_PAINT_H
+#define RBPI4B_SIDE_PAINT_H
 
 #include "menu_paint.h"      /* struct menu_view, menu_pixel() */
 #include "side_zone.h"       /* SZ_* geometry, side_local_x() */
@@ -60,4 +60,4 @@ int side_paint_ok(const struct menu_view *v);
  * Every pixel of the view is written. Does nothing when side_paint_ok() is 0. */
 void side_paint(const struct menu_view *v, int side, int pressed_hit, int fader_v);
 
-#endif /* RBLIVE4_SIDE_PAINT_H */
+#endif /* RBPI4B_SIDE_PAINT_H */

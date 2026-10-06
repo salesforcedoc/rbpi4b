@@ -14,8 +14,8 @@
  * atlas grew lowercase and punctuation (bake_menu_font.py, 2026-10-04) -- a URL is
  * not capitals and digits.
  */
-#ifndef RBLIVE4_MENU_WINDOW_PAINT_H
-#define RBLIVE4_MENU_WINDOW_PAINT_H
+#ifndef RBPI4B_MENU_WINDOW_PAINT_H
+#define RBPI4B_MENU_WINDOW_PAINT_H
 
 #include "menu_paint.h"     /* struct menu_view */
 
@@ -31,4 +31,4 @@ void menu_window_paint(const struct menu_view *v, int hit, int key);
  * of the repaint. */
 void menu_window_paint_chrome(const struct menu_view *v, int hit, int key);
 
-#endif /* RBLIVE4_MENU_WINDOW_PAINT_H */
+#endif /* RBPI4B_MENU_WINDOW_PAINT_H */

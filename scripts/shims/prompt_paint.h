@@ -16,8 +16,8 @@
  * by `dw/PR_W` and `dh/PR_H`, so the same code draws the box on its own plane and on
  * the page, and the plane is created at exactly the size the picture says.
  */
-#ifndef RBLIVE4_PROMPT_PAINT_H
-#define RBLIVE4_PROMPT_PAINT_H
+#ifndef RBPI4B_PROMPT_PAINT_H
+#define RBPI4B_PROMPT_PAINT_H
 
 #include "menu_paint.h"      /* struct menu_view, menu_pixel() */
 #include "prompt_zone.h"     /* PR_* geometry, struct prompt_state, PROMPT_ROWS */
@@ -64,4 +64,4 @@ int prompt_paint_h(int page_dh);
 void prompt_paint(const struct menu_view *v, const struct prompt_state *S,
                   int pressed_cell, int selected_cell);
 
-#endif /* RBLIVE4_PROMPT_PAINT_H */
+#endif /* RBPI4B_PROMPT_PAINT_H */

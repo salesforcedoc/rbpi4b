@@ -14,8 +14,8 @@
  * re-run whenever the current device disappears, so unplugging and replugging
  * works without restarting the player.
  */
-#ifndef RBLIVE4_POINTSRC_H
-#define RBLIVE4_POINTSRC_H
+#ifndef RBPI4B_POINTSRC_H
+#define RBPI4B_POINTSRC_H
 
 #include "prompt_zone.h"    /* struct prompt_state, for the snapshot below */
 
@@ -54,4 +54,4 @@ void pointsrc_log(const char *fmt, ...);
  * is not static. See prompt_zone.h for the derivation of the walk. */
 int pointsrc_usb_state(struct prompt_state *S);
 
-#endif /* RBLIVE4_POINTSRC_H */
+#endif /* RBPI4B_POINTSRC_H */

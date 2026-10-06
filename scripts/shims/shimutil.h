@@ -12,8 +12,8 @@
  * an export of `LED_VERBOSE=no` must be off and not on. Two different
  * questions, so two different helpers rather than one that has to guess.
  */
-#ifndef RBLIVE4_SHIMUTIL_H
-#define RBLIVE4_SHIMUTIL_H
+#ifndef RBPI4B_SHIMUTIL_H
+#define RBPI4B_SHIMUTIL_H
 
 #include <time.h>       /* clock_gettime, for shim_now_ms() */
 
@@ -59,4 +59,4 @@ double env_dnum(const char *name, double dflt);
  * environment (never freed, never modified). */
 const char *env_text(const char *name, const char *dflt);
 
-#endif /* RBLIVE4_SHIMUTIL_H */
+#endif /* RBPI4B_SHIMUTIL_H */

@@ -9,8 +9,8 @@
  * visible because rbp's patched prologue jumps to it; those two are annotated
  * explicitly in ctrlshim.c and rbp_bridge.c.
  */
-#ifndef RBLIVE4_RBP_BRIDGE_H
-#define RBLIVE4_RBP_BRIDGE_H
+#ifndef RBPI4B_RBP_BRIDGE_H
+#define RBPI4B_RBP_BRIDGE_H
 
 /* The key path -- is_rbp_process(), get_key_manager(), send_rx_key*() -- lives
  * in rbp_key.{h,c} and is included here so that every caller of this header
@@ -90,5 +90,5 @@ extern volatile unsigned int g_meter_bits[3];
  * trampoline. No-op (and harmless) if the prologue is not the one we expect. */
 void install_meter_hook(void);
 
-#endif /* RBLIVE4_RBP_BRIDGE_H */
+#endif /* RBPI4B_RBP_BRIDGE_H */
 

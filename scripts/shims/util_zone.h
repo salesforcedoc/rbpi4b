@@ -66,8 +66,8 @@
  * The tap's own travel count still stays zero in that state, so the Enter that leaves
  * edit mode cannot also drag the highlight onto the row the finger happened to be over.
  */
-#ifndef RBLIVE4_UTIL_ZONE_H
-#define RBLIVE4_UTIL_ZONE_H
+#ifndef RBPI4B_UTIL_ZONE_H
+#define RBPI4B_UTIL_ZONE_H
 
 /* rbp's browse mode for this screen -- UiBrowse_SetDispUtilityList @0x13cfc8. Kept
  * as this module's own literal rather than including rbp_abi.h, so the header stays
@@ -206,4 +206,4 @@ int util_feed(const struct util_state *st, int down, int x, int y,
  * device would otherwise make the NEXT press look like a continuation of this one. */
 void util_reset(void);
 
-#endif /* RBLIVE4_UTIL_ZONE_H */
+#endif /* RBPI4B_UTIL_ZONE_H */

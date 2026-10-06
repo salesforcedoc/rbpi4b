@@ -4,7 +4,7 @@ Host-side build tooling and the on-device scripts for the Raspberry Pi 4 port.
 
 ```
 scripts/
-├── build-chroot.sh        assemble the soft-float deploy root -> work/rblive4-pi4.tgz
+├── build-chroot.sh        assemble the soft-float deploy root -> work/rbpi4b-pi4.tgz
 ├── patch-rbp-nopc.py      second-stage rbp patch (getPcController NULL deref)
 ├── device/                scripts that run on the Pi
 └── shims/                 LD_PRELOAD shim sources (soft-float ARM32) + Makefile

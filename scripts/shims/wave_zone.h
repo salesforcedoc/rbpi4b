@@ -70,8 +70,8 @@
  * 0..55 of the glass and OPENS on any press inside them, so a gesture that could
  * reach that strip could open the band out from under itself.
  * ------------------------------------------------------------------------- */
-#ifndef RBLIVE4_WAVE_ZONE_H
-#define RBLIVE4_WAVE_ZONE_H
+#ifndef RBPI4B_WAVE_ZONE_H
+#define RBPI4B_WAVE_ZONE_H
 
 /* The waveform rect. See the measurement table above -- these four numbers are the
  * whole of the region rule, and the comment block is why each of them is where it
@@ -160,4 +160,4 @@ int wave_feed(const struct wave_state *st, int down, int x, int y);
  * screen that is gone. */
 void wave_reset(void);
 
-#endif /* RBLIVE4_WAVE_ZONE_H */
+#endif /* RBPI4B_WAVE_ZONE_H */

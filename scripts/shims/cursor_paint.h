@@ -46,8 +46,8 @@
  * case is the conditional restore: it lets a third party repaint a glyph cell
  * between the paint and the restore and asserts the repaint survives.
  */
-#ifndef RBLIVE4_CURSOR_PAINT_H
-#define RBLIVE4_CURSOR_PAINT_H
+#ifndef RBPI4B_CURSOR_PAINT_H
+#define RBPI4B_CURSOR_PAINT_H
 
 /* A 12x19 arrow, tip at (0,0) of the box. Classic shape, deliberately not
  * larger: it has to be readable at 1280x800 over a busy deck UI without hiding
@@ -94,4 +94,4 @@ void cursor_paint(void *pix, int pitch, int fb_w, int fb_h, int bpp,
 void cursor_restore(void *pix, int pitch, int fb_w, int fb_h, int bpp,
                     int x, int y, int pressed, unsigned int *saved);
 
-#endif /* RBLIVE4_CURSOR_PAINT_H */
+#endif /* RBPI4B_CURSOR_PAINT_H */

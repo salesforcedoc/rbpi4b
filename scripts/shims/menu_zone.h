@@ -46,8 +46,8 @@
  * pixel on such a panel, which is invisible and documented rather than papered
  * over.
  */
-#ifndef RBLIVE4_MENU_ZONE_H
-#define RBLIVE4_MENU_ZONE_H
+#ifndef RBPI4B_MENU_ZONE_H
+#define RBPI4B_MENU_ZONE_H
 
 /* ---------------------------------------------------------------------------
  * Geometry. Literals, in touch_zone.c:50-60's style, each with its measurement.
@@ -417,4 +417,4 @@ int menu_pressed(void);        /* button currently under the finger, 0 for none 
  * leave a menu that nothing can dismiss. */
 void menu_reset(void);
 
-#endif /* RBLIVE4_MENU_ZONE_H */
+#endif /* RBPI4B_MENU_ZONE_H */

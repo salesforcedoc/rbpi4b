@@ -55,8 +55,8 @@
  * geometry, the latch, the dead row and the timeout on a host with no Pi, no panel
  * and no player -- and it is why the caller, not this file, is the one that sends.
  */
-#ifndef RBLIVE4_PROMPT_ZONE_H
-#define RBLIVE4_PROMPT_ZONE_H
+#ifndef RBPI4B_PROMPT_ZONE_H
+#define RBPI4B_PROMPT_ZONE_H
 
 #include "menu_zone.h"      /* MZ_LOGICAL_W/H (the space) and the MZ_FEED_* codes */
 
@@ -313,4 +313,4 @@ int prompt_act_channel(int act);
  * away and answers PR_ACT_NONE. That is the whole of "tap outside to dismiss". */
 int prompt_feed(const struct prompt_state *S, int down, int x, int y, int *act);
 
-#endif /* RBLIVE4_PROMPT_ZONE_H */
+#endif /* RBPI4B_PROMPT_ZONE_H */

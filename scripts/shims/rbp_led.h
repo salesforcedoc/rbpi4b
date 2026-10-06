@@ -5,8 +5,8 @@
  * they share, and the loop-in latch that the key handler sets and the LED
  * refresh consumes.
  */
-#ifndef RBLIVE4_RBP_LED_H
-#define RBLIVE4_RBP_LED_H
+#ifndef RBPI4B_RBP_LED_H
+#define RBPI4B_RBP_LED_H
 
 /* Reads rbp's LedStat table and mirrors it onto the panel. LED_DUMP=1 dumps the
  * table instead of driving, LED_SWEEP=1 runs the note sweep. */
@@ -25,5 +25,5 @@ extern int led_sweep;
  * are in different modules. */
 extern int led_loop_armed[2];
 
-#endif /* RBLIVE4_RBP_LED_H */
+#endif /* RBPI4B_RBP_LED_H */
 

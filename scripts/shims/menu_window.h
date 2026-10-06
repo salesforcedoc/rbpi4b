@@ -51,8 +51,8 @@
  * file I/O in one module and lets test_window.c drive the whole interaction with no
  * browser, no /tmp and no device.
  */
-#ifndef RBLIVE4_MENU_WINDOW_H
-#define RBLIVE4_MENU_WINDOW_H
+#ifndef RBPI4B_MENU_WINDOW_H
+#define RBPI4B_MENU_WINDOW_H
 
 #include <stddef.h>         /* size_t */
 
@@ -282,4 +282,4 @@ void menu_window_content_rect(int *x0, int *y0, int *x1, int *y1);
  * a counter -- the same argument menu_zone.c's state makes. */
 int  menu_window_take_req(struct mw_req *out);
 
-#endif /* RBLIVE4_MENU_WINDOW_H */
+#endif /* RBPI4B_MENU_WINDOW_H */
