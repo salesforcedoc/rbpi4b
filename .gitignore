@@ -18,6 +18,7 @@ keys/*.bin
 # Extracted firmware tree (you generate this locally)
 /extracted/*
 !/extracted/README.md
+/extracted*/
 
 # Pioneer / Denon binaries
 rbp
