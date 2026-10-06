@@ -794,7 +794,7 @@ path takes over, which is how a missing controller turns into `NO OUTPUT DEVICE`
 This paragraph said something else until 2026-09-27: that `plughw:` *and* `default`
 fail too. On this unit `default` did not fail. It opened onto card 0 and refused
 every write, and that is the whole of the defect described in
-[13](13-raspberrypi4.md#s42-no-sound-at-all--written-22-on-every-write).
+[13](13-raspberrypi4.md#bring-up-order) S4.2.
 
 **Two different `-19`s, and only one of them is a startup problem.** The `open()`
 above is the card being absent when the shim starts. The other is `written=-19`

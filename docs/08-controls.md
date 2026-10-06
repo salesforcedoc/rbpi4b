@@ -991,7 +991,7 @@ into `IPlayerSetting` — and that last call is what repaints the widget. The
 engine-only route (the first one considered) does the audio half and leaves the
 screen showing the old state, so the operator's next look at the box would lie.
 Sending the key runs rbp's own path on the same channel numbering a hardware
-press uses — 1-based, as `map_flx4.c:385`'s `ch + 1` — so the two are the same
+press uses — 1-based, as `map_flx4.c:401`'s `ch + 1` — so the two are the same
 gesture. A second consequence of that: it is a *toggle* rbp computes from its own
 state, so nothing in the shim tries to track the value.
 

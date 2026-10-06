@@ -161,7 +161,7 @@ static void sp_text(const struct menu_view *v, int pen_fx, int line_fy,
  * which is why the centring happens on the framebuffer rect and not on the logical
  * one: on the right drawer the logical ends run backwards. The line box is
  * MENU_FONT_LINE DEVICE pixels and not the scaled one, because the atlas is drawn
- * at 1:1 -- only the rectangles scale (menu_paint.c:209 does the same). */
+ * at 1:1 -- only the rectangles scale (menu_paint.c:294-299 does the same). */
 static void sp_text_center(const struct menu_view *v, int side, int lx0, int ly0,
                            int lx1, int ly1, const char *s,
                            unsigned int base, unsigned int ink)

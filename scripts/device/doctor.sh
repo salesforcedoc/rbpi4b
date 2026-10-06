@@ -190,7 +190,7 @@ for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh; do
 done
 
 # rb.local.conf is where a value MEASURED ON THIS UNIT belongs: rb.conf is
-# shipped and overwritten on every install, this file never is (install.sh:148).
+# shipped and overwritten on every install, this file never is (install.sh:149-156).
 if [ -f "$RB_DEPLOY_ROOT/rb.local.conf" ]; then
 	ok "rb.local.conf present (machine-local overrides survive a reinstall)"
 else
