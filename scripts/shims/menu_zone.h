@@ -79,14 +79,22 @@
  * operator's own unit (2026-09-29, a raw dump of rows 0..119) the row profile is
  * frame 0..1, fill 2..7, BUTTONS 8..47, fill 48..53, frame 54..55, rbp's own black
  * at 56 -- so the drawn band is exactly these 56 rows and not one more. The label
- * ink is rows 23..33, 11 rows: the capitals' and digits' ink box, five rows into a
- * 20-row line box centred in the band (rows 8..47 put the line box at 18, and the
- * cap box runs 5..15 of it). Every character the seven labels use is in that box --
- * menu_font.h's set has since grown lowercase and punctuation, which reach above and
- * below it, but a label is capitals, digits and a space and the LAYOUT is the line
- * box, so nothing here moved. The damage witness's band points
- * are the button band's edges one row in (menu_paint.c's menu_witness_point()),
- * i.e. rows 9 and 46 -- fourteen rows clear above the ink, thirteen below. It used
+ * ink is the CAPITALS' ink box -- the seven labels are capital text, digits and a
+ * space and nothing else -- and at the shipped 19 px atlas (menu_font.h) it is 14
+ * rows inside a 24-row line box, rows 5..18 of it. The band's rows 8..47 put that
+ * line box at 16, so the ink is rows 21..34 in a 40-row button band. (It was rows
+ * 23..33 in the 20-row line box of the 16 px atlas: the size grew, the band did
+ * not.) Every character the seven labels use is in that box -- menu_font.h's set has
+ * since grown lowercase and punctuation, which reach above and below it, but a label
+ * is capitals, digits and a space and the LAYOUT is the line box, so nothing here
+ * moved with them. The damage witness's points are the buttons' own OUTLINE rows
+ * now, the band's top and bottom (menu_paint.c's menu_witness_point(), moved there
+ * by the 2026-10-06 restyle when the band's frame became a ring round each button):
+ * rows 8 and 47 at the button's own centre x, with one further point in the padding
+ * between two buttons at row 9. They are clear of the ink by construction -- the ink
+ * is centred in the button inside a MENU_FONT_LINE line box, and the outline rows
+ * are the band's own edges -- and it is menu_paint.c's line-box rule, not this
+ * paragraph, that bounds it. It used
  * to be 5/16 and 11/16 of the PANEL, which is a proportion, and a proportion is
  * exactly what a fixed-height font cannot follow: at 112 rows those were rows 34
  * and 76 (safe), at 56 they are 17 and 37 (still safe here, but only by luck of
@@ -106,8 +114,8 @@
  * button to the menu" -- because the FLX4 has no such button and the alternative,
  * pulling the stick, is the thing that risks the media. Nothing about the column
  * arithmetic below is six-specific; at 1280 logical px a column is 182 px and the
- * widest label, "USB STOP", is 65 px, so the seventh costs every label 31 px of
- * slack and none of them notices. */
+ * widest label, "USB STOP", is 76 px at the shipped atlas (menu_font.h), so the
+ * seventh costs every label 42 px of a 182 px column and none of them notices. */
 #define MZ_COLS        7     /* SOURCE BROWSE TAG LIST PLAYLIST SEARCH MENU USB STOP */
 
 /* THE EIGHTH CELL IS GONE, AND WHY IT WENT RATHER THAN CHANGED ITS MARK.
@@ -126,8 +134,11 @@
  * (182.857 a column), so the columns are no longer equal -- menu_button_x0/x1 tile
  * them exactly regardless, with no gap and no overlap, and that is the property
  * menu_button_at() and menu_paint_cols() rest on; test_menu.c asserts it at every
- * column rather than asserting a width. The widest label, "USB STOP" at 65 px, has
- * more than 55 px of slack in the narrowest column either way, so no label moves.
+ * column rather than asserting a width. The widest label, "USB STOP" at 76 px, has
+ * more than 100 px of slack in a 1280-px column either way, so no label moves; it is
+ * a NARROW picture, not the seventh column, that the atlas size is measured against
+ * -- menu_paint.c refuses one whose narrowest column cannot hold its own label whole,
+ * and at 19 px that floor is a 535-px-wide picture.
  *
  * WHAT IS NOT GONE: the window module itself still ships and still works
  * (menu_window.c, menu_window_paint.c, browser_link.c) -- the operator abandoned the

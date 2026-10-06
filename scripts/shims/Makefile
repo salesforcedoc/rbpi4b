@@ -62,6 +62,29 @@ reference: $(REFERENCE)
 shmstate.o: shmstate.c shmstate.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# fader_state.o holds the channel-fader bookkeeping -- g_fader and g_fader_seen,
+# the position and "has anyone reported one" -- and it is linked into BOTH shims,
+# which is the whole point: the touch drawers (fbshim, pointsrc.c) WRITE them and
+# the 30 s unity seed plus the meter scaling (knobshim, rbp_vu.c) READ them. A
+# definition in either shim alone would be a private copy to the other, and the
+# seed would silently override the operator's fader for the first 30 s of every
+# run -- see fader_state.c's header comment.
+#
+# BOTH, and not one plus an extern, for two reasons. `make check` fails any shim
+# with an undefined symbol the target libc cannot supply, so the reader's shim
+# would have to define it anyway. And with both defining it the sharing does not
+# depend on which is loaded first: LD_PRELOAD order is fbshim:knobshim:audioshim,
+# and a default-visibility symbol defined in two preloaded libraries resolves for
+# BOTH of them to the first one in the search order -- one array either way, and
+# the arrangement still works if the order is ever changed.
+#
+# NO -fvisibility=hidden here, unlike every object in CTRL_OBJS: hidden would leave
+# the name undefined in the global scope and put the two shims back on private
+# copies. The one rule below is the explicit `%.o: %.c` for this file, so the flag
+# set cannot be changed by moving the object into a list.
+fader_state.o: fader_state.c rbp_vu.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # rbp_key.o is the second object both libraries link: the key path (are we rbp,
 # where its KeyManager is, how to send it a keycode -- see rbp_key.h). It is
 # deliberately NOT in either object list below, because those two lists are
@@ -124,9 +147,10 @@ CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \
               midi_io.h shimutil.h ctrl_map.h mididump.h evdev_io.h syscalls.h \
               shmstate.h
 
-knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o $(CTRL_HDRS) \
+knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o fader_state.o $(CTRL_HDRS) \
              $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
-	$(CC) $(CFLAGS) -shared -o $@ $(CTRL_OBJS) rbp_key.o shmstate.o -lpthread -lm -lc $(LDFLAGS)
+	$(CC) $(CFLAGS) -shared -o $@ $(CTRL_OBJS) rbp_key.o shmstate.o \
+	    fader_state.o -lpthread -lm -lc $(LDFLAGS)
 
 $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 	$(CC) $(CFLAGS) -fvisibility=hidden -c -o $@ $<
@@ -228,24 +252,45 @@ master_policy.o: master_policy.c master_policy.h
 #                  libasound2-dev out -- so there is no include path and nothing
 #                  to link. The WINDOW is presented on this same plane, handed
 #                  over from the band: DRM master is one per device.
+#   side_zone.o    the left/right edge drawers' geometry, hit test and gesture --
+#                  CUE, PLAY and an absolute channel fader per deck (pure,
+#                  unit-tested). menu_zone.o's shape, rotated onto the x axis
+#   side_paint.o   the drawer's image: title, the two transport boxes, the fader
+#                  and its readout (pure, unit-tested)
+#   prompt_zone.o  the USB STOP chooser's box, hit test and gesture -- the three
+#                  rows USB 1 / USB 2 / CANCEL the seventh menu column raises in
+#                  place of stopping a device on one tap (pure, unit-tested).
+#                  menu_zone.o's shape a third time: a box that owns every report
+#                  while it is up and answers on the release
+#   prompt_paint.o the chooser's image: frame, title, rule and three row buttons,
+#                  the two dead-device rows in the palette's OFF classes (pure)
 #
 # This is the SECOND shim to reach rbp: pointsrc.c turns a recognized tap into
 # the keycode rbp has for that button (send_rx_key, rbp_key.o below). It is a
 # real change to a property fbshim had -- it referenced no rbp address at all --
 # which is why the one object it needs is a leaf with its own rule rather than
 # rbp_bridge.o, whose meter hook must not exist in two copies.
+#
+# It reached rbp's *mixer* as well once the drawers arrived: a drag sends
+# K_FADER/OP_VALUE and records the position in g_fader -- see fader_state.o,
+# which is NOT in this list on purpose and is linked into BOTH shims explicitly,
+# the way rbp_key.o is.
 FBSHIM_OBJS := fb_shim.o tscfake.o pointsrc.o point_xform.o touch_zone.o \
                fb_cursor.o cursor_paint.o menu_zone.o menu_paint.o menu_draw.o \
                menu_window.o menu_window_paint.o menu_keyboard.o \
-               browser_link.o drmband.o
+               browser_link.o drmband.o side_zone.o side_paint.o util_zone.o \
+               wave_zone.o prompt_zone.o prompt_paint.o
 FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h touch_zone.h syscalls.h \
                envutil.h fb_cursor.h cursor_paint.h fbdev.h menu_zone.h \
                menu_paint.h menu_font.h menu_draw.h drmband.h menu_window.h \
-               menu_window_paint.h menu_keyboard.h browser_link.h
+               menu_window_paint.h menu_keyboard.h browser_link.h side_zone.h \
+               side_paint.h rbp_vu.h util_zone.h wave_zone.h prompt_zone.h \
+               prompt_paint.h
 
-fbshim.so: $(FBSHIM_OBJS) rbp_key.o $(FBSHIM_HDRS) \
+fbshim.so: $(FBSHIM_OBJS) rbp_key.o fader_state.o $(FBSHIM_HDRS) \
            $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
-	$(CC) $(CFLAGS) -shared -o $@ $(FBSHIM_OBJS) rbp_key.o -lpthread -lm -lc $(LDFLAGS)
+	$(CC) $(CFLAGS) -shared -o $@ $(FBSHIM_OBJS) rbp_key.o fader_state.o \
+	    -lpthread -lm -lc $(LDFLAGS)
 
 fb_shim.o: fb_shim.c $(FBSHIM_HDRS)
 tscfake.o: tscfake.c tscfake.h pointsrc.h
@@ -258,7 +303,8 @@ tscfake.o: tscfake.c tscfake.h pointsrc.h
 fb_shim.o: CFLAGS += -Wno-nonnull-compare -Wno-maybe-uninitialized
 
 pointsrc.o: pointsrc.c pointsrc.h point_xform.h tscfake.h touch_zone.h \
-            rbp_key.h rbp_abi.h
+            rbp_key.h rbp_abi.h menu_zone.h menu_window.h side_zone.h rbp_vu.h \
+            prompt_zone.h
 point_xform.o: point_xform.c point_xform.h
 touch_zone.o: touch_zone.c touch_zone.h
 fb_cursor.o: fb_cursor.c fb_cursor.h cursor_paint.h fbdev.h pointsrc.h point_xform.h
@@ -273,7 +319,8 @@ menu_paint.o: menu_paint.c menu_paint.h menu_zone.h menu_font.h
 # rule above already covers menu_draw.h through $(FBSHIM_HDRS), which is where its
 # header is listed.
 menu_draw.o: menu_draw.c menu_draw.h menu_paint.h menu_zone.h fbdev.h \
-             point_xform.h pointsrc.h drmband.h menu_window.h menu_window_paint.h
+             point_xform.h pointsrc.h drmband.h menu_window.h menu_window_paint.h \
+             side_zone.h side_paint.h rbp_vu.h prompt_zone.h prompt_paint.h
 # menu_window_paint.o takes menu_paint.h for the palette and the view, and
 # menu_window.h for the rectangles it must draw the marks exactly inside -- a
 # dependency that is not written down is a rebuild that silently does not happen.
@@ -284,6 +331,36 @@ menu_window_paint.o: menu_window_paint.c menu_window_paint.h menu_window.h \
 # (menu_window_paint.c does) and it holds no state that crosses a thread, so its
 # one header is its whole dependency.
 menu_keyboard.o: menu_keyboard.c menu_keyboard.h
+# side_zone.o and side_paint.o are pure, and their headers carry the whole
+# interface: side_zone.h for the geometry and the gesture, side_paint.h for the
+# view it draws over. side_paint.o takes side_zone.h as well because every
+# rectangle it draws is a SZ_* literal from it -- a dependency that is not written
+# down is a rebuild that silently does not happen.
+side_zone.o: side_zone.c side_zone.h menu_zone.h
+side_paint.o: side_paint.c side_paint.h side_zone.h menu_paint.h menu_font.h
+# util_zone.o is pure in the same way and takes menu_zone.h only for the MZ_FEED_*
+# vocabulary its one door answers in -- it links no rbp symbol and reads no address,
+# which is why the state it needs arrives in a struct and not from rbp. Its own
+# header carries the geometry, the constants and the gesture rules in full.
+util_zone.o: util_zone.c util_zone.h menu_zone.h
+# wave_zone.o is the fourth of that family, and it does not take menu_zone.h at all:
+# it answers with a SIGNED STEP COUNT rather than with the MZ_FEED_* vocabulary,
+# because it never takes a report -- that is the whole correction of the pinch it
+# replaces. It reads no rbp address either: whether a selector rotation sent right now
+# would reach the waveform zoom or the beat grid changes under the gesture, so the
+# caller computes it per report and hands it over. Its header carries the whole feature,
+# including why the on-screen ZOOM GRID control is an indicator and not a control, the
+# measured geometry of the wave rect, and the regression the additive rule answers.
+wave_zone.o: wave_zone.c wave_zone.h
+# prompt_zone.o is the fifth of the pure family and is built to side_zone.o's exact
+# shape: menu_zone.h is on the line for the MZ_FEED_* codes and MZ_LOGICAL_W/H it
+# answers in, and for nothing else -- it links no rbp symbol and reads no address,
+# which is why rbp's answer about the two devices arrives in a struct prompt_state
+# and not from a pointer. prompt_paint.o takes prompt_zone.h as well because every
+# rectangle it draws is a PR_* literal from it, the same dependency side_paint.o has
+# on side_zone.h.
+prompt_zone.o: prompt_zone.c prompt_zone.h menu_zone.h
+prompt_paint.o: prompt_paint.c prompt_paint.h prompt_zone.h menu_paint.h menu_font.h
 # browser_link.o is the one object in the menu that opens a file, so its header is
 # where the three paths and the frame's own header layout live -- nothing else in
 # the shim names /tmp/rbwin.*.
@@ -305,7 +382,13 @@ tscshim.so: tscshim.c $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.
 	$(CC) $(CFLAGS) -shared -o $@ $< -lpthread -lm -lc $(LDFLAGS)
 
 crashcatch.so: crashcatch.c
-	$(CC) $(CFLAGS) -shared -o $@ $< -lc $(LDFLAGS)
+	$(CC) $(CFLAGS) -shared -o $@ $< $(RX3LIB)/libdl.so.2 -lc $(LDFLAGS)
+
+# The witness's test subject. Must NOT be -static: LD_PRELOAD needs a dynamic
+# loader, which is exactly why this is not one of TESTS. Run it in the chroot,
+# where this rootfs's loader and soft-float ABI apply -- see docs/13 S3.7.
+ccexit: ccexit.c
+	$(CC) $(CFLAGS) -o $@ $< -lc $(LDFLAGS)
 
 seqinject2: seqinject2.c
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -static -o $@ $<
@@ -382,8 +465,8 @@ pcmprobe: ../../tools/pcmprobe.c
 # fb_cursor.o is linked and the kernel is scripted, so what is pinned is the retry
 # and the rectangle -- see that file's header.
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
-         test_evdev test_cursor_dev test_menu test_window test_keyboard \
-         test_menu_dev test_led_table
+         test_evdev test_cursor_dev test_menu test_side test_window test_keyboard \
+         test_menu_dev test_util test_wave test_prompt test_led_table
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -395,10 +478,30 @@ test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 # framebuffer is a local array: there is no device, no thread and no rbp anywhere
 # in it, which is the whole reason both modules are pure. What it stops is a
 # gesture rule or a column boundary that is only ever checked by a finger.
-test_menu: test_menu.c menu_zone.c menu_paint.c menu_zone.h menu_paint.h \
-           menu_font.h
+#
+# side_zone.c is on the link line because menu_zone.c's closed-entry arm now asks
+# side_any_open() -- the ONE SURFACE gate -- so the band does not compile without
+# the drawer's state. It is the REAL object, not a stub: a stub would answer "no
+# drawer is ever open" and quietly make the test agree with a gate that does not
+# work.
+test_menu: test_menu.c menu_zone.c menu_paint.c side_zone.c menu_zone.h \
+           menu_paint.h menu_font.h side_zone.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
-	    -Wall -Wextra -static -o $@ test_menu.c menu_zone.c menu_paint.c
+	    -Wall -Wextra -static -o $@ test_menu.c menu_zone.c menu_paint.c \
+	    side_zone.c
+
+# test_side links the PRODUCTION side_zone.c and side_paint.c -- the shipped gesture,
+# the shipped geometry and the shipped pixels -- and menu_zone.c with them, because
+# the ONE SURFACE rule is a statement about two modules at once: the drawer must not
+# arm while the band is open, and the band must not arm while a drawer is open. Driving
+# both real feeders is the only way to pin that. Its surface is a local array: no
+# framebuffer, no plane, no thread, no device. What it stops is a hit boundary, a sweep
+# threshold, a mirror or a fader mapping that is only ever checked by a finger.
+test_side: test_side.c side_zone.c side_paint.c menu_zone.c menu_paint.c \
+           side_zone.h side_paint.h menu_zone.h menu_paint.h menu_font.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_side.c side_zone.c side_paint.c \
+	    menu_zone.c menu_paint.c
 
 # test_window links the PRODUCTION menu_window.c and menu_window_paint.c, plus
 # menu_paint.c because the chrome's palette comes from menu_pixel() -- one table,
@@ -413,12 +516,19 @@ test_menu: test_menu.c menu_zone.c menu_paint.c menu_zone.h menu_paint.h \
 # keyboard, a cap types into the buffer and OK hides it, so the window's own tests
 # cannot be built without it. It is the PRODUCTION source, not a copy, so what the
 # window's tests exercise is the table that ships.
+#
+# side_zone.c is the same story one level down: menu_zone.c -- linked for
+# MZ_LOGICAL_* and MZ_STRIP_Y1 -- calls side_any_open() from its closed-entry arm,
+# so the band's source cannot link without the drawer's state. Real object, not a
+# stub; see test_menu's note.
 test_window: test_window.c menu_window.c menu_window_paint.c menu_paint.c \
-             menu_zone.c menu_keyboard.c menu_window.h menu_window_paint.h \
-             menu_paint.h menu_zone.h menu_font.h menu_keyboard.h
+             menu_zone.c menu_keyboard.c side_zone.c menu_window.h \
+             menu_window_paint.h menu_paint.h menu_zone.h menu_font.h \
+             menu_keyboard.h side_zone.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_window.c menu_window.c \
-	    menu_window_paint.c menu_paint.c menu_zone.c menu_keyboard.c
+	    menu_window_paint.c menu_paint.c menu_zone.c menu_keyboard.c \
+	    side_zone.c
 
 # test_keyboard pins the popup keyboard ALONE: the 46 character keys are exactly the
 # atlas's keyboard alphabet with no duplicate, the four specials are where the layout
@@ -430,6 +540,33 @@ test_window: test_window.c menu_window.c menu_window_paint.c menu_paint.c \
 test_keyboard: test_keyboard.c menu_keyboard.c menu_keyboard.h menu_font.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_keyboard.c menu_keyboard.c
+
+# test_util pins the UTILITY screen's gesture. It links the PRODUCTION util_zone.c and
+# nothing else: menu_zone.h is #defines and declarations, so the module needs no other
+# object -- which is the same "pure" that test_keyboard's header note is about. rbp is
+# not present and cannot be: everything util_zone.c would ask rbp arrives in a
+# struct util_state the test fills in by hand, and everything it wants sent comes back
+# as an act and a signed count. What it stops is a row boundary, a coalescing rule, a
+# tap's travel -- and, above all, the two refusals that protect the operator: a drag
+# never taps, and a drag NEVER ROTATES WHILE EDITING, where rbp's rotate would rewrite
+# a setting instead of scrolling. rbp_abi.h is linked in as well, on purpose, for the
+# one check that keeps this module's private copy of the browse mode honest.
+test_util: test_util.c util_zone.c util_zone.h menu_zone.h rbp_abi.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_util.c util_zone.c
+
+# test_wave pins the waveform swipe, and links the PRODUCTION wave_zone.c for the same
+# reason test_util.c links util_zone.c. rbp_abi.h is linked in on purpose and it is the
+# part that matters most: this gesture's whole safety is that a step is only sent where
+# rbp would route a selector rotation to its waveform zoom and not to its beat grid, and
+# the test pins that rule against the macro rbp_abi.h derives from the binary rather than
+# against a second copy of the arithmetic. It also pins this module's own copies of the
+# scale ladder and of the rect against rbp_abi.h and the measurements the header carries.
+# The module itself reads no address -- whether the rotation would zoom arrives in struct
+# wave_state, per report, because it changes under the gesture.
+test_wave: test_wave.c wave_zone.c wave_zone.h rbp_abi.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_wave.c wave_zone.c
 
 # test_led_table links the PRODUCTION led_table.c. It is the one pure piece of the
 # LED bridge, which is exactly why it was split out: what it decides -- whether a
@@ -443,6 +580,22 @@ test_keyboard: test_keyboard.c menu_keyboard.c menu_keyboard.h menu_font.h
 test_led_table: test_led_table.c led_table.c led_table.h rbp_abi.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_led_table.c led_table.c
+
+# test_prompt links the PRODUCTION prompt_zone.c and prompt_paint.c, and menu_paint.c
+# with them because the box's palette comes from menu_pixel() -- one table, so the
+# chooser cannot drift into colours the band and the drawers do not have. menu_zone.c is
+# on the line for the same reason it is on test_side's: menu_paint.c's own layout code
+# calls menu_label() and menu_button_x0/x1(), which live there, and menu_zone.c's closed-
+# entry arm calls side_any_open() in turn. Its surface is a local array: no framebuffer,
+# no plane, no thread, no rbp. What it stops is a row boundary, a dead-device row that
+# answers anyway, and above all a box that closes itself while a finger is down -- the
+# release that would then reach rbp with no press behind it.
+test_prompt: test_prompt.c prompt_zone.c prompt_paint.c menu_paint.c menu_zone.c \
+             side_zone.c prompt_zone.h prompt_paint.h menu_paint.h menu_zone.h \
+             menu_font.h side_zone.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_prompt.c prompt_zone.c \
+	    prompt_paint.c menu_paint.c menu_zone.c side_zone.c
 
 test_audio: test_audio.c s24pack.c s24pack.h mirror_policy.c mirror_policy.h \
             master_policy.c master_policy.h pace_policy.c pace_policy.h
@@ -600,18 +753,43 @@ test_cursor_dev.o: test_cursor_dev.c fb_cursor.h fbdev.h cursor_paint.h \
 # link has to resolve them, and on a host with no /tmp/rbwin.* every browser_link
 # call takes its absent-file arm -- which is the route the window must survive on a
 # unit where the host browser is not running.
+# side_zone.o, side_paint.o and fader_state.o are here because menu_draw.o now calls
+# the drawers: the plane handover and the repaint gate are part of the driver this
+# pins. side_zone.o and side_paint.o are the REAL objects for the same reason
+# drmband.o is -- the shipped geometry, the shipped gesture and the shipped pixels --
+# and fader_state.o is the one default-visibility definition of g_fader that the
+# drawer's handle reads in place, exactly as the shim does.
+# prompt_zone.o and prompt_paint.o are here for the same reason one step further on:
+# menu_draw.o now presents the USB STOP chooser on a plane of its own, so the box's
+# state machine and its image are part of the driver this pins. Both are the REAL
+# objects, so what is pinned is the shipped box.
 MENU_TEST_OBJS := test_menu_dev.o menu_draw.o menu_paint.o menu_zone.o \
                   menu_window.o menu_window_paint.o menu_keyboard.o \
-                  browser_link.o point_xform.o drmband.o
+                  browser_link.o point_xform.o drmband.o side_zone.o \
+                  side_paint.o prompt_zone.o prompt_paint.o fader_state.o
 
+# The drawer's wrappers, and they are the ONE exception to "drmband.o is the real
+# object". --wrap=drm_band_* lets scenario_drawer() hand the module a plane that
+# exists, so the handover and the repaint gate can be pinned at all -- with no
+# /dev/dri they are both unreachable, and a gate that has degenerated into "always"
+# is invisible when the fallback paints every tick anyway. The wrapper is ARMED only
+# inside that one scenario; everywhere else it delegates to the real drmband.o and
+# the fallback route is untouched. --wrap=side_paint is there for the same scenario:
+# the gate's claim is a COUNT. --wrap=prompt_paint is there for scenario_prompt(), the
+# same claim about the chooser's box, whose plane is a FOURTH band and so has to be
+# classified by the wrapper rather than assumed to be one of the two it already knows.
 test_menu_dev: $(MENU_TEST_OBJS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ $(MENU_TEST_OBJS) \
 	    -Wl,--wrap=syscall -Wl,--wrap=malloc -Wl,--wrap=usleep \
+	    -Wl,--wrap=drm_band_setup -Wl,--wrap=drm_band_show \
+	    -Wl,--wrap=drm_band_hide -Wl,--wrap=drm_band_teardown \
+	    -Wl,--wrap=side_paint -Wl,--wrap=prompt_paint \
 	    -lpthread -lm -lc
 
 test_menu_dev.o: test_menu_dev.c menu_draw.h menu_paint.h menu_zone.h \
-                 point_xform.h pointsrc.h fbdev.h
+                 point_xform.h pointsrc.h fbdev.h side_zone.h side_paint.h \
+                 rbp_vu.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -c -o $@ $<
 

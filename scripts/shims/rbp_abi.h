@@ -111,6 +111,128 @@
 #define K_SHORTCUT   0x0210
 #define K_TRACKFILTER 0x420f
 
+/* THE BROWSE MODE NUMBER -- which screen rbp's browse is showing. The two above
+ * are what a key turns INTO a mode ("browse mode 10", "browse mode 8"); this is
+ * the number itself, and the one screen the shim has to recognise by it is
+ * UTILITY.
+ *
+ * Where it lives: `uiBrowse` @ 0x0326f8b8, FIRST WORD -- getBrowseMode() @0x1126d0
+ * loads that address from its own pc-relative literal and nothing else. uiBrowse
+ * is a plain .bss singleton, so this is one read at a fixed address with no
+ * pointer chase and no structure built at start-up to guard against, which is why
+ * it is safe to read from the shim's input thread (contrast the guarded walks
+ * UI_PADMODE_HOLDER_GLOBAL needs, further down).
+ *
+ * UTILITY is 7, and rbp's OWN DISPATCHER gates on that literal, which is what
+ * makes == 7 the honest test and not a guess: UiBrowse_SetDispUtilityList
+ * @0x13cfc8 opens the screen with setBrowseMode(7); setBackColor(9), and
+ * Ui_BrowseCommTask @0x1351a8 compares the mode against 7 at 0x139124, 0x139180,
+ * 0x1391a4 and 0x1391bc -- the four branches into UiBrowse_FinishUtilityEdit,
+ * UiBrowse_ChangeUtilityItem and UiBrowse_StartUtilityEdit. Confirmed against the
+ * glass 2026-10-05: the live mode read 7 while rbp's UTILITY list was on screen.
+ *
+ * The four accessors all share this base -- getBrowseMode @0x1126d0, getCursorNo
+ * @0x1127e4, getItemNum @0x1127c4, getInitialNo @0x1128bc. getUiBrowseListPointer
+ * @0x1125c4 is the odd one out at 0x0326fc68, and that literal is the LINE-POINTER
+ * array: reading itemNum/initialNo from it returns 0 while its neighbour four
+ * hundred bytes on reads the true 33. */
+#define BROWSE_MODE_UTILITY 7
+
+/* uiBrowse's fields, as the accessors above read them. `list` is 0 or 1 (the two
+ * browsable lists); CURSOR is indexed by list and the other two stride by
+ * LIST_STRIDE. All four are `int`.
+ *
+ * cursorClamped: rbp's own setCursor @0x113c24 clamps to 0..11 -- twelve, which is
+ * exactly the number of rows it draws -- so a cursor here is always a row on the
+ * glass. */
+#define UIBROWSE_GLOBAL      0x0326f8b8UL   /* nm: uiBrowse (B) */
+#define UIBROWSE_OFF_MODE    0x00     /* int, getBrowseMode()       @0x1126d0 */
+#define UIBROWSE_OFF_DEVICE  0x04     /* int, getBrowseDevice()     @0x1126e0 */
+#define UIBROWSE_OFF_ACTIVE_LIST 0x14 /* int, getActiveList()       @0x112748 -- 0
+                                       * while navigating, NON-ZERO while EDITING,
+                                       * which is the state a rotation must not be
+                                       * sent in (it would edit the value) */
+#define UIBROWSE_OFF_CURSOR  0x6c     /* int[2], getCursorNo(list)  @0x1127e4 */
+#define UIBROWSE_OFF_ITEMNUM 0x3b8    /* int, getItemNum(list)      @0x1127c4 */
+#define UIBROWSE_OFF_INITIAL 0x3bc    /* int, getInitialNo(list)    @0x1128bc */
+#define UIBROWSE_LIST_STRIDE 0x1ce4   /* between list 0's and list 1's blocks */
+
+/* The calibration sub-screen, and it is NOT a mode: IsUtilityCalibrationOn()
+ * @0x112e80 is `return [uiBrowse+0xac] != 0 && [uiBrowse+0xb8] != 0` -- two words
+ * of uiBrowse itself, no pointer and nothing to guard. rbp draws its own touch
+ * marks on that sub-screen and reads touches on it itself, so the shim's UTILITY
+ * gesture has to stand down there even though the browse mode is unchanged. */
+#define UIBROWSE_OFF_CALIB_A 0xac
+#define UIBROWSE_OFF_CALIB_B 0xb8
+
+/* ---------------------------------------------------------------------------
+ * THE PERFORMANCE SCREEN AND ITS WAVEFORM ZOOM -- what a synthesized selector
+ * rotation turns into there, read out of rbp 2026-10-05 for the waveform
+ * swipe (wave_zone.c, and the pinch it replaced).
+ *
+ * BROWSE_MODE_PLAY is 1, and that is rbp's own number rather than a guess:
+ * ComputeCursorMode @0x113084 switches on getBrowseMode() (its literal pool at
+ * 0x1131dc reads .word 0x0326f8b8) with a jump table indexed by `mode - 1`, and
+ * index 0 -- mode 1 -- lands on 0x113140, which is the one branch in the whole
+ * table that can return the wave-zoom cursor mode. Measured at the same time:
+ * the live mode read 1 with the operator's performance screen on the glass and 5
+ * while INFO was over it.
+ *
+ * RB_WAVE_ZOOM_OK() below is that branch, in the shim. On mode 1 rbp computes:
+ *
+ *     if (uiBrowse[0x18] == 1)                 return 0;   // 0x113140
+ *     if (getPlayModeWaveDispMode() != 1)      return 5;   // CursorWaveZoom
+ *     else                                     return 6;   // CursorGridAdjust
+ *
+ * -- and BrowseEncoderRotate @0x1212a4 dispatches table index 5 to CursorWaveZoom
+ * @0x102720 and 6 to CursorGridAdjust @0x1027ec. So a selector rotation on this
+ * screen either ZOOMS THE WAVEFORM or MOVES THE BEAT GRID, and the shim must be
+ * able to tell which before it sends one.
+ *
+ * The flag that decides it is GRID_ADJUST_FLG -- CmnFunc_CmnInfo_GetGridAdjustModeFlg
+ * @0x17f8a0, which is `movw r3,#0x3564; movt r3,#0x325; ldr r0,[r3,#0x1538]`, so
+ * the word is 0x03253564 + 0x1538 = 0x03254a9c and its setter @0x17f88c writes the
+ * same one. ChangePlayModeGrideAdjustMode @0x13366c is what toggles it (it is also
+ * what UiKey_ZoomGrid @0x11a4d4 ends up in, despite the name).
+ *
+ * READ THAT WORD, NOT 0x0216BAD0. getPlayModeWaveDispMode @0x13364c caches this
+ * same flag at 0x0216bac8 + 8 = 0x0216bad0, but only when it is CALLED -- and it is
+ * called only from the mode-1 branch above, i.e. only when a rotation has just
+ * happened. The cached word is therefore stale between rotations: press rbp's
+ * ZOOM GRID control and it stays 0 until the next encoder click, which is exactly
+ * the window a swipe would arrive in. 0x03254a9c is always current.
+ *
+ * THE WAVE SCALE is one word, 0x0216bac8, written by setPlayModeWaveScale @0x133734
+ * (`movw r3,#0xbac8; movt r3,#0x216; str r0,[r3]`) and read by getPlayModeWaveScale
+ * @0x1336e0. Measured range 0..4, and it is a ladder, not a wrap: CursorWaveZoom
+ * builds `{max=5, min=0, ..., cur}` and hands it to ComputeCursorMove.part.0
+ * @0x1002fc, which clamps at both ends and returns 0 (no move) at either. Zooming
+ * with the selector on the live unit walked 2 -> 3 -> 4 and stopped; rotating back
+ * walked 4 -> 3 -> 2 -> 1 -> 0.
+ *
+ * ...AND A BIGGER SCALE IS ZOOMED *IN*. calcParticularWave @0x123014 picks its
+ * samples-per-screen constant out of a table at 0x0043d670 + 32, which reads
+ * {1600, 800, 400, 200} for scales 0..3 and 100 above them -- a doubling ladder
+ * where the smallest number is the tightest view. Confirmed on the glass: at scale
+ * 4 the waveform shows a handful of beats spread wide, at scale 2 a dense run of
+ * them. So a selector STEP OF +1 ZOOMS IN and -1 ZOOMS OUT, which is what makes a
+ * swipe UP a positive step. */
+#define BROWSE_MODE_PLAY     1
+#define UIBROWSE_OFF_PLAY_SUBGATE 0x18  /* int, the mode-1 branch's first test: 1
+                                         * means rbp returns cursor mode 0 and a
+                                         * rotation does nothing at all */
+#define WAVE_SCALE_GLOBAL    0x0216bac8UL
+#define WAVE_SCALE_MIN       0
+#define WAVE_SCALE_MAX       4
+#define GRID_ADJUST_FLG_GLOBAL 0x03254a9cUL  /* CmnFunc_CmnInfo_GetGridAdjustModeFlg */
+
+/* The branch above, as a macro over three values the caller has already read, so
+ * the rule lives in one place and test_wave.c can pin it against this file rather
+ * than against a paraphrase. True means: on this screen, at this moment, a
+ * selector rotation reaches CursorWaveZoom and nothing else. */
+#define RB_WAVE_ZOOM_OK(mode, play_subgate, grid_adjust_flg) \
+    ((mode) == BROWSE_MODE_PLAY && (play_subgate) != 1 && (grid_adjust_flg) == 0)
+
 /* 0x8002, CH_GLOBAL  the safe eject -- rbp's own name for it is "UsbStop", and it
  *                    is the one key in this file that needs OP_REPEAT *and* a
  *                    plain press: the press and the repeat each do a different
@@ -154,6 +276,48 @@
  * NOTE the contrast with K_TRACKFILTER, which needs the repeat *instead of* a
  * usable press. Here the press is load-bearing. */
 #define K_USBSTOP    0x8002
+
+/* THE TWO UsbStorageManager OBJECTS, and how to reach them -- what the USB STOP
+ * chooser's two device rows are lit from (prompt_zone.c, pointsrc.c).
+ *
+ * ui::IUiObjManager::getUsbStorageManager(Channel) @0x31dfc8 is four instructions
+ * and they are all here:
+ *
+ *     31dfc8: ldr  r3, [pc, #28]      @ the literal below: 0x026866b0
+ *     31dfcc: sub  r0, r0, #1
+ *     31dfd0: ldr  r3, [r3, #272]     @ 0x110 -- and 0x026866b0 + 0x110 ==
+ *                                    @ UI_OBJ_MGR_HOLDER above, so this is
+ *                                    @ `uobjmgr = *(0x026867c0)`
+ *     31dfd4: ldr  r2, [r3, #204]     @ 0xcc -- the manager COUNT
+ *     31dfd8: cmp  r0, r2
+ *     31dfdc: ldrcc r3, [r3, #196]    @ 0xc4 -- the manager ARRAY
+ *     31dfe4: ldrcc r0, [r3, r0, lsl #2]
+ *
+ * getPlayer @0x31e018 is the same walk with a different pair (+0x48/+0x40), which is
+ * what pins the reading: two callers, one shape. The channel is `ch - 1` and rbp
+ * bounds-checks it, so a caller must too.
+ *
+ * `regUsbManager()` in ui::BrowseUiIfDpl::regUsbManager() @0x33b924 (which stores at
+ * browse_ui+0x64 for ch1 and +0x68 for ch2, refusing any channel outside {1,2}) is
+ * what fixes the count at two. Measured live 2026-10-05: exactly two, ch=1 media=2
+ * (the operator's stick) and ch=2 media=0. */
+#define UIOBJMGR_OFF_MGRNUM  0xcc    /* int, the count                */
+#define UIOBJMGR_OFF_MGRARR  0xc4    /* ulong*, the array             */
+
+/* And the manager's own fields, as ui::UsbStorageManager::onKey @0x3259f4 and
+ * onUsbStopKey @0x325788 read them.
+ *
+ * CHANNEL is a WORD (325a30: `ldr r3,[r5,#132]`, compared against the key's channel
+ * byte at 325a2c and dropped when they differ) -- so a key for USB 2 has to go out on
+ * channel 2 to reach the second manager at all. CH_GLOBAL is 1, which is USB 1's own
+ * number, and that is the whole reason the single-column binding ever worked on the
+ * first device and could never have reached the second.
+ *
+ * MEDIA == MEDIA_READY is the press branch's own first test at 0x325788, so it is the
+ * honest liveness answer rather than an inference from anything else. */
+#define USB_MGR_OFF_CHANNEL  0x84    /* int   */
+#define USB_MGR_OFF_MEDIA    0x88    /* int   */
+#define USB_MGR_MEDIA_READY  2       /* media present and ready */
 
 #define K_BACK       0x420d    /* RX3 BACK key */
 #define K_LOAD       0x4311

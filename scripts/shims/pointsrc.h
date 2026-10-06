@@ -17,6 +17,8 @@
 #ifndef RBLIVE4_POINTSRC_H
 #define RBLIVE4_POINTSRC_H
 
+#include "prompt_zone.h"    /* struct prompt_state, for the snapshot below */
+
 /* Start (or re-start) the discovery/reader thread. Idempotent and safe to call
  * from any thread; returns 0 if the thread is running. */
 int pointsrc_start(void);
@@ -39,5 +41,17 @@ int pointsrc_cursor(int *logical_x, int *logical_y, int *down);
  * the reader thread and the compositor so both halves of the pointer path land
  * in one file, in the order things happened. */
 void pointsrc_log(const char *fmt, ...);
+
+/* What rbp currently says about the two USB devices, for the USB STOP chooser.
+ * `S->live[i]` is "device i+1 has media present and ready" (rbp's own test,
+ * `[UsbStorageManager+0x88] == 2`); both are left 0 when rbp cannot be read, which
+ * the painter and the gesture both treat as a refusal rather than as an absence
+ * of information. Returns 1 if rbp was walked, 0 if not -- the return is for the
+ * log, not for the caller's decision.
+ *
+ * A read-only snapshot, like pointsrc_cursor(): it touches nothing of rbp's. Safe
+ * from the drawer/chooser builder thread as well as from this one, which is why it
+ * is not static. See prompt_zone.h for the derivation of the walk. */
+int pointsrc_usb_state(struct prompt_state *S);
 
 #endif /* RBLIVE4_POINTSRC_H */

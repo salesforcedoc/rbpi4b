@@ -73,17 +73,46 @@
  * rather than carrying a second copy of the column count. */
 #include "menu_zone.h"
 
+/* HOW A BUTTON SITS IN ITS COLUMN, in framebuffer pixels, and the two numbers the
+ * 2026-10-06 restyle turned on. The operator, having seen the band with a frame round
+ * the whole bar:
+ *
+ *     "the drop down doesn't need the white border around the endire thing, it only
+ *      needs a thin white border around each button with some padding in between and
+ *      a black background. model it this way for the USB stop menu as well"
+ *
+ * So a button is its column, inset by MENU_BTN_PAD_PX at each end, wearing a
+ * MENU_BTN_BORDER_PX ring of MENU_BORDER, and everything outside it is the black bed
+ * -- which is what the bar's old two-pixel frame and its one-pixel MENU_DIV seam
+ * both became. The COLUMN is still the hit target (menu_zone.c did not move): the
+ * 8 px gap between two buttons is not a control, and a finger that lands in one is
+ * aiming at a button.
+ *
+ * In framebuffer pixels and not logical, like the frame constant they replace (and
+ * unlike menu_zone.h, which is logical by its own rule): a border is a mark on the
+ * glass, and a hairline that scaled with the panel would vanish on a small one. */
+#define MENU_BTN_BORDER_PX 1
+#define MENU_BTN_PAD_PX    4
+
 /* The panel, in the classes a pixel can be. The palette is a pure function of
  * (bpp, class) -- menu_pixel() -- exactly as cursor_pixel() is. */
 enum {
     MENU_NONE = 0,      /* not the panel's pixel at all */
-    MENU_FILL,          /* the bar's background, between the border and a button */
-    MENU_BORDER,        /* the frame around the whole bar */
-    MENU_DIV,           /* the one-pixel seam between two columns */
+    MENU_FILL,          /* the bar's bed: BLACK, above, below and between the buttons */
+    MENU_BORDER,        /* a button's one-pixel outline (it was the bar's frame) */
+    MENU_DIV,           /* not this bar's any more -- the drawers and the box use it */
     MENU_BTN,           /* a button's background */
     MENU_BTN_PRESSED,   /* ...while a finger is on it */
     MENU_LABEL,         /* a glyph on a button */
-    MENU_LABEL_PRESSED  /* ...on the pressed button (dark on the accent) */
+    MENU_LABEL_PRESSED, /* ...on the pressed button (dark on the accent) */
+    /* THE TWO OFF CLASSES, and the band never draws them. They are here rather than
+     * in prompt_paint.c for the reason side_paint.c gives for its own colours: the
+     * palette is PUBLIC and in ONE place, so the band, the two drawers, the window and
+     * now the USB STOP chooser cannot drift apart about what "a button" looks like.
+     * prompt_paint.c is the only caller -- a row whose device rbp reports absent
+     * (prompt_zone.h) -- and menu_paint.c's own classifier can never return one. */
+    MENU_BTN_OFF,       /* a button that cannot be pressed */
+    MENU_LABEL_OFF      /* ...and its label */
 };
 
 /* Everything the painter needs to know about the framebuffer, measured by the

@@ -365,9 +365,13 @@ static void test_font(void)
      * not cells: the atlas is 8-bit (menu_font.h), so "has ink" means the coverage
      * sums to something, and the two bounds catch the two ways a bake goes wrong --
      * a glyph that rasterised to nothing, and one that rasterised to a solid block.
-     * The bounds are loose against the measured table (the thinnest glyph, 'I', has
-     * 22 cells at >50% coverage and the heaviest, 'B', averages 48% of its box), so
-     * they fail on a defect and not on a different face. */
+     * The bounds are loose against the measured table -- at the shipped 19 px,
+     * 1/6-px-thinner bake the thinnest glyph, 'I', still has 28 cells at >50%
+     * coverage and the heaviest, 'B', averages 44% of its box -- so they fail on a
+     * defect and not on a different face. They are a floor under a glyph that
+     * rasterises to nothing, NOT a weight control: a lighter bake than this one is
+     * refused by the eyes of the keyboard's punctuation (at 2/6 the '_' and '=' have
+     * no solid cell left at all), and no bound here would catch that. */
     {
         const struct menu_glyph *sp = menu_font_glyph(' ');
 
@@ -990,8 +994,13 @@ static void test_paint_covers(void)
         CHECK(unwritten32 == 0, "16 bpp was fine and 32 bpp left %d pixels unwritten",
               unwritten32);
         CHECK(outside32 == 0, "32 bpp wrote %d pixels outside the panel", outside32);
-        CHECK(menu_pixel(32, MENU_FILL) != menu_pixel(16, MENU_FILL),
+        /* The depth really is applied, checked on the BORDER and not on the fill:
+         * the bed went BLACK in the 2026-10-06 restyle and black encodes to zero at
+         * both depths, so it is the one palette entry that CANNOT tell them apart. */
+        CHECK(menu_pixel(32, MENU_BORDER) != menu_pixel(16, MENU_BORDER),
               "the two depths produce the same pixel value");
+        CHECK(menu_pixel(16, MENU_FILL) == 0 && menu_pixel(32, MENU_FILL) == 0,
+              "the bed is not black at both depths");
     }
 
     /* A letterboxed picture: the bar sits at the top of the PICTURE, not of the
@@ -1093,10 +1102,20 @@ static void test_paint_image(void)
         CHECK(label > 20, "button %d's label is only %d pixels of ink", i, label);
     }
 
-    /* The frame, the fill and the seams are all present -- a panel that drew only
-     * buttons would look like three hundred lines of nothing. */
+    /* THE RESTYLE, AS PROPERTIES RATHER THAN AS COUNTS (2026-10-06): the white is a
+     * RING around each of the seven buttons, the gap between two of them is BED, and
+     * the bar has no frame of its own any more. Counts would pin the arithmetic of
+     * two constants; these pin what the operator asked for, at the pixels where each
+     * part of it shows -- and they go through menu_class_at(), so they are about the
+     * drawing and not about a copy of the geometry.
+     *
+     * The band's own rows come from the same expression menu_band_rows() uses, which
+     * is the point: the ring's top row IS the band's top row, so a change to one
+     * that forgot the other fails here. */
     {
-        int border = 0, fill = 0, div = 0;
+        int border = 0, fill = 0, div = 0, i;
+        int by0 = v.by + (MZ_BTN_Y0 * v.dh) / MZ_LOGICAL_H;
+        int by1 = v.by + ((MZ_BTN_Y1 + 1) * v.dh) / MZ_LOGICAL_H - 1;
 
         for (fy = y0; fy <= y1; fy++)
             for (fx = x0; fx <= x1; fx++) {
@@ -1106,11 +1125,65 @@ static void test_paint_image(void)
                 else if (c == MENU_FILL) fill++;
                 else if (c == MENU_DIV) div++;
             }
-        CHECK(border > 100, "the frame is only %d pixels", border);
-        CHECK(fill > 100, "the fill is only %d pixels", fill);
-        CHECK(div == (MZ_COLS - 1) * MZ_BTN_H,
-              "the seams are %d pixels, not %d full-height columns",
-              div, MZ_COLS - 1);
+        CHECK(border > 100, "the outlines are only %d pixels", border);
+        CHECK(fill > 100, "the bed is only %d pixels", fill);
+        CHECK(div == 0, "the band still draws the old seam: %d pixels of MENU_DIV",
+              div);
+        /* The bar has no frame: its own four edges are bed, not white. */
+        CHECK(menu_class_at(&v, x0, y0, 0) == MENU_FILL &&
+              menu_class_at(&v, x1, y0, 0) == MENU_FILL &&
+              menu_class_at(&v, x0, y1, 0) == MENU_FILL &&
+              menu_class_at(&v, x1, y1, 0) == MENU_FILL,
+              "the bar still has a frame round the whole thing");
+
+        for (i = 0; i < MZ_COLS; i++) {
+            int bx0 = (menu_button_x0(i) * 1280) / MZ_LOGICAL_W;
+            int bx1 = ((menu_button_x1(i) + 1) * 1280) / MZ_LOGICAL_W - 1;
+            int cx = (bx0 + bx1) / 2;
+            int vx0 = bx0 + MENU_BTN_PAD_PX, vx1 = bx1 - MENU_BTN_PAD_PX;
+
+            /* The ring, on all four sides of this button. */
+            CHECK(menu_class_at(&v, cx, by0, 0) == MENU_BORDER &&
+                  menu_class_at(&v, cx, by1, 0) == MENU_BORDER,
+                  "button %d has no top/bottom outline", i + 1);
+            CHECK(menu_class_at(&v, vx0, (by0 + by1) / 2, 0) == MENU_BORDER &&
+                  menu_class_at(&v, vx1, (by0 + by1) / 2, 0) == MENU_BORDER,
+                  "button %d has no left/right outline", i + 1);
+            /* ...and its inside is the face, not the outline. */
+            CHECK(menu_class_at(&v, vx0 + 1, by0 + 1, 0) == MENU_BTN &&
+                  menu_class_at(&v, vx1 - 1, by1 - 1, 0) == MENU_BTN,
+                  "button %d's outline is thicker than a ring", i + 1);
+            /* The padding outside it is bed -- including the whole column edge. */
+            CHECK(menu_class_at(&v, bx0, (by0 + by1) / 2, 0) == MENU_FILL &&
+                  menu_class_at(&v, bx1, (by0 + by1) / 2, 0) == MENU_FILL,
+                  "button %d's column edge is not bed", i + 1);
+            if (i + 1 < MZ_COLS) {
+                /* The gap between two buttons, which is the "padding in between"
+                 * the operator asked for: the two columns are ADJACENT (the tiling
+                 * leaves no seam pixel -- test_geometry() pins that), so their two
+                 * paddings meet and the gap is exactly 2 * MENU_BTN_PAD_PX wide,
+                 * with no outline and no bed of a third kind in it. */
+                int nx0 = (menu_button_x0(i + 1) * 1280) / MZ_LOGICAL_W;
+                int g, gap_px = 0, gap_bed = 1;
+
+                CHECK(nx0 - bx1 - 1 == 0,
+                      "the columns %d and %d are not adjacent (%d px apart)",
+                      i + 1, i + 2, nx0 - bx1 - 1);
+                for (g = bx1 - MENU_BTN_PAD_PX + 1; g <= nx0 + MENU_BTN_PAD_PX - 1;
+                     g++) {
+                    if (g < x0 || g > x1)
+                        continue;
+                    gap_px++;
+                    if (menu_class_at(&v, g, by0 + 1, 0) != MENU_FILL)
+                        gap_bed = 0;
+                }
+                CHECK(gap_px == 2 * MENU_BTN_PAD_PX,
+                      "the gap after button %d is %d px, not %d", i + 1, gap_px,
+                      2 * MENU_BTN_PAD_PX);
+                CHECK(gap_bed, "the gap after button %d is not bed all the way",
+                      i + 1);
+            }
+        }
     }
 
     CHECK(menu_class_at(&v, 640, 400, 0) == MENU_NONE,
@@ -1207,34 +1280,97 @@ static void test_labels_fit(void)
             CHECK(seen[i] > 0, "%dx%d drew nothing for cell %d", fw, fh, i + 1);
     }
 
-    /* The panels this port is actually run on: the widest label has to fit the
-     * narrowest of these columns whole. Measured for the baked table -- at 16 px the
-     * widest is now "USB STOP" at 65 px (the six browse words are 57..59), and at
-     * 1280x800 that sits in a 182 px column with the whole of its margin spare. The
-     * tightest width above, 480, gives columns of 68 px, so this assertion is 3 px
-     * from failing -- deliberately, because it is the one place the label table and
-     * the column count are checked against each other and a silently truncated label
-     * would be far worse than a red test. If a future label needs more, the fix is a
-     * wider drawn band (menu_zone.h's MZ_COLS note), not a looser check. */
+    /* THE WIDTH FLOOR, the twin of test_panel_size_floor() below and for the same
+     * reason: a label is CLIPPED at its column bound, so a picture too narrow for its
+     * own words draws "USB STO" where "USB STOP" is meant -- a defect that looks like
+     * nothing, in the one band the operator reads most. menu_paint.c refuses such a
+     * picture outright (menu_labels_fit()), and what this pins is where the refusal
+     * starts, as a SHAPE rather than as a number: it is the ATLAS's width that moves
+     * it, so the 19 px bake costs the 480-px-wide shape its band (68 px columns
+     * against a 76 px "USB STOP") and keeps it at 640 wide and up.
+     *
+     * The old check here was a fixed list of seven widths with "widest <= column" on
+     * each. That was a canary -- at 16 px it was 3 px from failing, deliberately --
+     * and it did its job when the atlas grew: it is what said "the labels no longer
+     * fit a 480-wide picture". A canary that has fired is replaced by the rule it was
+     * standing in for, not loosened; the property is now structural, and this pins
+     * it against a sweep the way the height floor is pinned. */
     {
-        static const int widths[] = { 1280, 1024, 800, 640, 480, 1920, 1366 };
-        unsigned int i;
-        int widest = 0, j;
+        int fw, first = 0, prev_usable = 0, inverted = 0, usable_n = 0, refused_n = 0;
+        int too_narrow = 0, fits_at_floor = 1;
+        struct menu_view v;
 
-        for (i = 1; i <= MZ_COLS; i++) {
-            int w = menu_text_width(menu_label(i));
+        /* Every width: once a picture is wide enough it stays wide enough (the
+         * columns tile, so a wider picture has no narrower column -- pinned because a
+         * floor that moved up and down with the width would make the refusal depend
+         * on the panel someone happened to plug in). */
+        for (fw = 1; fw <= 1920; fw++) {
+            int ok;
 
-            if (w > widest)
-                widest = w;
+            v = mkview(fw, 800);
+            ok = menu_view_ok(&v);
+            if (ok) {
+                usable_n++;
+                if (!first)
+                    first = fw;
+            } else {
+                refused_n++;
+            }
+            if (!ok && prev_usable)
+                inverted++;
+            prev_usable = ok;
         }
-        for (j = 0; j < (int)(sizeof widths / sizeof widths[0]); j++) {
-            struct menu_view v = mkview(widths[j], 800);
-            int col = (menu_button_x1(0) + 1) * v.dw / MZ_LOGICAL_W;
+        CHECK(usable_n > 0 && refused_n > 0, "every width was %s",
+              usable_n ? "usable" : "refused");
+        CHECK(inverted == 0, "%d widths were refused above a width that was usable",
+              inverted);
+        CHECK(first > 0, "no width at all was usable");
+        v = mkview(first - 1, 800);
+        CHECK(menu_view_ok(&v) == 0, "the refusal did not stop at the floor");
 
-            CHECK(widest <= col,
-                  "the widest label (%d px) does not fit a %d px column at %d wide",
-                  widest, col, widths[j]);
+        /* WHERE THE FLOOR IS, asked as a question about the labels rather than about
+         * the width: at the floor every column holds its own word, and one pixel
+         * narrower one of them does not. That is the successor to the fixed list of
+         * seven widths this block used to carry -- that list was a canary, at 16 px
+         * 3 px from failing, and it fired when the atlas grew to 19 px, which is
+         * exactly what it was for. What replaces it is the property it stood in for,
+         * so the next font change moves a threshold a reviewer can see rather than a
+         * number nobody watches. */
+        for (fw = first - 1; fw <= first; fw++) {
+            int i, clipped = 0;
+
+            v = mkview(fw, 800);
+            for (i = 0; i < MZ_COLS; i++) {
+                /* The label's room is the button's INNER width, not the column's:
+                 * since the 2026-10-06 restyle the padding and the outline are drawn
+                 * over the ends of the column, so a word that only just fitted the
+                 * column would be painted down the white border. */
+                int inner = (menu_button_x1(i) + 1) * fw / MZ_LOGICAL_W -
+                            (menu_button_x0(i) * fw) / MZ_LOGICAL_W -
+                            2 * (MENU_BTN_PAD_PX + MENU_BTN_BORDER_PX);
+
+                if (inner < menu_text_width(menu_label(i + 1)))
+                    clipped++;
+            }
+            if (fw == first - 1)
+                too_narrow = clipped;
+            else
+                fits_at_floor = (clipped == 0);
         }
+        CHECK(too_narrow > 0, "a picture one px under the floor clipped nothing");
+        CHECK(fits_at_floor, "the floor was drawn on with a clipped label");
+
+        /* The bracket, at the widths that matter: the operator's own glass, and the
+         * narrowest shape this port can still be asked to draw the band on. 480 wide
+         * is the one the 19 px atlas spends -- 68 px columns against a 76 px "USB
+         * STOP" -- and it is pinned so that the refusal stays a decision rather than
+         * drift. */
+        v = mkview(1280, 800);
+        CHECK(menu_view_ok(&v), "1280 wide was refused");
+        v = mkview(640, 800);
+        CHECK(menu_view_ok(&v), "640 wide was refused");
+        v = mkview(480, 800);
+        CHECK(!menu_view_ok(&v), "480 wide was drawn on with a clipped label");
     }
 }
 

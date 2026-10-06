@@ -217,15 +217,20 @@ struct drm_band {
     int           pitch;        /* PIXELS per row, as struct menu_view counts it */
     int           w, h;         /* the buffer, in pixels */
     int           bpp;
-    int           master;       /* we hold DRM master */
+    int           master;       /* the SHARED device holds DRM master (drmband.c) */
     int           on;           /* the plane is currently scanning out our buffer */
     int           on_x, on_y;   /* ...at this crtc position */
 };
 
 /* Open /dev/dri/card1, find the live CRTC, take an overlay plane on it that can
- * carry `bpp`, create a w x h buffer and map it. Takes DRM master, once, here --
- * not on the first show() -- so that a machine where any of this fails says so at
+ * carry `bpp`, create a w x h buffer and map it. Takes DRM master here -- once per
+ * DEVICE, not once per band -- so that a machine where any of this fails says so at
  * start-up and the caller can fall back before a single pixel is drawn.
+ *
+ * MAY BE CALLED MORE THAN ONCE. Each call gets its own buffer, framebuffer and
+ * plane; the card, the capability and master are shared and refcounted, so a second
+ * and third band (the two edge drawers) go up alongside the first. That is the whole
+ * reason the device holder exists: a second open+SET_MASTER was refused EBUSY.
  *
  * Returns 0 when `b->pix` is a buffer the band can be drawn into, and -1
  * otherwise, having changed nothing that needs undoing beyond drm_band_teardown().
@@ -246,7 +251,11 @@ void drm_band_hide(struct drm_band *b);
 
 /* Hide, then release everything in reverse order. Safe on any state, and safe
  * twice. The kernel would do all of this itself when the fd closes at process
- * exit -- this exists so the band can also be given up while the process lives. */
+ * exit -- this exists so the band can also be given up while the process lives.
+ *
+ * Releases only THIS band: its framebuffer, its map and its dumb buffer go, and the
+ * shared device is dropped with them only when no other band still holds it. So one
+ * drawer closing leaves the other drawer's plane on the glass. */
 void drm_band_teardown(struct drm_band *b);
 
 #endif /* RBLIVE4_DRMBAND_H */

@@ -11,16 +11,41 @@
 
 #include <stddef.h>          /* size_t, for the pixel cursor */
 
-/* The frame around the bar, in fb px. Two pixels reads as a frame at any size this
- * port runs at without eating a meaningful part of a small panel. */
-#define MENU_BORDER_PX 2
+/* THE BUTTON'S OWN OUTLINE, AND IT REPLACED THE PANEL'S FRAME. The operator's ask,
+ * 2026-10-06, on the band and then on the USB STOP chooser:
+ *
+ *     "the drop down doesn't need the white border around the endire thing, it only
+ *      needs a thin white border around each button with some padding in between and
+ *      a black background. model it this way for the USB stop menu as well"
+ *
+ * So the two pixels of MENU_BORDER that used to go round the whole bar now go round
+ * each of the seven buttons instead, one pixel thick because the ask was for THIN,
+ * and the bar's background is the black bed MENU_FILL paints.
+ *
+ * BOTH CONSTANTS LIVE IN menu_paint.h, because they are the arithmetic test_menu.c
+ * pins its restyle checks against and a second copy here would be the drift the
+ * header's own comments spend so long warning about. */
 
-/* There is no padding constant any more, and its absence is deliberate: the old
- * layout picked a glyph scale by asking how much room a label needed with a margin
- * on each side, and the answer could be "too small to read". The labels are now set
- * in the device's own type at one fixed size (menu_font.h) and centred in their
- * column, and the only constraint left is the clip that keeps a label inside its own
- * button -- which menu_label_cov() enforces on panels too small to hold it. */
+/* The padding between a column's edge and its button, in fb px -- so the black gap
+ * between two neighbouring buttons is twice this less the single seam pixel the two
+ * columns share, 7 px at 1280. This is what replaced the one-pixel MENU_DIV seam:
+ * the operator asked for padding BETWEEN the buttons rather than a line drawn down
+ * between them. The padding columns stay TAPPABLE -- menu_zone.c's hit test is the
+ * full column and did not move -- which is deliberate: a 7 px gap is not a control
+ * and a finger that lands in one is aiming at a button.
+ *
+ * The vertical counterpart is the band's own 8-row margin at each end (MZ_BTN_Y0),
+ * so the buttons are 40 rows tall inside a 56-row panel and the black bed shows
+ * above and below them. That margin was the frame's padding when there was a frame
+ * and it reads as the same thing now, which is why nothing about the band moved. */
+
+/* There is no LABEL margin constant, and its absence is deliberate: the old layout
+ * picked a glyph scale by asking how much room a label needed with a margin on each
+ * side, and the answer could be "too small to read". The labels are now set in the
+ * device's own type at one fixed size (menu_font.h) and centred in their button, and
+ * the only constraint left is the clip that keeps a label inside it -- which
+ * menu_label_cov() enforces, and which menu_labels_fit() refuses a picture outright
+ * for rather than letting it draw a truncated word. */
 
 /* An 8-bit triple to this port's two framebuffer depths. The palette is written
  * in the triples rather than in magic numbers, so a colour can be read and changed
@@ -53,13 +78,31 @@
 unsigned int menu_pixel(int bpp, int cls)
 {
     switch (cls) {
-    case MENU_FILL:          return MENU_TRIP(bpp, 20, 22, 26);   /* near-black blue-grey */
-    case MENU_BORDER:        return MENU_TRIP(bpp, 200, 204, 210);
-    case MENU_DIV:           return MENU_TRIP(bpp, 70, 74, 80);
+    /* BLACK, at the operator's ask of 2026-10-06 ("a black background"). It was a
+     * near-black blue-grey, and the change reaches every surface that shares this
+     * palette -- the two drawers and the window's bed as well as this bar and the USB
+     * STOP chooser. That is the point of the palette being in one place: "a button"
+     * and "a background" cannot come to mean two different things on two panels.
+     *
+     * IT IS ALSO THE ZERO PIXEL, in both depths, which menu_pixel(MENU_NONE) already
+     * was. Nothing here reads a pixel to decide anything, so the collision costs
+     * nothing -- but the damage witness's one background point now compares against a
+     * value rbp's own UI can hold, which is why the other fourteen sample the white
+     * button outline instead (menu_witness_point() below). */
+    case MENU_FILL:          return MENU_TRIP(bpp, 0, 0, 0);      /* the black bed */
+    case MENU_BORDER:        return MENU_TRIP(bpp, 200, 204, 210);/* a button's outline */
+    case MENU_DIV:           return MENU_TRIP(bpp, 70, 74, 80);   /* not this bar's any more */
     case MENU_BTN:           return MENU_TRIP(bpp, 40, 44, 52);
     case MENU_BTN_PRESSED:   return MENU_TRIP(bpp, 0, 160, 255);  /* the accent */
     case MENU_LABEL:         return MENU_TRIP(bpp, 240, 242, 246);
     case MENU_LABEL_PRESSED: return MENU_TRIP(bpp, 0, 20, 40);    /* dark on the accent */
+    /* A button that cannot be pressed: the same two colours pulled down far enough
+     * that the ink is unmistakably present and unmistakably not a choice. The label
+     * is the one that carries it -- a dim face with bright ink would read as a
+     * rendering fault rather than as a refusal -- so BTN_OFF moves only a little off
+     * MENU_BTN and LABEL_OFF moves most of the way to it. */
+    case MENU_BTN_OFF:       return MENU_TRIP(bpp, 28, 30, 36);
+    case MENU_LABEL_OFF:     return MENU_TRIP(bpp, 118, 122, 130);
     default:                 return 0;
     }
 }
@@ -128,6 +171,43 @@ static int menu_band_h(const struct menu_view *v)
     return by1 - by0 + 1;
 }
 
+/* Does every label fit the BUTTON it is centred in, at this panel width?
+ *
+ * The painter CLIPS at the button bound -- menu_label_cov() stops at the button's
+ * inner rect -- so a button narrower than its label is not a squeeze, it is a word
+ * with its end cut off: the widest label, "USB STOP", becomes "USB STO", in the one
+ * band the operator reads most and by a defect that looks like nothing at all. A
+ * picture too narrow for its own words is a picture this feature declines to draw
+ * on, which is the same answer menu_view_ok() already gives a picture too short for
+ * its line box; the caller logs the refusal and draws nothing.
+ *
+ * The bound is the button's INNER rect and not the column's: the padding and the
+ * outline are drawn over the ends of the column (class_in_layout() below), so a
+ * label that only just fitted the column would be painted down the white border.
+ * The two are 2 * (MENU_BTN_PAD_PX + MENU_BTN_BORDER_PX) = 10 px apart at every
+ * size, which is why the restyle moved the width floor up by that much.
+ *
+ * The bounds are menu_layout_make()'s own expressions for L->bx0/L->bx1, because a
+ * second opinion about where a column is would be a check on arithmetic nobody ran.
+ * This is what moves when the ATLAS grows: "USB STOP" is 65 px at 16 px and 76 at
+ * 19, and a 480-px-wide picture gives 68-px columns, so the size-up costs that one
+ * panel shape its band -- and keeps it on 640 wide (91 px columns, 81 px inner) and
+ * up. */
+static int menu_labels_fit(const struct menu_view *v)
+{
+    int i;
+
+    for (i = 0; i < MZ_COLS; i++) {
+        int x0 = v->bx + (menu_button_x0(i) * v->dw) / MZ_LOGICAL_W;
+        int x1 = v->bx + ((menu_button_x1(i) + 1) * v->dw) / MZ_LOGICAL_W - 1;
+        int inner = (x1 - x0 + 1) - 2 * (MENU_BTN_PAD_PX + MENU_BTN_BORDER_PX);
+
+        if (inner < menu_text_width(menu_label(i + 1)))
+            return 0;
+    }
+    return 1;
+}
+
 int menu_view_ok(const struct menu_view *v)
 {
     if (!v || !v->pix)
@@ -142,10 +222,14 @@ int menu_view_ok(const struct menu_view *v)
         return 0;
     if (v->bx + v->dw > v->fb_w || v->by + v->dh > v->fb_h)
         return 0;
-    /* Room for the frame and something inside it. */
-    if (v->dw < 2 * MENU_BORDER_PX + 2)
+    /* Room for a button: its two paddings, its two outline pixels and something
+     * inside them. The panel has no frame of its own any more (MENU_BTN_BORDER_PX),
+     * so this is the narrowest a picture may be before the per-button rule is what
+     * refuses it -- and menu_labels_fit() below refuses a far wider one, so this is a
+     * floor under the arithmetic rather than the floor anyone meets. */
+    if (v->dw < 2 * (MENU_BTN_PAD_PX + MENU_BTN_BORDER_PX) + 2)
         return 0;
-    if ((MZ_PANEL_H * v->dh) / MZ_LOGICAL_H < 2 * MENU_BORDER_PX + 2)
+    if ((MZ_PANEL_H * v->dh) / MZ_LOGICAL_H < 2 * MENU_BTN_BORDER_PX + 2)
         return 0;
     /* AND ROOM FOR THE LABELS. The button band has to host the font's line box,
      * because the damage witness samples the row one inside each edge of that band
@@ -157,6 +241,12 @@ int menu_view_ok(const struct menu_view *v)
      * rbp's own render thread. So it is refused, and the caller logs what it refused
      * and draws nothing (menu_draw.c's menu_fb_open_unlocked()). */
     if (menu_band_h(v) < MENU_FONT_LINE)
+        return 0;
+    /* And room for the words themselves -- see menu_labels_fit(). This is the rule
+     * the ATLAS is measured against rather than the panel: growing the font raises
+     * the width it needs, so it is the widest label and not a constant that decides
+     * how narrow a picture may be. */
+    if (!menu_labels_fit(v))
         return 0;
     return 1;
 }
@@ -231,12 +321,15 @@ void menu_layout_make(const struct menu_view *v, struct menu_layout *L)
  * its `top`, and menu_font_cov() answers 0 outside the box, so the "outside the ink"
  * cases need no test here.
  *
- * The button's own x range is the outer bound. On a panel narrow enough that not
- * even the narrowest label fits, the centring would put the text past the column and
- * a label would spill into its neighbour's; clipping here makes that a truncated
- * word instead of two overlapping ones, and it is what makes "no label pixel is
- * outside its own button" true at every panel size rather than at the sizes anyone
- * happened to try. */
+ * The button's own INNER rect is the outer bound -- inside the padding and inside
+ * the one-pixel outline, so ink can never run down the white border. On a panel
+ * narrow enough that not even the narrowest label fits, the centring would put the
+ * text past the button and a label would spill into its neighbour's; clipping here
+ * makes that a truncated word instead of two overlapping ones, and it is what makes
+ * "no label pixel is outside its own button" true at every panel size rather than at
+ * the sizes anyone happened to try. menu_labels_fit() is the other half: a picture
+ * where this clip would have to truncate is refused outright, so the clip is the
+ * guarantee and not the everyday path. */
 static int menu_label_cov(const struct menu_layout *L, int i, int fx, int fy)
 {
     const char *s = menu_label(i + 1);
@@ -244,7 +337,8 @@ static int menu_label_cov(const struct menu_layout *L, int i, int fx, int fy)
 
     if (!s || L->ln[i] <= 0)
         return 0;
-    if (fx < L->bx0[i] || fx > L->bx1[i])
+    if (fx < L->bx0[i] + MENU_BTN_PAD_PX + MENU_BTN_BORDER_PX ||
+        fx > L->bx1[i] - MENU_BTN_PAD_PX - MENU_BTN_BORDER_PX)
         return 0;
     dx = fx - L->lx[i];
     dy = fy - L->ly;
@@ -279,9 +373,9 @@ static int class_in_layout(const struct menu_layout *L, int fx, int fy, int pres
         *cov = 0;
     if (fx < L->x0 || fx > L->x1 || fy < L->y0 || fy > L->y1)
         return MENU_NONE;
-    if (fx < L->x0 + MENU_BORDER_PX || fx > L->x1 - MENU_BORDER_PX ||
-        fy < L->y0 + MENU_BORDER_PX || fy > L->y1 - MENU_BORDER_PX)
-        return MENU_BORDER;
+    /* Above and below the buttons is the bed. There is no frame here any more: the
+     * white goes round each button instead, and the panel's own outline is nothing
+     * (MENU_BTN_BORDER_PX). */
     if (fy < L->by0 || fy > L->by1)
         return MENU_FILL;
     for (i = 0; i < MZ_COLS; i++) {
@@ -296,12 +390,20 @@ static int class_in_layout(const struct menu_layout *L, int fx, int fy, int pres
      * scaled column rects can leave a pixel of fill between two of them. */
     if (!btn)
         return MENU_FILL;
-    /* The seam belongs to the column on its right, inside that column's own hit
-     * rectangle -- the columns tile with no gap, so a divider drawn between them
-     * would have to take a pixel from one of them anyway. One pixel of a 182 px
-     * target is not a target the operator can miss. */
-    if (i > 0 && fx == L->bx0[i])
-        return MENU_DIV;
+    /* THE PADDING, which is what stands between two buttons now. It is the column's
+     * own edge pixels, so it is painted by the same column that owned the seam, and
+     * it is the bed colour -- which is what makes the gap read as a gap rather than
+     * as a line drawn down it (MENU_BTN_PAD_PX). */
+    if (fx < L->bx0[i] + MENU_BTN_PAD_PX || fx > L->bx1[i] - MENU_BTN_PAD_PX)
+        return MENU_FILL;
+    /* The button's outline, inside the padding on all four sides. It is tested
+     * BEFORE the pressed class, so a finger on a button turns its face and its label
+     * and leaves the outline white -- which is also what keeps every pixel a witness
+     * samples independent of `pressed`, and so what keeps the witness's expected
+     * value stable while a button is held. */
+    if (fx == L->bx0[i] + MENU_BTN_PAD_PX || fx == L->bx1[i] - MENU_BTN_PAD_PX ||
+        fy == L->by0 || fy == L->by1)
+        return MENU_BORDER;
     /* The label band is the only place a glyph can be, and the guard is exact --
      * menu_label_cov() rejects everything outside it itself, including a label the
      * centring pushed past its button. Without it, EVERY pixel of the band pays the
@@ -335,53 +437,68 @@ int menu_class_in(const struct menu_layout *L, int fx, int fy, int pressed)
     return class_in_layout(L, fx, fy, pressed, NULL);
 }
 
-/* The sample points the damage witness uses, as panel-relative fractions in
- * sixteenths. The mix is deliberate and menu_draw.c explains the failure each part
- * of it guards against; what matters here is that all of them are glyph-free, so
- * menu_value_at() at one of them is an exact palette value and a witness comparison
- * against menu_pixel() is valid. test_menu.c asserts that rather than trusting it.
+/* THE SAMPLE POINTS THE DAMAGE WITNESS USES, and the restyle moved every one of
+ * them. menu_draw.c explains the failure the mix guards against; what matters here
+ * is that all of them are glyph-free AND are exact palette values, so the witness's
+ * comparison against menu_pixel() is valid. test_menu.c asserts that rather than
+ * trusting it.
  *
- * The six frame points are corners and border midpoints; the nine band points are on
- * the column centres and the seams, at 5/16 and 11/16 of the panel's height -- above
- * and below the label ink, which sits where menu_layout_make() puts it. */
-static const unsigned char wpx16[] = {
-    0, 16,  0, 16,  8,  8,
-    1,  4,  7,  9, 12, 15,
-    1,  8, 15
+ * THEY USED TO BE FRACTIONS OF THE PANEL, four corners and two mid-border points of
+ * the frame plus nine spread over the button band. The frame is gone (the white goes
+ * round each button now) and so is the seam, so the six frame points would all have
+ * landed on the BLACK BED -- which is the one colour the comment in menu_draw.c
+ * warns about: a witness that sampled only the bed could be fooled for the life of
+ * the session by rbp happening to draw black there, and black is a colour rbp's own
+ * UI is full of.
+ *
+ * So fourteen of the fifteen points sample the BUTTON OUTLINES -- the top edge row
+ * of each button and the bottom edge row of each button, at that button's own centre
+ * x. White at fourteen spread-out points is a false "intact" rbp cannot produce, and
+ * the outline is one pixel inside the band and outside the ink by the same argument
+ * the old band rows used: the ink is centred in the button inside a MENU_FONT_LINE
+ * line box and menu_view_ok() refuses a band too short to host it. The fifteenth
+ * point samples the BED, in the padding between two buttons at a row one inside the
+ * band's top -- so the background and the gap are witnessed too, and a witness point
+ * there can only add a "damaged", never hide one.
+ *
+ * NONE OF THE FIFTEEN DEPENDS ON `pressed`: class_in_layout() tests the outline
+ * before it tests the pressed class, and the bed is outside the columns' buttons
+ * entirely. test_menu.c asserts both properties against this list at ten sizes. */
+enum { WY_BTN_TOP = 0, WY_BTN_BOT, WY_BED };
+/* Which button (0-based column) each point samples, and what of it. Seven top edges,
+ * seven bottom edges, then the one bed point. */
+static const unsigned char wcol[] = {
+    0, 1, 2, 3, 4, 5, 6,
+    0, 1, 2, 3, 4, 5, 6,
+    3
 };
-/* WHICH ROW, and this is not a fraction of the panel any more. It was 0/16 for the
- * frame and 5/16, 11/16 for the band, which was safe at the 112-row panel the
- * feature was built for and stopped being safe the moment the operator asked for
- * half the height: the band is a PROPORTION of the panel while the label is a fixed
- * 20-row line box, so halving the panel took the button band from 96 rows to 40 at
- * 1280x800 and to 16 rows at 480x320 -- where the ink fills the band and both band
- * fractions land on glyphs. That is a witness that reads "damaged" on every tick,
- * i.e. a repaint storm, and it would have shipped silently.
- *
- * So the band's rows are the band's own EDGES, one row inside: always inside the
- * band (so a clobbered band still reads damaged), and always outside the ink,
- * because the ink is centred in the band inside a MENU_FONT_LINE-tall line box and
- * menu_view_ok() refuses a band too short to host that box. The property is now
- * structural -- there is no panel size at which a witness point can be a blend --
- * and test_menu.c asserts it against this list at ten sizes rather than trusting
- * this paragraph. */
-enum { WY_PANEL_TOP = 0, WY_PANEL_BOT, WY_BAND_TOP, WY_BAND_BOT };
-static const unsigned char wpy[] = {
-    WY_PANEL_TOP, WY_PANEL_TOP, WY_PANEL_BOT, WY_PANEL_BOT,
-    WY_PANEL_TOP, WY_PANEL_BOT,
-    WY_BAND_TOP,  WY_BAND_TOP,  WY_BAND_TOP,  WY_BAND_TOP,  WY_BAND_TOP,
-    WY_BAND_TOP,
-    WY_BAND_BOT,  WY_BAND_BOT,  WY_BAND_BOT
+static const unsigned char wkind[] = {
+    WY_BTN_TOP, WY_BTN_TOP, WY_BTN_TOP, WY_BTN_TOP,
+    WY_BTN_TOP, WY_BTN_TOP, WY_BTN_TOP,
+    WY_BTN_BOT, WY_BTN_BOT, WY_BTN_BOT, WY_BTN_BOT,
+    WY_BTN_BOT, WY_BTN_BOT, WY_BTN_BOT,
+    WY_BED
 };
 
 int menu_witness_count(void)
 {
-    return (int)(sizeof wpx16 / sizeof wpx16[0]);
+    return (int)(sizeof wcol / sizeof wcol[0]);
+}
+
+/* A column's centre x in framebuffer pixels, in the same expression
+ * menu_layout_make() uses for the column's own bounds -- the centre of a rect is not
+ * an edge, so scaling the logical centre instead of the two edges cannot disagree
+ * with the layout by more than the rounding, and a button is 175 px wide at 1280. */
+static int menu_col_centre(const struct menu_view *v, int i)
+{
+    int cxl = (menu_button_x0(i) + menu_button_x1(i) + 1) / 2;
+
+    return v->bx + (cxl * v->dw) / MZ_LOGICAL_W;
 }
 
 void menu_witness_point(const struct menu_view *v, int i, int *fx, int *fy)
 {
-    int x0, y0, x1, y1, by0, by1, y;
+    int x0, y0, x1, y1, by0, by1, y, col;
 
     menu_panel_rect(v, &x0, &y0, &x1, &y1);
     menu_band_rows(v, &by0, &by1);
@@ -390,19 +507,34 @@ void menu_witness_point(const struct menu_view *v, int i, int *fx, int *fy)
         if (fy) *fy = y0;
         return;
     }
-    switch (wpy[i]) {
-    case WY_PANEL_BOT:  y = y1;      break;
-    case WY_BAND_TOP:   y = by0 + 1; break;
-    case WY_BAND_BOT:   y = by1 - 1; break;
-    case WY_PANEL_TOP:
-    default:            y = y0;      break;
+    col = wcol[i];
+    switch (wkind[i]) {
+    case WY_BTN_BOT: y = by1;      break;
+    case WY_BED:     y = by0 + 1;  break;
+    case WY_BTN_TOP:
+    default:         y = by0;      break;
     }
-    /* A band of one row has by0 + 1 == by1 - 1 == by1; the clamps keep every point
-     * inside the panel even for a view the caller should have refused. */
+    /* The clamps keep every point inside the panel even for a view the caller should
+     * have refused -- and inside the band's own rows for the two that name them. */
+    if (y < by0) y = by0;
+    if (y > by1) y = by1;
     if (y < y0) y = y0;
     if (y > y1) y = y1;
-    if (fx) *fx = x0 + (x1 - x0) * wpx16[i] / 16;
+    /* The bed point is the SEAM between columns 2 and 3 -- the first pixel of the
+     * fourth column, by the same expression menu_layout_make() gives L->bx0[3], which
+     * that column's own padding rule has already turned to bed (class_in_layout()).
+     * The other fourteen are their column's centre, which is inside that column's
+     * button at every size: the button is the column less MENU_BTN_PAD_PX at each end
+     * and the padding is under half a column. */
+    if (fx) *fx = (wkind[i] == WY_BED)
+                   ? v->bx + (menu_button_x0(col) * v->dw) / MZ_LOGICAL_W
+                   : menu_col_centre(v, col);
     if (fy) *fy = y;
+    /* ...and keep x inside the panel too, for the same reason the rows are clamped. */
+    if (fx) {
+        if (*fx < x0) *fx = x0;
+        if (*fx > x1) *fx = x1;
+    }
 }
 
 /* The value one pixel gets. Split out of menu_paint() so that the loop and

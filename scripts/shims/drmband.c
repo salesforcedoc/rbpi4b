@@ -14,10 +14,16 @@
  * the panel appears; the only difference is whether it is erased 57 times a
  * second.
  *
- * SAFETY. Master is taken once, in setup, so a machine where it cannot be taken
- * says so before a pixel is drawn rather than on the first swipe. Nothing here is
- * irreversible: the kernel tears all of it down when the fd closes, so process
- * exit -- clean or not -- always clears the plane, and there is no state on disk.
+ * SAFETY. Master is taken once per DEVICE, on the first setup, so a machine where it
+ * cannot be taken says so before a pixel is drawn rather than on the first swipe.
+ * Nothing here is irreversible: the kernel tears all of it down when the fd closes,
+ * so process exit -- clean or not -- always clears the plane, and there is no state
+ * on disk.
+ *
+ * SEVERAL BANDS AT ONCE, which is what the drawer work needed and what the holder
+ * below provides: the fd, the capability and master are refcounted, each band owns
+ * its own buffer/framebuffer/plane, and a second setup is a buffer and a plane rather
+ * than a second open. See the device block for why that was impossible before.
  */
 #define _GNU_SOURCE
 #include "drmband.h"
@@ -45,6 +51,100 @@
  * error turned it into a short plane list AND an empty format list, which reads
  * exactly like "this hardware has no RGB565 overlay". */
 #define DRM_BAND_MAXFORMATS 64
+
+/* ------------------------------------------------------------- the device
+ *
+ * ONE DEVICE, ONE MASTER, MANY PLANES -- and this holder is the whole of it.
+ *
+ * DRM master is per OPEN FILE, not per process, so the second drm_band_setup() in
+ * a process used to be refused EBUSY: it opened the card again, got a second
+ * file description, and could not take master from the first. That is why the
+ * band, the browser window and the drawer were written as MUTUALLY EXCLUSIVE
+ * HOLDERS OF ONE PLANE, handing a single slot back and forth (menu_draw.c).
+ *
+ * The operator then asked for both edge drawers at once -- "allow for both side
+ * panels to be visable at the same time and to accept input" -- and one plane
+ * cannot do it: an RGB565 plane is OPAQUE (drmband.h), so two drawers composited
+ * into a single full-width buffer would each carry the other's black everywhere
+ * it is not drawn, over rbp's whole picture. Two planes is the honest answer.
+ *
+ * So the device is held once and shared. The FIRST setup opens the card, sets
+ * UNIVERSAL_PLANES and takes master; every later setup reuses that fd and is
+ * granted master with it. The card is closed and master dropped only when the
+ * LAST band goes, which is what keeps the "a machine that cannot have a plane
+ * always has the /dev/fb0 route" promise intact at both the first and the last.
+ *
+ * `refs` counts BANDS, not callers: dev_acquire() bumps it and dev_release()
+ * drops it, so a teardown of one band cannot close the fd another is drawing
+ * through. Nothing here is irreversible -- the kernel tears the planes down when
+ * the fd finally closes, clean exit or not.
+ */
+static struct {
+    int fd;
+    int refs;
+} g_dev = { -1, 0 };
+
+static int dev_acquire(void)
+{
+    struct drm_set_client_cap cap;
+
+    if (g_dev.refs > 0) {           /* the card is already ours: master included */
+        g_dev.refs++;
+        return g_dev.fd;
+    }
+
+    g_dev.fd = real_open(DRM_BAND_CARD, O_RDWR | O_CLOEXEC, 0);
+    if (g_dev.fd < 0) {
+        pointsrc_log("menu plane: open %s: %s -- the band stays on /dev/fb0",
+                     DRM_BAND_CARD, strerror(errno));
+        return -1;
+    }
+
+    /* Without this a client is shown only the OVERLAY planes: this kernel
+     * returned 48 of card1's 60 objects, with every primary and every cursor
+     * simply absent from the list. It is what makes the plane the primary is on
+     * invisible to the search below -- and it is a capability of the FILE, so it
+     * is set here, once, rather than per band. */
+    memset(&cap, 0, sizeof cap);
+    cap.capability = DRM_CLIENT_CAP_UNIVERSAL_PLANES;
+    cap.value      = 1;
+    if (real_ioctl(g_dev.fd, DRM_IOCTL_SET_CLIENT_CAP, &cap) < 0) {
+        pointsrc_log("menu plane: SET_CLIENT_CAP UNIVERSAL_PLANES: %s -- the band"
+                     " stays on /dev/fb0", strerror(errno));
+        real_close(g_dev.fd);
+        g_dev.fd = -1;
+        return -1;
+    }
+
+    /* Master, ONCE for the device. Nothing is composited until drm_band_show(),
+     * so a failure here costs nothing but this line.
+     *
+     * Measured before the band was wired in: taking master did NOT disturb the mode
+     * DirectFB set up -- work/drmplane held it for minutes with rbp redrawing
+     * underneath and the primary stayed at fb 722 throughout. */
+    if (real_ioctl(g_dev.fd, DRM_IOCTL_SET_MASTER, NULL) < 0) {
+        pointsrc_log("menu plane: SET_MASTER on %s: %s -- something else holds"
+                     " the display; the band stays on /dev/fb0",
+                     DRM_BAND_CARD, strerror(errno));
+        real_close(g_dev.fd);
+        g_dev.fd = -1;
+        return -1;
+    }
+
+    g_dev.refs = 1;
+    return g_dev.fd;
+}
+
+static void dev_release(void)
+{
+    if (g_dev.refs <= 0)
+        return;
+    if (--g_dev.refs > 0)
+        return;                     /* another band is still drawing through it */
+    real_ioctl(g_dev.fd, DRM_IOCTL_DROP_MASTER, NULL);
+    real_close(g_dev.fd);
+    g_dev.fd = -1;
+}
 
 /* --------------------------------------------------------------- helpers */
 
@@ -209,7 +309,6 @@ static int pick_plane(int fd, unsigned int index, unsigned int fourcc,
 
 int drm_band_setup(struct drm_band *b, int w, int h, int bpp)
 {
-    struct drm_set_client_cap cap;
     struct drm_mode_create_dumb cd;
     struct drm_mode_map_dumb md;
     struct drm_mode_fb_cmd fc;
@@ -232,27 +331,17 @@ int drm_band_setup(struct drm_band *b, int w, int h, int bpp)
     if (w < 1 || h < 1)
         return -1;
 
-    fd = real_open(DRM_BAND_CARD, O_RDWR | O_CLOEXEC, 0);
+    /* The device, its master and its UNIVERSAL_PLANES capability, SHARED with any
+     * other band this process already has up -- see the holder above. The first
+     * setup pays for all three; a second drawer's setup pays only for its own
+     * buffer and plane, which is what the operator's "both side panels at the same
+     * time" needs and what a second open+SET_MASTER refused. */
+    fd = dev_acquire();
     if (fd < 0) {
-        pointsrc_log("menu plane: open %s: %s -- the band stays on /dev/fb0",
-                     DRM_BAND_CARD, strerror(errno));
+        drm_band_teardown(b);       /* all-zero and safe: b->fd is -1, refs untouched */
         return -1;
     }
     b->fd = fd;
-
-    /* Without this a client is shown only the OVERLAY planes: this kernel
-     * returned 48 of card1's 60 objects, with every primary and every cursor
-     * simply absent from the list. It is what makes the plane the primary is on
-     * invisible to the search below. */
-    memset(&cap, 0, sizeof cap);
-    cap.capability = DRM_CLIENT_CAP_UNIVERSAL_PLANES;
-    cap.value      = 1;
-    if (real_ioctl(fd, DRM_IOCTL_SET_CLIENT_CAP, &cap) < 0) {
-        pointsrc_log("menu plane: SET_CLIENT_CAP(UNIVERSAL_PLANES): %s",
-                     strerror(errno));
-        drm_band_teardown(b);
-        return -1;
-    }
 
     if (live_crtc(fd, &crtc_id, &crtc_index) != 0) {
         pointsrc_log("menu plane: no CRTC on %s is scanning anything out",
@@ -323,22 +412,21 @@ int drm_band_setup(struct drm_band *b, int w, int h, int bpp)
     b->h     = h;
     b->bpp   = bpp;
 
-    /* Master last, so that everything above is a read-only inspection of a
-     * device this process is not yet in charge of. Nothing is composited until
-     * drm_band_show(), so a failure here costs nothing but a log line.
-
-     * Measured before this was wired in: taking master did NOT disturb the mode
-     * DirectFB set up -- work/drmplane held it for minutes with rbp redrawing
+    /* Master is NOT taken here any more -- the shared device took it when the first
+     * band went up and this band draws through that same file description.
+     * `b->master` now means "the device holds master", which is true of every band
+     * that got this far, and it is what makes dev_release()'s refcount the only
+     * thing that decides when master is given back.
+     *
+     * Measured before the band was first wired in: taking master did NOT disturb the
+     * mode DirectFB set up -- work/drmplane held it for minutes with rbp redrawing
      * underneath and the primary stayed at fb 722 throughout. */
-    if (real_ioctl(fd, DRM_IOCTL_SET_MASTER, NULL) < 0) {
-        pointsrc_log("menu plane: SET_MASTER on %s: %s -- something else holds"
-                     " the display; the band stays on /dev/fb0",
-                     DRM_BAND_CARD, strerror(errno));
-        drm_band_teardown(b);
-        return -1;
-    }
     b->master = 1;
 
+    /* The plane was chosen while every OTHER band's plane was already BOUND to the
+     * CRTC -- pick_plane skips any plane whose crtc_id is not 0 -- which is the whole
+     * of how two drawers get two planes instead of fighting over one. The id is in
+     * the line below so the drill can see that the two are distinct. */
     pointsrc_log("menu plane: crtc %u plane %u fb %u %dx%d %d bpp pitch %d px"
                  " (%zu bytes) at %p",
                  b->crtc, b->plane, b->fb, w, h, bpp, b->pitch, b->map_len, b->pix);
@@ -426,9 +514,12 @@ void drm_band_teardown(struct drm_band *b)
                          strerror(errno));
         b->handle = 0;
     }
-    if (b->master)
-        real_ioctl(b->fd, DRM_IOCTL_DROP_MASTER, NULL);
-    real_close(b->fd);
+    /* Everything above is PER BAND -- its framebuffer, its map, its dumb buffer --
+     * and had to happen while the fd was still open. The device itself is shared, so
+     * master is dropped and the card closed by dev_release() and only when the last
+     * band lets go: a drawer closing must not pull the plane out from under the
+     * drawer on the other edge, which is exactly what the operator asked for. */
+    dev_release();
 
     memset(b, 0, sizeof *b);
     b->fd = -1;

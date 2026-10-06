@@ -8,6 +8,9 @@
  * has two halves.
  */
 #include "menu_zone.h"
+#include "side_zone.h"    /* side_any_open(): the band must not arm while a drawer
+                           * owns the overlay plane -- see the closed-entry arm in
+                           * menu_feed() below, and side_zone.h's ONE SURFACE note */
 
 /* In column order, one per menu_key[] slot in pointsrc.c -- the two tables are read
  * together and are the same length by construction. "USB STOP" is the seventh and
@@ -225,13 +228,23 @@ int menu_feed(int down, int x, int y, int *button)
             armed = 0;
             press_btn = menu_button_at(x, y);
             cur_btn = press_btn;
-        } else if (y <= MZ_STRIP_Y1 && MZ_ENTRY_IN(x)) {
+        } else if (y <= MZ_STRIP_Y1 && MZ_ENTRY_IN(x) && !side_any_open()) {
             /* The entry zone, and it is the ONLY arm the x bounds apply to.
              * Everything below (a press that started outside) and everything above
              * (a press that started with the panel open) is decided by y alone.
              * The open arm must stay full width: the panel's own leftmost and
              * rightmost columns are SOURCE and MENU, and a press on either of them
-             * that fell through to rbp instead would be a dead button. */
+             * that fell through to rbp instead would be a dead button.
+             *
+             * `!side_any_open()` is the one gate, and it is not tidiness: the band
+             * and a drawer cannot both hold the single overlay plane, so while a
+             * drawer is out the band is not on the glass and arming a swipe here
+             * would be arming a gesture at an invisible panel -- and it would take
+             * the press the drawer needs to dismiss itself. The mirror of this gate
+             * is in side_zone.c's own closed-entry arm (which refuses while the band
+             * is open) and in pointsrc.c's funnel (which refuses while the window
+             * is open). One surface at a time, enforced in all three places the
+             * question can be asked. */
             swallow = 1;
             armed = 1;
             press_btn = 0;

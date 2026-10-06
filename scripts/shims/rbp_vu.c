@@ -53,11 +53,11 @@
 #include "rbp_vu.h"
 #include "ctrl_map.h"    /* the surface's meter row -- see the header */
 
-/* Last channel-fader position (10-bit, index 1/2 = deck 1/2).  rbp's channel
- * meter is PRE-fader, so the VU bridge scales it by this to behave like the
- * SC Live 4 (Engine OS meters are post-fader). */
-int g_fader[3] = { 1023, 1023, 1023 };
-int g_fader_seen[3];      /* set once the panel has reported a fader */
+/* `g_fader` / `g_fader_seen` ARE NOT DEFINED HERE ANY MORE. They live in
+ * fader_state.c with default visibility and are linked into fbshim.so, because the
+ * touch drawers write them and knobshim must see those writes -- fader_state.c's
+ * header comment is the whole story. These were the definitions until 2026-10-05;
+ * rbp_vu.h still declares them, so everything in this file reads them unchanged. */
 
 /* rbp's own meter's segment count, as the rescale below assumes it. 11 is what
  * this rbp build lights (LED_TABLE = (1<<n)-1 for n = 0..11) and what
