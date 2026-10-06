@@ -1123,6 +1123,46 @@ not a caveat about the implementation, it is the feature — it exists so the op
 never has to pull live media — but it is worth saying plainly in the docs because
 every other column of that panel is safe to press.
 
+## The edge drawers' transports, sync, nudge and fader — keycodes rbp already has
+
+The side drawers (`07-touch.md`) send five keycodes, and none of them needs a map, a
+controller or a byte of MIDI:
+
+| Drawer control | Sends | Notes |
+|---|---|---|
+| **SYNC** | `K_SYNC 0x4112`, press + release | on the side's channel: 1 = left/deck 1, 2 = right/deck 2 |
+| **−/+ nudge** | `K_JOG_ROT 0x4305` with **`OP_ROTATE`** and a signed rev/s | see below — the *only* bend mechanism rbp has |
+| **CUE** | `K_CUE 0x4102`, press + release | same channel argument |
+| **PLAY** | `K_PLAY 0x4101`, press + release | same channel argument |
+| **fader** | `K_FADER 0x501e` via `send_rx_key_f(..., OP_VALUE, ch, v, v/1023.0f)` | **absolute**, `v` 0..1023, top = full |
+
+SYNC, CUE and PLAY are plain press/release with **no `usleep`** — unlike the band's own
+buttons, they never enter the synthesized-hold path, because rbp wants an edge and not
+a dwell.
+
+**The nudge is not a keycode and there is no macro that would make it one.** `0x4305` is
+the jog's rotation, reached through `send_rx_key_fl(K_JOG_ROT, OP_ROTATE, ch, 0,
+speed /*rev/s, clamped to ±8*/, (long)vpos)`, and it is the same call the FLX4's own jog
+makes (CC `0x11`/`0x31`, above). Two properties decide the whole design:
+
+* **rbp keeps bending at the last speed until it is told zero.** So the drawer sends the
+  speed once on the down edge — the hold time *is* the bend — and a **stop** (speed
+  `0.00`) on every path where the finger leaves, including the two where no release
+  report arrives at all: the device going away, and `POINT_MENU=0` at startup. A missing
+  stop is a track that runs away, which is why `side_nudging()` derives the truth from
+  the press state rather than trusting an edge to arrive.
+* **The speed is a rate, not a step**, so a tap nudges by however long it was held.
+  Default `0.35` rev/s, exposed as `SIDE_NUDGE_SPEED` for calibration on the glass.
+
+The fader is the same call the FLX4's own fader makes, so a two-deck machine with no
+controller attached has a working channel fader again — and, since rbp builds its
+channel faders at **zero**, a way to open a channel at all. It is ten bits rather than
+the FLX4's 128 steps.
+
+`g_fader[ch]` / `g_fader_seen[ch]` (defined once in `fader_state.c`, shared by both
+shims — see `07-touch.md` for why that matters) are written on every send, so the
+absolute-control query below stops seeding a channel the moment a drawer touches it.
+
 ## Keycode → rbp, and the absolute-control query
 
 At startup `vu_thread` calls `led_query_absolute()` to ask the surface to report

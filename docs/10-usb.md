@@ -114,3 +114,17 @@ root.
 * A stick with no rekordbox export (no `PIONEER/rekordbox/export.pdb`) still
   mounts and still shows as a drive, but with no tracks — folder browsing needs
   the native DB import, which only runs on an export database.
+* **There is only ever one device, and rbp is built for two.** rbp holds a
+  separate `ui::UsbStorageManager` **per channel** and answers for each one
+  independently, so its own USB STOP screen has a USB 1 and a USB 2. On this rig
+  `usb-watch.sh` feeds exactly one path (`/media/usb1/sda1`), so USB 2 is
+  permanently empty and rbp reports it absent every time — measured as
+  `pointsrc: menu 'USB STOP' -> the USB STOP chooser (usb 1 ready, usb 2 absent)`
+  on 2026-10-05. The shim's USB STOP chooser
+  ([07](07-touch.md#the-seventh-column-raises-a-chooser-prompt_zonec-prompt_paintc))
+  draws that row dimmed and makes it answer nothing, rather than hiding it: the
+  operator's own hardware has the second slot, and a row that is *visibly* dead
+  says more than a row that is absent. Note that the *channel* is what a stop is
+  addressed on — the old `CH_GLOBAL` spelling is USB 1's number (1) by
+  coincidence, not by design, which is why it could never have reached a second
+  device even if one were plugged in.

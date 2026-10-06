@@ -24,6 +24,7 @@ unit up; it is the target document and links out to the rest.
 | 13 | [raspberrypi4](13-raspberrypi4.md) | **the target**: image, `cmdline.txt`, present modes, pointing, audio, controls, USB, launcher, boot time, bring-up order |
 | 15 | [flx4-midi](15-flx4-midi.md) | the DDJ-FLX4 map: the tables, their source, the dump procedure, and what is still unverified |
 | 16 | [input-and-hotplug](16-input-and-hotplug.md) | the keyboard map's open defects: the lost key release, the arrow sign, Enter, hot-swap, the FLX4 startup thump |
+| 17 | [rx3-flx4-comparison](17-rx3-flx4-comparison.md) | the sibling port read against this one: `doctor`, the run-time object scan, the firmware's own LED period — and where the sibling is behind. Their read-only USB overlay was read and **discarded**, not a candidate here |
 
 There is no document 14: the port plan numbers the FLX4 runbook 15 and defines
 nothing at 14, so the gap is left rather than renumbered.

@@ -469,6 +469,125 @@ needs **press *and* repeat** (the press mutes and notifies, the repeat is what a
 db to stop the device), and **a tap really does unmount the stick** — it is not a
 rehearsal.
 
+### The seventh column raises a chooser (`prompt_zone.c`, `prompt_paint.c`)
+
+**The ask:** *"when you have USB stop, put up a prompt for USB1, USB2 or Cancel"*
+(2026-10-05). One tap on the far right of the band used to unmount the operator's stick
+outright, and the stick is production media whose FAT already carries pre-existing damage
+([10](10-usb.md)). The fix is not to make the button safer — it is to make it ask first.
+The seventh column now raises a **box**: title `USB STOP`, then a 2×2 grid —
+`USB 1 | USB 2` on the top line, `OK | CANCEL` on the bottom — and the eject is a
+second, aimed tap: a tap on a device **arms** it, then a tap on `OK` sends the eject
+for the armed device. The second layout is the operator's, verbatim: *"usb stop should
+be have usb 1 button next to usb 2 button on one line with ok cancel at the bottom"*
+(2026-10-06).
+
+**The rows are rbp's own two devices, not a list the shim made up.** rbp holds
+`ui::UsbStorageManager` — **one instance per channel** — and its `onKey` @`0x3259f4`
+drops any key whose channel byte is not its own (`[key+0xa] == [this+0x84]`). So a
+chooser that names a device is a chooser that can *stop* one device, which is what makes
+USB 1 and USB 2 real rows rather than two spellings of the same action: choosing USB 2
+sends `K_USBSTOP` on **channel 2**, where the old binding could only ever have sent
+`CH_GLOBAL` — which *is* USB 1's number. `pointsrc_usb_state()` in `pointsrc.h` is the
+walk: it reads `[mgr+0x84]` for the channel and `[mgr+0x88] == 2` for "media present and
+ready", and it returns both devices **absent** when rbp cannot be read at all — a
+refusal, not an assumption of absence.
+
+**A dead row is drawn dead, and says nothing.** On this port `usb-watch.sh` feeds only
+`/media/usb1/sda1`, so USB 2 never has media and rbp always answers
+`usb 2 absent` (measured: `pointsrc: menu 'USB STOP' -> the USB STOP chooser
+(usb 1 ready, usb 2 absent)`). That row is painted in `MENU_BTN_OFF`/`MENU_LABEL_OFF` and
+answers `PR_ACT_NONE`: the tap **closes the box and sends nothing**. That is deliberate —
+a refusal the operator can see, rather than a button that silently does nothing. The
+liveness is re-read on **every report**, not cached when the box opened, because a stop
+the operator starts somewhere else is exactly the change the box should show. Host
+coverage for that is `test_menu_dev.c`'s liveness leg: it flips the fake state, proves
+with a `memcmp` that the rebuilt picture actually differs, and flips it back.
+
+**THE GESTURE IS TWO TAPS, AND THE FIRST ONE ARMS RATHER THAN EJECTS.** A tap on a
+live device cell sets the arming and the box **stays up**; `OK` then sends the eject for
+that device and closes. `CANCEL` closes and sends nothing, and it is live from the
+moment the box opens — which is the whole reason for the second line: the answer is a
+separate, deliberate act from the choice, so a mis-tap on the band's far right can no
+longer reach an eject in one more tap. **Nothing is armed when the box opens**, and `OK`
+is drawn dead until a live device has been armed (`PR_CELL_OK`'s liveness is
+`armed && prompt_cell_live(armed)`), so `OK` tapped under a fresh box is the same
+refusal a dead device is: the box closes and sends nothing. Re-arming replaces the
+first choice, and the arming is cleared with the box — by `CANCEL`, by a timeout, by
+any close — so no arming survives into a box the operator did not make. The armed cell
+wears the pressed pair (`MENU_BTN_PRESSED`/`MENU_LABEL_PRESSED`) while the finger is
+**gone**, which is the one place this shim uses that ink for a state rather than an
+edge; the operator's eye on it is what says whether the arming reads as "selected".
+Measured: `pointsrc: usb stop chooser -> usb 1 armed (ok stops it)`.
+
+**The rest is rbp's rule, not a new one.** While the box is up it owns every report
+unconditionally — it is asked **first** in `pointsrc.c`'s ladder, before the waveform
+swipe and before the menu — so a finger that dismisses the box cannot also press whatever
+the performance screen has underneath it. A tap on a cell takes it; a tap anywhere else is
+swallowed and closes it; a stray release with no press behind it is taken but does not
+close. It **times out on its own after `PR_TIMEOUT_MS` (10 s)**, and refuses to expire
+while a finger is still down, so it can never hand rbp a release with no press behind it.
+Measured: `pointsrc: usb stop chooser timed out after 10000 ms`.
+
+**Where it is drawn.** The box is 560×199 logical px, centred, on its **own DRM overlay
+plane** — the fourth `drm_band_setup()` on this rig, which is legal because `drmband.c`
+holds the fd and DRM master once and refcounts them. It is built off-lock into a scratch
+image and published by swapping two pointers, the same publish-a-finished-image rule the
+band and the drawers follow; a fresh dumb buffer is uninitialised, so `drm_band_show()`
+waits until a real image exists. A machine that refuses a box-sized plane falls back to
+painting straight onto rbp's page (`prompt: no plane for the box -- it goes on the page`)
+and keeps working.
+
+**The box was restyled to match the bar the same day the bar was (2026-10-06)** — *"model
+it this way for the USB stop menu as well"*. Its outer `PR_BORDER`-thick frame is gone,
+so the box is the black `MENU_FILL` bed with a title, a rule and its cells; each cell
+already wore its own one-pixel outline in its own ink colour (`pp_cell()`), which is what
+remains. `PR_BORDER` itself did not move: it was always doing two jobs, and the one that
+stays is the margin that keeps the title and the cells off the box's edge.
+
+**The grid moved every number in this section, and the derivation is what survived.**
+The three full-width rows became two rows of two, so `PR_H` went 271 → **199**
+(`2*PR_BORDER + PR_TITLE_H + 1 + 2*PR_PAD + 2*PR_ROW_H + PR_ROW_GAP`, exactly),
+`PR_RULE_Y` 307 → 343, and a cell is **265 px** wide — `PR_COL_GAP` (8) comes out of the
+inner span, so the two columns are `PR_CELL_X0(1)..PR_CELL_X1(1)` = logical 371..635 and
+644..908, and the gap between them is a **hit test miss** like the gaps between the two
+rows. The cell's own geometry is derived in `prompt_zone.h` — `PR_CELL_ROW`/`PR_CELL_COL`
+out of the row-major cell number — so the four cells (1 `USB 1`, 2 `USB 2`, 3 `OK`,
+4 `CANCEL`) tile the same two rows rather than each carrying its own rectangle.
+`work/poke.py` re-derives all of it and is the check that the drill is aiming at the same
+pixels the module draws: box logical x 360..919 / y 300..498, rule 343, cell width 265,
+rows at 352 and 424 — which is what a row census of the rendered picture reads back.
+
+**One width refusal came with it.** The cells are half as wide as the rows were
+(265 px against 538), so a page scaled far enough down could clip a label inside its own
+frame. `prompt_paint_ok()` now refuses a view whose narrowest cell cannot hold its own
+label whole (`pp_labels_fit()`, alongside the existing line-height refusal), and
+`test_prompt.c` pins both refusals independently — a view at 560×81 is accepted and the
+same view at 40 px wide is refused, which is what proves the two are separate gates and
+not one.
+
+**The picture, captured from the publisher's own plane buffer.** `work/boxshot2.py` reads
+the plane by framebuffer id from **outside** rbp — the obvious route, `/proc/pid/mem` at
+the address the shim logs, does **not** work and the failure is worth knowing: vc4's dumb
+buffers are `PFNMAP`-style mappings and `get_user_pages()` refuses them, so the read gives
+`EIO` at a perfectly live address, for the band's plane as much as the box's. The capture
+is 560×199 of RGB565 and shows the title, `USB 1` bright, `USB 2` visibly dimmed and
+`CANCEL` bright — which is the one thing the host tests cannot say, because they compare
+against a reference they draw themselves. The **arming** is the second picture and the
+more interesting one: `work/poke.py <dev> usbstop chooser:usb1` arms and leaves the box
+up, and the capture then reads `USB 1` in the pressed pair with `OK` now **bright** —
+which is the visible form of the rule that `OK` is dead until a device is armed. Both
+states are also rendered off the production painters by the scratch `render.c` and read
+back by row census, because the latch lives in `prompt_zone.c` and the armed picture
+therefore has to be reached *through the gesture*; passing an arming in as an argument
+draws a box whose `OK` is still dead, which is exactly the bug the census would hide.
+
+**`POINT_USBSTOP_PROMPT=0` puts the immediate eject back** for bench work, and it is a
+keycode test rather than a column test (mirroring `menu_key_needs_repeat()`): whatever
+column carries `K_USBSTOP` is the one that raises the box, and a column that no longer
+carries it is unaffected. Both the tap and the hold are caught before either is sent, so
+the eject is reachable **only** from the box.
+
 It is the second thing the shim puts on the glass (the arrow is the first) and the
 second place it supplies a binding rbp does not have for itself (the deck QUANTIZE
 boxes above are the first), so it reuses both precedents rather than inventing a
@@ -631,12 +750,35 @@ and is why the buttons tile x 0..1279 with no gap: seven columns of
 `(i*1280)/7 .. ((i+1)*1280)/7 - 1`, y 8..47 — 182×40 logical px each (they were
 213×40 while there were six, and 213×96 while the panel was 112 rows; see the note
 under *What is measured on the unit* for why, and for the measurements that are the
-record of the taller bar). Measured off the glass with the panel open (2026-10-01):
-the six dividers between them are the only `MENU_DIV` pixels in the band — 6 runs of
-39 rows = 234 px, which is the column count read straight off the framebuffer — each
-label's ink is 11 rows at rows 23..33, and the widths are `SOURCE` 58, `BROWSE` 57,
-`TAG LIST` 59, `PLAYLIST` 57, `SEARCH` 56, `MENU` 40, **`USB STOP` 65**. The widest
-label therefore sits in a 182 px column with 117 px of margin, and the seventh costs
+record of the taller bar).
+
+**Since 2026-10-06 the drawn button is not the whole column.** Each column is inset
+`MENU_BTN_PAD_PX` (4 fb px) at both ends and wears a `MENU_BTN_BORDER_PX` (1 fb px)
+ring of `MENU_BORDER`, and everything outside it is the `MENU_FILL` bed — which is
+now **black**. The operator, having seen the bar with a frame round the whole of it:
+
+> the drop down doesn't need the white border around the endire thing, it only needs
+> a thin white border around each button with some padding in between and a black
+> background. model it this way for the USB stop menu as well
+
+So the bar's two-pixel frame and its one-pixel `MENU_DIV` seam are both gone. The six
+dividers that were the only `MENU_DIV` pixels in the band — measured off the glass
+with the panel open on 2026-10-01 as 6 runs of 39 rows = 234 px, which was the column
+count read straight off the framebuffer — are now **8 px of black bed** between each
+pair of buttons (two 4 px paddings meeting, since the columns are adjacent). The
+COLUMN is still the hit target: `menu_zone.c` did not move, deliberately, because an
+8 px gap is not a control and a finger that lands in one is aiming at a button. The
+damage witness moved with the restyle — it sampled the frame's corners and the seams,
+which are now bed, and the bed is a colour rbp's own UI is full of; fourteen of its
+fifteen points are now the button outlines instead (`menu_paint.c`).
+
+The ink and the widths below are the ATLAS's and move whenever it does: at the shipped
+19 px (2026-10-06) each label's ink is 14 rows at rows 21..34, and the widths are
+`SOURCE` 69, `BROWSE` 70, `TAG LIST` 66, `PLAYLIST` 66, `SEARCH` 66, `MENU` 49,
+**`USB STOP` 76** — they were 11 rows at rows 23..33 and 56..65 px at the 16 px atlas
+that 2026-10-01 dump caught. The widest label therefore sits in a 182 px column whose
+button gives it a **172 px** inner width — 96 px of margin, against 106 px before the
+restyle spent 10 of them on padding and outline — and the seventh costs
 the other six 31 px each — the reason the drawn band was never narrowed to the entry
 zone's third of the screen, which would have cut a column to 61 px and truncated
 words ([menu_zone.h]'s `MZ_COLS` note).
@@ -673,6 +815,14 @@ and the exact reason it is not tapped to prove it. What pins those pixels is the
 assertion in `test_menu.c` (every column, x 0..1279 with no gap), which the same run's
 two points agree with. Host suite green at the same binary: `test_menu` 6,572 checks,
 `test_menu_dev` 79 on both strides, `test_window` 258, `test_keyboard` 1,044.
+
+**That run's warning is historical, and it is kept because it is why the chooser exists.**
+The build it was taken on (`78c2d742…`) ejected the operator's stick on one tap, so a drill
+had to stay 100 px clear of its own column. On the live build the same press **raises the
+USB STOP chooser** and ejects nothing — the eject is a second, aimed tap *inside the box* —
+which is what makes the seventh column safe to inject at, and is why the note above is
+left standing rather than deleted: it is the measurement that made the case for the box.
+See *The seventh column raises a chooser* above.
 
 **And confirmed off the glass by the operator's own eye, 2026-10-05** — *"yep it looks
 good"*, swiping the bar down on the deployed `fbshim.so` `78c2d742…`. That is the one
@@ -722,42 +872,134 @@ highlighting the button under the finger changes the image, so the save-under sl
 would capture our own old pixel. The discipline is `fb_cursor.c`'s — restore the old
 image first, then paint the new one.
 
-**The labels are the device's own typeface**, and that is the one thing on the panel
-that is not a single palette value. They were a hand-written 5×7 bitmap drawn at an
-integer scale, which on a 96-row button meant scale 4, i.e. every source pixel
-replicated as a 4×4 block; the operator's verdict on the glass was *"the font is too
-big and pixely"*. They are now Decker Bold — the face the XDJ-RX3 carries in its own
-font directory (`extracted/XDJRX3/gui/fontdata/decker.ttf`) and the one rbp draws its
-own UI in — rasterised **once**, on a build machine, into an 8-bit coverage atlas:
+**The labels are set in Decker, thinned to a lighter weight**, and that is the one
+thing on the panel that is not a single palette value. They were a hand-written 5×7
+bitmap drawn at an integer scale, which on a 96-row button meant scale 4, i.e. every
+source pixel replicated as a 4×4 block; the operator's verdict on the glass was *"the
+font is too big and pixely"*. Decker is the **only Latin font file the XDJ-RX3
+carries** (`extracted/XDJRX3/gui/fontdata/decker.ttf` — one static weight-700 face, 260
+glyphs, no variable axis), so it is the closest thing on the device to a UI typeface.
+It is rasterised **once**, on a build machine, into an 8-bit coverage atlas:
 `scripts/shims/bake_menu_font.py` writes `scripts/shims/menu_font.h`, which is
 committed, and the shim itself still has no font engine, no freetype and no file I/O.
+**It is not, however, the face rbp draws its own text in** — an earlier statement here
+said it was and the binary does not support it. rbp names no `.ttf` but the Japanese
+one; every Latin glyph it paints comes from Pioneer's own baked bitmap tables,
+`/root/gui/pset/fontdata/NS_FONT_ID_*.bin`, through `NS_FontTable_*`. See
+[the font question](#the-fonts-the-device-actually-has) below.
 Coverage is where the exactness rule lives: **coverage 0 writes exactly the button
 colour and coverage 255 writes exactly the label colour** — the ends of the range are
 palette values — and only the glyph edges between them are a per-channel blend of the
 label over the button. The witness's 15 sample points are chosen to be glyph-free:
 they are the **button band's own edges, one row in** (`menu_paint.c`'s
 `menu_witness_point()`), which at 1280×800 with the 56-row panel is the ink at rows
-23..33 and the sample rows 9 and 46 — 14 rows clear above the ink, 13 below. The
+21..34 and the sample rows 9 and 46 — 12 rows clear above the ink, 12 below (14 and 13
+at the 16 px atlas, which is what the label size spends). The
 rule they replace was 5/16 and 11/16 *of the panel*, i.e. rows 34 and 76 at 112 rows
 and 17 and 37 at 56 — arithmetic that happens to clear a fixed-height font at one
 panel size and does not at another, because a proportional sample row cannot follow a
 fixed-size line box. So the points now come from the band, and `menu_view_ok()`
-**refuses** a panel whose band cannot host the label's 20-row line box (which is how
+**refuses** a panel whose band cannot host the label's 24-row line box — the atlas is
+19 px now, and the line box is the font's own ascent + descent, 24 rows (which is how
 480×320, whose band is **16 rows**, 3..18, is refused rather than drawn — a refusal
 that logs "leaves no room for the panel" and draws nothing). `test_menu.c` asserts both against the
 production point list and across ten panel sizes rather than trusting the arithmetic,
 because a witness that sampled a blend would read "damaged" on every tick and repaint
 for ever.
 
-At the default **16 px** the ink is 11 rows in a 20-row line box, and the labels come
-out 56..59 px wide in a 213 px column at 1280×800 — measured off a host render of the
-panel, not estimated. There is no scale parameter left anywhere in the interface: one
-baked size, centred on the column (`menu_text_width()` over the atlas's own advances)
-and clipped to it, so a panel too small to hold a label truncates it rather than
-spilling it into its neighbour. `test_menu.c` pins the ink band, the advances and the
-fit; `bake_menu_font.py` is one command to change the size (`… 18` is the size whose
-13 rows match rbp's own top-bar text, and 16 px is two rows under it — the operator
-picked 16 against that ladder and it is their eye that settles it).
+**The face is thinned 1/6 of a pixel a side**, and that is the answer to the operator's
+2026-10-06 question — *"is there another font that resembles the out of the box RX3
+font?"* The player's own text is a regular-weight sans and the panel's was Decker
+**Bold**, so weight is the difference the eye catches. There is no lighter cut of Decker
+on the device to switch to, and Pioneer's own bitmap tables (`NS_FONT_ID_*`, decoded
+below) are a **light** face at a 19 px cap whose `0` is 12 px wide — baking from those
+would change every label's width (its `USB STOP` is 98 px against this atlas's 76) and
+swap the face the operator had already approved, so it is not what shipped. So the
+outlines are eroded: each glyph is
+scaled up ×6, eroded one pixel there (a sixth of a pixel here, so the lightening is
+sub-pixel), and box-filtered back down. `ImageFilter.MinFilter` is the wrong
+structuring element for it — its window is square, so it eats diagonals about twice as
+fast as straights (measured on the `O`: 308 cells left after `MinFilter(7)` against 634
+after three 4-neighbour erosions at the same radius) — so the erosion is built from
+four one-pixel shifts (`ImageChops.darker` over four pastes). **The thinning cannot move
+a single metric**: advance, `left`, `top`, `w`, `h` and the whole `MENU_FONT_INK_*` band
+are read from the font at 1× and are byte-identical to an unthinned bake, so only
+`menu_font_coverage[]` changes — measured at 4,731 of 9,908 bytes, taking the set's ink
+from 940,040 to 794,881 (85%). `… 0` bakes the unmodified bold. 2/6 is measurably
+lighter and is one command away, but it thins the keyboard's `.` `/` `-` `_` `:` `=`
+to nothing solid — at 2/6 the `_` and the `=` have no solid cell left at all — so the
+default stops at 1. No bound in `test_menu.c` would catch that: the solid-cell floor
+there is a floor under a glyph that rasterises to *nothing*, not a weight control.
+The band was read back off its own overlay plane (fb id from the shim's `menu plane:`
+log line, pixels fetched by `DRM_IOCTL_MODE_GETFB` from a second DRM client) and shows
+all seven labels in the lighter face.
+
+At the shipped **19 px** a capital's ink is 14 rows inside the font's 24-row line box,
+and the whole set's band — the dot of an `i` down to the underscore — is 18 rows, rows
+5..22. The labels come out **49..76 px wide in a 182 px column** at 1280×800 (the
+seven-column band: `MENU` the narrowest at 49, `USB STOP` the widest at 76) — measured
+off a host render of the panel, not estimated. There is no scale parameter left
+anywhere in the interface: one baked size, centred on the column (`menu_text_width()`
+over the atlas's own advances) and clipped to it — which is why `menu_view_ok()` now
+refuses a picture whose **narrowest column cannot hold its own label whole**, rather
+than drawing a clipped word: at 19 px that floor is a **535-px-wide** picture, so a
+480-wide shape no longer draws the band (640 wide, with 91 px columns, still does) and
+the refusal is logged, not silent. `test_menu.c` pins the ink band, the advances, the
+fit and the floor.
+
+**The size is the operator's, and the ladder is bounded by the bar.** They asked on
+2026-10-06 to *"size up the font but keep the size of the bar the same"*, which is a
+question the geometry answers rather than the eye: the bar is 56 rows
+(`menu_zone.h`), 8 of frame at each end, so the button band is 40 rows at 1280×800 —
+and the label's **line box** must fit that band on the SMALLEST picture the port draws
+on. The 480-row panels (640×480, 800×480) give a 24-row band; the line box is 24 rows
+at 19 px and 25 at 20, so **19 px is the ceiling** and one more pixel would cost those
+panels their band. Against rbp's own text the ladder reads: the `INFO` label in rbp's
+top bar is 13 rows of ink, Decker's capitals reach 12 rows at 17 px, 13 at 18 and 14
+at 19 — so 19 px is a row over the player's own labels and the 16 px atlas was a row
+under them. `bake_menu_font.py <px> <light>` sets both; `… 0` is the unmodified bold.
+
+### The fonts the device actually has
+
+Asked on 2026-10-06 — *"is there another font that resembles the out of the box RX3
+font?"* — the answer is that there is exactly **one** Latin font file on the RX3, and
+these labels are already set in it. The device's whole font inventory is
+`gui/system/fontdata/decker.ttf` (Decker **Bold**, weight 700, 260 glyphs, a single
+static face — no collection, no `fvar`) and `gui/system/fontdata/sazanami-gothic.ttf`
+(Japanese). There is no Regular or Light companion to switch to.
+
+**But rbp does not load the TTF.** `strings` over the shipped `rbp`
+(`extracted_v120/XDJRX3/pdj/rbp`) names `/root/gui/system/fontdata/sazanami-gothic.ttf`
+and eight `/root/gui/pset/fontdata/NS_FONT_ID_*.bin` tables, and nothing else;
+`decker` appears in the binary only inside mangled C++ names (`…DeckER14DBIF_…`), and
+nothing anywhere else in the rootfs or the `gui.tar.gz` refers to it. Its text engine
+is `NS_FontTable_CreateFontTable` / `NS_FontTable_GetFont` and friends, i.e. Pioneer's
+own baked bitmaps — so the letterforms on the glass are a **regular-weight** geometric
+sans and the band's bold face is the visible difference, not the family.
+
+**Those tables decode — and the bit depth is the whole story.**
+`NS_FONT_ID_ISO8859_w.bin` is 79,758 B of fixed 189-byte cells — **27 rows × 7 bytes,
+2 bits per pixel** — so a row is **28 px** and every byte is four 0..3 coverage
+samples (an *antialiased* glyph, not a 1-bit mask); 422 cells, no header
+(`79758 = 27 × 7 × 422` exactly). Cell *k* is character **0x20 + k** for cells 0..223
+(ISO-8859-1, `space`..`ÿ`; `!` at 1, `A` at 33, `S` at 51 — each verified by rendering
+it), and cells 224..421 are **Cyrillic** (which is why an `A`-shaped glyph also matches
+at cells 263 and 338). Ink is rows 3..21 for a capital — a **19 px cap height**.
+
+**Reading it as 1 bpp is a trap, and it caught this file.** At 1 bpp a row is 56 px,
+so every glyph comes out **twice as wide** and aliased; that misreading is where an
+earlier version of this paragraph got *"a wide face (its `0` is 24 px …)"* — the `0`
+is **12 px**, not 24. Correctly decoded, the face is a *light, normal-width* regular
+sans: at its own 19 px cap the `0` is 12 px wide, the `I` is a **4 px stem**, and
+**"USB STOP" spans 98 px** — against this port's shipped 19 px Decker at **76 px**.
+Nothing in the table reaches the 28th column, in any of the 422 cells (widest is 25 px
+on a Cyrillic digraph), which is what settles the width. So the table is real and
+usable; it is **not** what shipped, because the operator asked for a lighter *Decker*
+and the band's columns are fitted to Decker's advances, not because the face was
+unusable. The sibling port `../full-touch-ui-xdj-rx3` draws its button labels from this
+very table at run time — area-averaging it down and boosting coverage **1.35×** to hold
+the stem weight after scaling — which is the working proof that 2 bpp is the right
+read.
 
 ### What is measured on the unit
 
@@ -797,8 +1039,9 @@ in the panel and rows **56..799** below it, and the bar is 7 % of the screen. Me
 on the glass rather than assumed (a raw dump of rows 0..119 with the panel open): frame
 0..1, fill 2..7, **buttons 8..47**, fill 48..53, frame 54..55, rbp's own black from
 row 56 — the drawn band exactly, and not one row more. The label ink is **rows 23..33,
-11 rows**, unchanged, because the font is a fixed 20-row line box and does not follow
-the panel's proportions; that is what the witness's sample rows had to be re-derived
+11 rows** (the 16 px atlas then in the shim; **rows 21..34, 14 rows** at the shipped
+19 px), unmoved *by the halving*, because the font is a fixed line box and does not
+follow the panel's proportions; that is what the witness's sample rows had to be re-derived
 from (see `menu_paint.c`'s `menu_witness_point()`), since 5/16 and 11/16 of the panel
 was a fraction and the ink is not.
 
@@ -811,6 +1054,11 @@ frames at 1 s intervals from the service start (`13:24:08`; the captures and
 | `p0`..`p3` | the panel, **byte-identical to the live open capture** (`c2.raw`) |
 | `p4` (+4 s) | still the panel's bytes — rbp has started painting below (rows 125..776) but has not reached this band |
 | `p5` (+5 s) | **none of the panel's seven palette colours**, and byte-identical to the closed baseline (`c1.raw`) |
+
+*(That last cell is the record of a 2026-10-01 run and is left as measured. Since the
+2026-10-06 restyle the bed is black, so "a colour the panel uses" is no longer a safe
+discriminator on its own — rbp's own UI holds black too. The outlines are what
+distinguish it now, which is also why the damage witness moved onto them.)*
 
 `p5` differs from `c1` by 87 px in the whole 1280×800 frame, every one of them in
 column x 0 rows 583..768 — rbp's own level-meter column, not the menu. So what a
@@ -932,7 +1180,10 @@ menu: panel closed
 360 ms of a 2000 ms hold, two log lines and nothing else for the remaining 1640 — no
 second fire, no re-open, no tap replayed. The same drill on the USB STOP column
 (`touch:1783,37,2000`) fires button 7 identically, which is the generic-hold rule
-above still holding.
+above still holding — with one addition since the chooser landed: button 7's fire is
+caught **before** the hold branch, so a *held* USB STOP raises the box rather than
+sending rbp a 500 ms key-down. There is no second meaning for a held USB STOP that is
+worth the operator's media, and the box is then reached by a tap like any other.
 
 #### UTILITY is not a touch screen
 
@@ -971,8 +1222,11 @@ selecting a different track — is 37,425 px, ten times the drift.
 
 **If it is ever wanted**, it is the same family as the QUANTIZE tap
 (`touch_zone.c`): map a tap's row to N `K_SELECTOR` steps and a tap on the value
-column to an Enter. That is real work and it invents a UI rbp does not have, so it is
-recorded and not started.
+column to an Enter. That is real work and it invents a UI rbp does not have, so it
+was recorded and not started — **that paragraph is now out of date**: it has since
+been built, as `util_zone.c`. See "Touch in rbp's own UTILITY screen" below for what
+was measured and how the gesture works; the note above stands as the record of the
+null that made it necessary.
 
 #### The flicker
 
@@ -1458,6 +1712,813 @@ inside the logger. `shimutil.c`'s `klog()` has the same missing lock and is *not
 which is the distinction worth keeping: its flag and its value are one variable
 (`log_fd < 0`), so the loser opens a second fd and still writes its line — a leaked fd,
 no lost line. The fix is `pthread_once()` in `pointsrc_log()`.
+
+## The edge drawers (`side_zone.c`, `side_paint.c`)
+
+The band above is the shim's only browse surface. This is the second: a **drawer that
+slides in from each edge**, the left carrying deck 1 / channel 1 and the right deck 2 /
+channel 2. The operator asked for the original pair in exactly those words — *"can you
+add a side swipe on each side with cue/play buttons for each deck and a fader control
+for each channel? deck 1 on the left, deck 2 on the right"* — and it exists because
+CUE, PLAY and the channel faders are otherwise reachable only from the FLX4, which is
+not always attached. With no FLX4 there is no transport at all, and worse: rbp builds
+its channel faders at **zero**, so a channel nobody reports is digital silence
+(`09-audio.md`).
+
+A later round added four things to that first design, and they change its shape:
+
+1. *"allow for both side panels to be visable at the same time and to accept input"* —
+   the two drawers are independent, so this needed **two overlay planes** and a funnel
+   that routes between them (see *Both drawers at once*, below);
+2. *"add a beat sync button at the top of the strip"* — `SYNC`;
+3. *"move the play/cue button to the bottom"* — the transport now sits at the bottom
+   edge, where a thumb rests;
+4. *"add +/- buttons to nudge the track"* — a two-cell `-`/`+` pair.
+
+Two choices from the first round are the operator's and still fixed: the fader
+**jumps to where you touch** (absolute, not a relative nudge); and it is a **narrow
+full-height drawer**, not a small box. The third — *"closed by tapping away"* — was
+**reversed** by the operator in the round that added `SYNC`/nudge/transport: *"the
+side bar should stay up until i swipe them away"*. The only act that closes a drawer
+is now the outward background sweep; see *The gesture* below, and the reversal note
+there.
+
+### The geometry, and why the two sides are one set of rules
+
+`SZ_W` is 180 logical px — 14 % of the width, leaving 920 px of centre glass
+uncovered. The x values in `side_zone.h` are **panel-local**: local x 0 is the *outer*
+edge on **both** sides, so `side_local_x()` / `side_abs_x()` are the only two places
+the mirror exists and every other rule is written once.
+
+| Region | left panel (local x) | right panel |
+|---|---|---|
+| panel | x 0..179, y 0..799 | x 1100..1279, y 0..799 |
+| title `CH 1` / `CH 2` | x 16..163, y 12..31 | mirrored |
+| **SYNC** | x 16..163, y 44..115 | mirrored |
+| **nudge** `-` / `+` | `-` x 16..85, `+` x 94..163, y 128..199 | mirrored |
+| value readout `0`..`100` | x 66..113, y 206..225 | mirrored |
+| fader track (drawn) | x 74..105, y 240..600 | mirrored |
+| fader **grab lane** | x 44..135, y 206..608 | mirrored |
+| **CUE** | x 16..163, y 628..699 | mirrored |
+| **PLAY** | x 16..163, y 712..783 | mirrored |
+
+Top to bottom that is the operator's own order: SYNC above the nudge pair above the
+readout above the fader above CUE above PLAY. `test_side.c` asserts each of those as a
+strict inequality, and each one is a sentence in the request — a header edit that moved
+one block past another would be caught rather than shipped.
+
+Every box is a full-width button (`SZ_BTN_X0..SZ_BTN_X1`, the panel's inner 148 px)
+except the nudge pair, which is two cells sharing one row with an **8 px seam** between
+them (`SZ_NUDGE_GAP`). The seam is deliberately nobody's: a press that straddles the
+middle is answered `SZ_HIT_BG` — nothing — rather than "whichever way the arithmetic
+rounded", and the hit test loops every lx in the row to prove the two cells never
+answer for each other.
+
+CUE and PLAY are **stacked full-width** rather than side by side: the inner width is
+148 px, and two 74 px cells would put "PLAY" against the atlas's own 65 px worst case
+("USB STOP") with nothing to spare — a transport button is not where a 9 px margin is
+wanted.
+
+**The panel has no frame (2026-10-06).** The operator's *"you don't need a white border
+on the side swipe menus adjust the layout accordingly"*, which is the same restyle the
+band and the USB STOP chooser had the day before: the drawer is now the black
+`MENU_FILL` bed edge to edge, and the only white on it is what each control draws for
+itself — SYNC's and the transport's one-pixel `sp_frame`, the nudge cells', the fader
+cap's, the well's. **No layout number moved**, and that is deliberate rather than
+lazy: the padding the frame was standing in for is `SZ_PAD`, 16 px in from the panel's
+outer edge, which is what holds the title, SYNC and the transport off the glass's edge
+and was already there — see the table above, where every full-width control is
+`SZ_BTN_X0..SZ_BTN_X1` = local 16..163 inside a 180 px panel. So removing the frame
+changes the picture and nothing else, which is why every hit rectangle, every
+measurement below and `SP_BORDER`'s other job (the too-small-to-draw guard in
+`side_paint_ok()`) all still hold.
+
+**The mirror is now what the paint test measures.** `test_paint_mirror()` used to prove
+the mirror through the frame's thin bands, because they were the only asymmetric mark
+in the picture — remove the frame and the proof would have gone with it, leaving the
+one thing this panel's drawing can get wrong (panel-local x against a SCREEN-order
+buffer) unpinned. The proof moved to the next mark out: **SYNC's own outline**, 16 px
+in from the outer edge, so it lands on device column 16 on the left drawer and 163 on
+the right. The frame's *absence* is asserted in the same loop, all four edges, both
+drawers — a frame that survived on one edge is exactly the failure that change could
+have left behind, and it is invisible to every hit test.
+
+**The fader's grab lane is wider and taller than the track it draws**, so a fat finger
+lands on it, and it is the one rectangle every button has to be disjoint from — a drag
+that could begin on a nudge cell, or end on CUE, would press a control the operator
+never aimed at. Two rows keep that apart:
+
+```
+SZ_FADER_GY0 (206) > SZ_NUDGE_Y1 (199)     a drag cannot begin on the nudge pair
+SZ_FADER_GY1 (608) < SZ_CUE_Y0   (628)     a drag cannot end on the transport
+```
+
+The value readout sits **inside the lane's own top slack** (rows 206..225), which is
+the whole of why touching the number moves the fader.
+
+### The entry column, and the USB STOP collision under it
+
+A swipe may only *start* in the outer **56** px while the drawer is shut — the same
+runway `MZ_SWIPE_PX` gives the band, so one swipe is exactly one swipe long.
+
+```
+left : logical x 0..55       and y >= 56
+right: logical x 1224..1279  and y >= 56
+```
+
+**The `y >= 56` gate is load-bearing, not tidiness.** The right entry column, logical
+x 1224..1279, is *exactly the band's seventh column*, whose USB STOP cell sits at
+y 8..47: a drawer that armed there would swallow presses aimed at the safe eject. With
+the gate the band's entry zone (x 426..852 ∧ y ≤ 55) and the drawers' are disjoint in
+**both** axes. Any future change to `MZ_STRIP_Y1` reopens the collision and must reopen
+this gate.
+
+**What that collision cost, and what it costs now.** The gate was written while a press
+on the USB STOP cell still *ejected* — the note above said so in as many words ("a press
+there **stops the operator's media**"), because it did. Since the chooser landed
+(2026-10-05) the same press is harmless by itself: it raises the box and nothing is
+unmounted until a second tap lands on `USB 1`. The gate is **unchanged and still
+required** — the drawer must not take a press aimed at a band column, whether or not
+that column's first act is destructive — and the reason is simply better now than it was
+when it was written.
+
+### The gesture: what opens a drawer, and what closes one
+
+The gesture is the band's, rotated 90°. A press in the entry column is swallowed and
+armed; it opens on travel **inward** of `SZ_SWIPE_PX` (56) **and** `dx > |dy|` —
+predominantly horizontal, so a vertical drag from the edge is not a swipe and rbp's own
+vertical gestures are untouched. An entry press that never swiped is replayed to rbp
+from the point the finger *landed* (`side_replay_tap()`, `menu_replay_tap()`'s twin),
+so a control rbp draws under the entry column is **delayed, never dropped**.
+
+While the drawer is out, **no button closes it**. That was the first design's rule —
+any release but the fader's put the panel away — and it is wrong now: with a SYNC
+button, a nudge pair and the transport all on one panel, *"SYNC, then nudge, then
+PLAY"* would be three swipes. **Exactly one act closes a drawer:**
+
+- a **56 px outward swipe on the panel's own background** (`SZ_CLOSE_PX`), dismissed
+  *mid-press* without waiting for the lift.
+
+**The reversal, recorded.** The first round also closed a drawer on any press that
+began off every open panel — the *"tap away to close"* in `side_feed_any()`'s old
+"away" step, which closed **both** drawers at once. The operator removed it: *"the
+side bar should stay up until i swipe them away."* So a press on the centre glass
+while a drawer is out is no longer a dismissal at all — it is handed to rbp
+untouched, on its down edge and its release alike, and the drawer that was already
+out is still out afterwards. `side_feed_any()`'s step 3 is no longer a special case
+but the ordinary one: *nothing here claimed it, return `MZ_FEED_NONE`*.
+
+A press on the drawer's own background that does not travel is therefore not a
+dismissal: it is swallowed and does nothing. A press that began on the fader lane is
+the other exception that keeps the drawer out, because riding a fader is the drawer's
+most common use and a re-swipe per nudge would make it useless.
+
+**One consequence, and it is the operator's answer.** The top swipe-down band cannot
+be opened while a drawer is out — the band and a drawer cannot share the one overlay
+plane, and the band's own closed-entry arm is gated on `!side_any_open()`
+(`menu_zone.c`). *"Swipe the drawer away first"* is the operator's chosen consequence.
+The band, unlike a drawer, keeps its own tap-away dismissal: a stated divergence.
+
+A release fires a button only for a press that began **and** ended on the same box
+(roll-off cancels). The **nudge pair is the exception and it is deliberate**: a nudge
+press *always* emits `SZ_ACT_NUDGE_STOP` on release, whether or not the finger is still
+on the cell it started on. rbp keeps bending until it is told speed 0, so a bend that
+outlived its press is the one failure here the operator could not undo by lifting a
+finger; a wanders-off bend therefore cancels and fires no button.
+
+### SYNC, the nudge pair, and the fader
+
+**SYNC** is `K_SYNC 0x4112` — the same key the FLX4's own SYNC button sends — sent as
+press + release on the side's channel. Plain press/release, and it fires **on the
+lift**, like every other button here.
+
+**The nudge pair is a bend, and there is no nudge keycode.** `K_JOG_ROT 0x4305` with
+`OP_ROTATE` is the only mechanism rbp exposes: a signed rev/s float, with the position
+argument bumped 128 per change. The bend **starts** on the nudge cell's down edge and
+**stops** on its release — one message each, no repeat clock — because rbp holds the
+speed until it is told otherwise. The magnitude is the acknowledged unknown in this
+change and it is exposed for calibration on the glass:
+
+```
+RB_ENV SIDE_NUDGE_SPEED    rev/s, default 0.35
+```
+
+`side_nudging(side)` derives (-1 back, +1 forward, 0 none) from the press state rather
+than remembering it, so the stop cannot be lost; `pointsrc.c`'s `side_bend_sync()`
+reconciles the running bend against it on the two paths where no report will ever
+arrive — the touch device going away, and start-up with `POINT_MENU=0`.
+
+**CUE and PLAY** are plain keycodes — `K_CUE 0x4102`, `K_PLAY 0x4101` — sent as press +
+release on `side_channel()` (1 for left, 2 for right) with **no `usleep`**, unlike the
+band's synthesized hold. Measured on the unit by injection: left PLAY → `0x4101 ch1`,
+left CUE → `0x4102 ch1`, right CUE → `0x4102 ch2`, right PLAY → `0x4101 ch2`, each with
+rbp's own screen changing underneath in the HOT CUE pad row and the deck info row.
+
+The fader needs no MIDI and no FLX4. `K_FADER 0x501e` is an **absolute value** key —
+`send_rx_key_f(K_FADER, OP_VALUE, ch, v, fval)` — the same call the hardware fader
+makes, and ten bits rather than the FLX4's 128 steps. Top is full:
+
+```
+clamp y to [240, 600];  v = 1023 * (600 - y) / 360
+```
+
+The down-edge on the lane **jumps** to the landing y; every later motion report while
+down recomputes v and sends **only when it changes** (the same dedup the FLX4 map
+makes), so a resting finger is silent. Measured by injection on the unit, a drag from
+the top of the lane to the bottom: `→ 1000, 873, 749, 624, 498, 373, 246, 122, 0` —
+nine sends and no repeats.
+
+**The value drawn before the first touch** is `g_fader[ch]`, the same number rbp's
+mixer is being sent, so what the drawer shows is what the channel is doing. That array
+is the subject of the next subsection, and it is the sharpest trap in this change.
+
+### One `g_fader` across both shims (`fader_state.c`)
+
+The shim seeds both channel faders at unity for the first ~30 s of every rbp run
+(`rbp_vu.c`'s `mixer_defaults_tick()`, gated on `g_fader_seen[]`), because rbp builds
+them at zero and a machine with no absolute-control surface would otherwise play into
+silence. That seed lives in **knobshim**; the drawer's fader send lives in
+**fbshim**. Writing "the same" array from `pointsrc.c` would have created a **second
+copy**, invisible to knobshim — and the seed would then silently overwrite anything the
+operator did with the drawer for the first 30 s of every run.
+
+So `g_fader[3]` and `g_fader_seen[3]` are defined exactly once, in `fader_state.c`,
+with **default visibility**, and that object is linked into *both* shims. `fbshim.so`
+is preloaded first (`start-rb.sh`), so the loader binds knobshim's references to
+fbshim's copy.
+
+That is an ELF property and it is worth checking rather than trusting, because
+knobshim's objects are otherwise built `-fvisibility=hidden`, and a *hidden* reference
+would bind locally and defeat the whole thing. Both shims carry
+`R_ARM_GLOB_DAT` relocations for the two symbols — preemptible, resolved through the
+global scope — and in the live process the two GOT entries point into fbshim's
+mapping:
+
+```
+$ readelf -r knobshim.so | grep fader
+000100c0  R_ARM_GLOB_DAT  g_fader
+000100c8  R_ARM_GLOB_DAT  g_fader_seen
+# both GOT slots read back as fbshim's addresses, not knobshim's:
+knobshim.so  g_fader       GOT@0xf7aba0c0 -> 0xf7ad62ac   (fbshim base 0xf7abe000)
+knobshim.so  g_fader_seen  GOT@0xf7aba0c8 -> 0xf7ad7650
+```
+
+One array, read by both. A fader move sets `g_fader[ch]` and `g_fader_seen[ch]` in
+that shared copy, and the seed then skips that channel. **The FLX4 and the drawer both
+write `K_FADER` for the same channel once the controller is reattached; last writer
+wins.**
+
+### The fader's flicker: build off-lock, publish bounded
+
+The operator's first request was *"the volume slider flicker when i slide up or down"*,
+and it was the band's old defect, arrived at from the other direction. `side_paint()`
+rewrote **all 180×800 = 144,000 pixels** of the drawer's *live, single-buffered* overlay
+plane buffer, entirely **under `g_lock`**. The `MENU_FILL` bed goes down over the whole
+panel first, so mid-paint the panel reads as flat colour: one whole-panel flash per
+repaint. Measured on the unit, a single drag produced **8** of them.
+
+The cure is the band's, and it is copied rather than invented — the band had the
+identical defect and was already fixed by building the image **off** the lock and
+publishing it by swapping two pointers under it:
+
+- **Two system-memory images per drawer** (`side_img[2][2]`, one front/back pair each),
+  allocated beside the band's `g.front`/`g.back` in `menu_build()` and sized
+  `180 × 800 × 2`. The pair is allocated independently of the band's and **never changes
+  `menu_build()`'s return value** — that `-1` is the *band's* "no image cache" signal and
+  would silently drop the band to the page. With the pair absent the drawers keep the
+  old direct-paint path verbatim.
+- **`menu_side_build(which)` — off lock**, called from `menu_thread()` between
+  `menu_classify_publish()` and `menu_frame_tick()`, so the tick publishes the image the
+  same iteration just made. It snapshots the pressed/value tuple, paints `side_paint()`
+  into the back image, and takes `g_lock` **only** to swap the two pointers, record the
+  published tuple and set `side_pending`.
+- **`menu_side_publish(which)` — under `g_lock`**, called from `menu_side_live()`. On the
+  unit it is a single `memcpy` (`g.side[which].pitch == 180 == side_buf_w`, logged as
+  `180x800 16 bpp pitch 180 px`); a page-width plane takes the per-row loop `menu_blit()`
+  already uses.
+- **A fresh dumb buffer is uninitialised** (`drm_band_setup()` creates one), so the
+  drawer's `drm_band_show()` is **deferred** until a valid, current front exists; the
+  drawer is absent for at most one tick, and only in the case where the vsync beats the
+  build.
+
+**The view builder is a deliberate sibling, not a reuse.** `menu_side_build()` cannot
+call `menu_side_view()`: that reads `g.side[which].pix/pitch`, which `menu_frame_tick`
+mutates under the lock, so an off-lock read there is a real race that can hand
+`side_paint` a dangling pointer. `menu_side_buf_view()` reads only the cached scalars.
+The `fb_w`/`fb_h` fields are load-bearing — `side_paint_ok()` rejects the whole paint, in
+silence, without them.
+
+**The residual tear, stated.** The publish still rewrites every pixel of a live,
+scanned-out, single-buffered plane — now a `memcpy` instead of a paint, but still not
+atomic against the scan-out. That is the band's accepted trade. The only true cure is a
+second dumb buffer plus a `SETPLANE` flip in `drmband.c`, which it does not support today
+and which is shared by the band, the browser window and both drawers — bigger and
+riskier. Two `MENU_VERBOSE`-gated lines price it on the glass, parity with the band's
+`menu: classify` / `menu: blit`:
+
+```
+side: build %ld us    the paint the lock used to hold
+side: blit  %ld us    the copy that replaced it
+```
+
+### Both drawers at once, and the two planes it needs
+
+The **single-buffered overlay plane is opaque** — RGB565 has no alpha — so two drawers
+cannot be composited into one full-width buffer. Two planes is the honest answer, and
+the obstacle was never the plane count but the **DRM master**: it is held per open
+*file*, so a second `drm_band_setup()` used to be refused `EBUSY`.
+
+`drmband.c` now keeps a **refcounted shared device** (`g_dev` with `dev_acquire()` /
+`dev_release()`): the first band opens `card1`, sets `UNIVERSAL_PLANES` and takes the
+master; every later band just increments the count and owns only its own
+buffer/framebuffer/plane. `pick_plane()` skips any plane whose `crtc_id != 0`, so the
+second drawer lands on a *different* plane (card 1 exposes 60 plane objects, 48 of them
+overlay type).
+
+The band is still exclusive, and for a physical reason rather than a limitation: the
+band and a drawer overlap at the top corners of the glass, and two overlays cannot
+share a `zpos`. `menu_side_plane_sync()` therefore takes the band's plane **down**
+while *any* drawer is out and brings it back — freshly read off the live page — when
+the last one goes.
+
+**The funnel's routing** is `side_feed_any()`, and it is four steps in this order:
+
+0. a **latched** press owns all of its own reports, whichever side latched it;
+1. a fresh down on **an open drawer's own panel** — and only this step can fire a
+   control. The `side_hit(...) != SZ_HIT_NONE` test is what keeps a press in the middle
+   of the glass *out* of this step; without it a drawer would swallow every press on
+   the screen and "away" could never be reached with two panels out;
+2. a fresh down in **a shut drawer's entry column**, so the second panel can be swiped
+   out while the first is already up;
+3. otherwise — a fresh down on rbp's own glass, the centre of the screen — **nothing
+   here claims it**. The press is handed back untouched (`MZ_FEED_NONE`) on its down
+   edge and on its release alike, and no drawer closes. Nothing latches it, so nothing
+   has to unlatch it. (This step was the *"away"* dismissal until the operator reversed
+   it; see *The gesture* above.)
+
+Step 0's test is `was_down` and **not** `swallow`, and that is the difference between
+"owns this press" and "was offered this press". A drawer that declined a report still
+recorded the down edge — that *is* the latch rule, which stops a press that started
+outside from becoming the drawer's by wandering into its entry column — so something
+has to tell it the finger has gone. Getting that wrong is the one silent death this
+module had: the declined drawer kept `was_down` set and read the *next* press on its
+entry column as a motion of a press that ended long ago, leaving it dead with nothing
+drawn wrong and nothing logged. `test_side.c`'s `test_entry_survives_declined()` pins
+it, and fails without the fix.
+
+### Two fingers at once: the pointer split, and what the kernel does to a still one
+
+Both panels could be open and both could accept input (the SYNC cell above), but only
+**one hand at a time**, and the operator said so in their own words: *"if i try to drag
+both volume meters it gets confused and only one of them changes"*. The cause was the
+pointer model, not the panels: every gesture module in `pointsrc.c` was fed from a
+**single** contact's `(x, y, down)`, so two fingers were two reports into one state, and
+whichever hand moved last owned the channel.
+
+The repair is a **pointer dimension**. `side_zone.h` declares `SZ_PTRS 2`, with
+`SZ_PTR_MAIN 0` and `SZ_PTR_ALT 1`; `read_loop_abs` keeps `rx[]`, `ry[]` and `down[]`
+indexed by it. The primary contact is the only one **rbp, the band, the browser window,
+the USB STOP chooser and the UTILITY gesture** ever see, because rbp has exactly one
+pointer: `pointer_report_alt()` offers the second contact to the drawers **and to
+nothing else**, and a report it does not take is **dropped, never forwarded**. Feeding
+a second finger into rbp's single cursor would be a worse defect than the one being
+fixed.
+
+Drawer gesture state is now per-`(side, pointer)` — `static struct side_st st[2][SZ_PTRS]`
+— while whether a drawer is *out* stays a per-panel fact, `static int sz_open[2]`,
+because being out is a property of the panel and not of the hand that opened it. That
+distinction is why the two halves of the repair are separate: two hands need two state
+machines, but two hands must still agree on one drawer.
+
+**Then the trap, which is one layer below the shim: the kernel de-duplicates an unchanged
+`EV_ABS` per axis.** `input_get_disposition()` drops a value equal to the last one it
+*accepted* for that code (`absinfo[code].value == value`), and it keeps **one** such
+value per axis — not one per MT slot. Measured on the unit's own panel node
+(`TSTP CTouch`, an MT-B device) on 2026-10-06: two contacts placed at the same height
+delivered
+
+```
+MT_SLOT 1 / MT_TRACKING_ID 2 / SYN
+```
+
+and **nothing else**. The second contact's x and y were never sent at all, so the reader
+left it at (0,0) — which is the **left drawer's own corner**, so the operator's right hand
+moved the left fader. Two more consequences of the same rule, both measured: a batch whose
+events are *all* de-duplicated emits **no `SYN` at all**, and a perfectly still finger's
+repeat positions never reach the reader. A moving finger — a real one — always delivers.
+
+The `seen` guard closes it. `int seen[POINT_SLOTS]` is cleared on every
+`ABS_MT_TRACKING_ID` (down *and* up) and set by `ABS_MT_POSITION_X` / `_Y`, so the second
+contact is offered as
+
+```c
+pointer_report_alt(down[1] && seen[1], x, rx[1], ry[1]);
+```
+
+— a contact that has never said where it is never acts. Without it the failure is the
+kind this module has already had once (the declined-press latch, above): silent, nothing
+drawn wrong, nothing logged.
+
+**The drill had to be made faithful, and that cost real time.** `work/poke.py`'s
+`bothfaders` verb first sent a *still* second finger and produced no second channel line
+at all, which looks exactly like the module still being broken. A real finger moves, so
+the verb now clears both slots' tracking ids first and steps each contact's x and y over
+four reports. With that, five consecutive runs on the unit were **5/5 identical and
+correct** — each hand moved only its own channel, deterministically:
+
+```
+left  fader ch1 -> 897
+right fader ch2 -> 897 / 724 / 548 / 375 / 198 / 375 / 548 / 724 / 897
+left  fader ch1 -> 724 / 548 / 375 / 198
+```
+
+The module's own proof is `test_side.c`'s `test_two_hands()`, which opens both drawers
+with the **alternative** contact opening its own, drags each hand, and asserts that the
+other hand's channel never moves — including the exact line the unit's log produced
+wrongly before the fix.
+
+### One surface at a time, and what is left of it
+
+The funnel ladder is window → band → drawer → **rbp's own UTILITY screen**
+(`pointsrc.c`'s `pointer_report()`), and only **two** gates remain: `menu_zone.c`'s
+closed-entry arm gains `&& !side_any_open()` (and the same for the browser window), and
+`side_zone.c`'s gains `&& !menu_is_open()`.
+
+The side's own `&& !side_any_open()` — which existed when one plane meant one drawer at
+a time — is **gone**, and its removal *is* request 1: it was what made the second panel
+unreachable while the first was up. Band-first is still deliberate: an open band
+swallows at full width and must answer first. Measured on the unit: with the band open,
+a left-edge swipe closed the band and did **not** open the drawer.
+
+UTILITY is asked **last of the four**, and it is asked only while the window is shut, the
+band is closed and no drawer is out — `!menu_window_is_open() && !menu_is_open() &&
+!side_any_open()`. The three feeders above already own their own rectangles; those three
+terms are about the glass *between* them, where a scroll that moved a list the operator
+cannot see (behind an open panel) would look like it worked and could not be aimed. It is
+also the operator's own answer to the band — *swipe the drawer away first*. See the next
+section for what the gesture itself refuses.
+
+### What is measured on the unit
+
+By injection through the panel's own node (`work/poke.py`), so the whole path runs —
+kernel → `pointsrc` → `tscfake_emit()` → rbp. Measured 2026-10-05, all four requests in
+one pass; the log is `/tmp/pointsrc.log`.
+
+**Request 1 — both panels out at once.** Two distinct plane ids on one crtc. The second
+drawer gets its own plane rather than silently re-using the first, which is the failure
+the refcounted shared device exists to prevent:
+
+```
+pointsrc: side left drawer open
+side: a drawer is out -- the plane is handed over from the band
+menu plane: crtc 102 plane 127 fb 723 180x800 16 bpp pitch 180 px (288000 bytes) at 0xcb927000
+pointsrc: side right drawer open
+menu plane: crtc 102 plane 138 fb 725 180x800 16 bpp pitch 180 px (288000 bytes) at 0xc1a2f000
+```
+
+**Both panels accepting input, each on its own channel** — the SYNC on each drawer
+reaches its own deck, with both drawers still out:
+
+```
+pointsrc: side left SYNC  -> key 0x4112 ch1
+pointsrc: side right SYNC -> key 0x4112 ch2
+```
+
+**Request 4 — the nudge, and the half that is safety-critical.** The bend starts on the
+down edge and **stops on the lift**; rbp holds the last speed until it is told zero, so
+a missing stop would leave the track running away:
+
+```
+pointsrc: side left nudge forward -> key 0x4305 rotate speed +0.35 ch1 pos 128
+pointsrc: side left nudge stop    -> key 0x4305 rotate speed +0.00 ch1 pos 128
+pointsrc: side right nudge back   -> key 0x4305 rotate speed -0.35 ch2 pos 65408
+pointsrc: side right nudge stop   -> key 0x4305 rotate speed +0.00 ch2 pos 65408
+```
+
+**The fader reaches rbp's mixer.** The objective half of the proof is not the log line
+but the shared array the mixer reads, taken out of the running process:
+
+```
+pointsrc: side left  fader ch1 -> 0
+pointsrc: side right fader ch2 -> 1023
+
+$ readelf -sW /opt/rblive4/fbshim.so | grep -w 'g_fader'      # -> live at 0xf788e2b8
+g_fader      (1023, 0, 1023)      # [master, ch1, ch2] -- ch1 held at ZERO
+g_fader_seen (   0, 1,    1)      # both channel faders claimed by the drawer
+```
+
+Two things are being asserted there and both matter. `g_fader_seen[1] = 1` is what
+disarms the 30 s unity seed (`09-audio.md`), and the reading is taken **minutes** after
+the shim loaded — far past the window the seed runs in — with channel 1 still at `0`.
+If the seed could still see a private copy of the array it would have re-asserted that
+zero to `1023` by now. And the array really is one array: knobshim's `R_ARM_GLOB_DAT`
+slot for `g_fader` resolves to `0xf788e2b8`, **byte-identical to fbshim's definition
+address**, so the drawer's send and the seed's read meet in the same memory.
+
+**The dismissal closes every open drawer and hands the plane back:**
+
+```
+pointsrc: side left drawer closed
+pointsrc: side right drawer closed
+side: left drawer closed -- its plane is released
+side: right drawer closed -- its plane is released
+menu plane: crtc 102 plane 127 fb 723 1280x56 16 bpp pitch 1280 px (143360 bytes) at 0xe9109000
+side: no drawer is out -- the plane goes back to the band
+```
+
+The band's plane comes back at `1280x56` on its own id — a live plane re-read from the
+page, not a stale image.
+
+**What is still owed, and by whom.** CUE and PLAY were injected and the log names the
+right key on the right channel (`side left PLAY -> key 0x4101 ch1`), but the unit was
+sitting on the **browse screen with no track loaded on either deck**, so there was
+nothing for them to move and `/dev/fb0` showed only its own clock ticking. Loading a
+track to prove them on the glass would write the operator's `export.pdb`, so that step
+is the operator's: with a track up, press CUE and PLAY in a drawer and watch the
+transport. The same press is what settles the swipe's feel.
+
+The drawers are on the **overlay plane**, so `/dev/fb0` does not contain them and a
+screenshot cannot show them. To judge the look without standing at the panel, render one
+with the production painter — `side_paint.c` into a 180×800 buffer, exactly the buffer
+the plane gets (`work/fbdiff.py`'s neighbours; the drawing is a function of
+`{side, pressed_hit, fader_v}` and of nothing else, which is also what makes painting
+it twice paint it once).
+
+**Both drawers have since been read back off their own planes** (2026-10-06), which is
+the stronger witness and the one the borderless picture needed: `/proc/pid/mem` cannot
+read a vc4 dumb buffer at all (`EIO` at a live address), so the pixels come from
+**outside** rbp through the same `work/boxshot2.py` the chooser uses — open the card,
+`GETFB` by the id in the shim's own log line, map, read. The drawer's line is
+`menu plane: crtc 102 plane 127 fb 723 180x800 16 bpp pitch 180 px`, and `fb 725` is the
+**second** drawer's own plane (`plane 138`), which is the two-master block solved in the
+cell above showing up in the log. The captures are the four edges at `0x0000`
+(`MENU_FILL`) with the controls outlined, both sides: `work/drawer_left_live.png`,
+`work/drawer_right_live.png`.
+
+
+## Touch in rbp's own UTILITY screen (`util_zone.c`)
+
+The operator's third ask, in their own words: *"in the utility menu give the ability to
+scroll up and down items and tap to click enter on an item (only do this in this menu)"*,
+disambiguated as *"the utility menu where the need lock is"*. The section above records
+the measurement that made it necessary — rbp binds **no touch** to that screen and it is
+driven entirely by `K_SELECTOR` — and the paragraph it ended on used to say this was
+"recorded and not started". This is it, started and shipped.
+
+`util_zone.c` is the third of the pure gesture modules, next to `menu_zone.c` and
+`side_zone.c`, and it is written to the same rule: no rbp address, no env, no I/O, no
+clock. Everything rbp would tell it arrives in a `struct util_state` that `pointsrc.c`
+fills in, and everything it wants sent comes back as an act and a signed count. The two
+halves that touch rbp live in `pointsrc.c`: `util_read_state()` and `util_send()`.
+
+### The gate: `getBrowseMode() == 7`
+
+"Only in this menu" is one read. rbp gates its whole UTILITY key handling on the browse
+mode equalling **7** — `UiBrowse_SetDispUtilityList` @0x13cfc8 opens the screen with
+`setBrowseMode(7); setBackColor(9)`, and `Ui_BrowseCommTask` @0x1351a8 compares against
+the literal 7 at 0x139124, 0x139180, 0x1391a4 and 0x1391bc — so `== 7` is rbp's own
+test and not a guess (`rbp_abi.h`'s `BROWSE_MODE_UTILITY`).
+
+The mode is the **first word of `uiBrowse`** at `0x0326f8b8`, and that is the whole
+reason this is safe from the input thread: `uiBrowse` is a plain `.bss` singleton, so
+there is no pointer chase and no structure built during rbp's start-up to walk. It is
+the opposite case from `UI_PADMODE_HOLDER_GLOBAL`, whose guarded walk `rbp_led.c` needs.
+The one guard that *is* required is the process test (`is_rbp_process()`, `rbp_key.c`):
+those addresses are only mapped inside rbp, so a shim loaded anywhere else must not
+dereference them at all. Confirmed against the glass 2026-10-05: the live mode read 7
+while the list was on screen.
+
+Two more words of the same singleton are read with it — `[uiBrowse+0xac]` and
+`[+0xb8]`, which is `IsUtilityCalibrationOn()` @0x112e80 spelled as the two reads it
+actually is. rbp draws its own touch marks on the **calibration** sub-screen and reads
+touches there itself, so the gesture stands down while those are set even though the
+browse mode has not changed.
+
+The **cursor** comes from `getCursorNo(getActiveList())` — `[uiBrowse + 4*activeList +
+0x6c]`, indexed the way rbp's own `getActiveCursorNo` @0x112790 indexes it. While
+navigating that is list 0, and `activeList` is non-zero exactly while **editing**.
+
+### The window, and why a tap is cheap
+
+The list is **33 items drawn 12 rows at a time**, and a rotate moves the selected
+absolute index by **exactly one, every time**. Measured by injection 2026-10-05
+(`work/keysend.py` driving `K_SELECTOR` through `map_kbd.c`, `work/utilprobe.py` reading
+`uiBrowse` back):
+
+| what was driven | `cursor` | `initialNo` | `abs = initial + cursor` |
+|---|---|---|---|
+| four rotate steps | 0 → 4 | 0 | 0 → 4 |
+| fourteen more | holds at **11** | 7 → 21 | 18 → 32 (the last of 33) |
+| rotate back up | 11 → 0 in the window | — | walks back, window still |
+
+So the cursor walks 0..11 and then **holds at 11** while `initialNo` — the window's
+first item — increments; `setCursor` @0x113c24 is what clamps it to twelve. That is what
+makes the tap cheap: the row the operator touched holds item `initialNo + row`, the
+cursor is already on `initialNo + cursorNo`, and the travel is **`row − cursorNo`** with
+the window cancelling out. `initialNo` is never read, and reading it would buy nothing.
+
+The 33 items include blank rows and grey section headers (GENERAL is one); each occupies
+an index slot like any other row.
+
+### The geometry
+
+Measured off `/dev/fb0` with the screen up, not eyeballed:
+
+| quantity | value |
+|---|---|
+| row 0's top edge | **y = 50** |
+| row pitch (2 px separator included) | **52 px** |
+| rows drawn | **12** (y 50..673 inclusive) |
+| the name cell / the value cell | x 0..729 / x 730..1279 — **one row**, so the whole width is one target |
+| below the list | a gap, then rbp's own deck strip at ~712, which is **not ours** |
+
+`row = (y − 50) / 52`, and `test_util.c` pins every boundary a pixel either side as
+arithmetic. The six-column top band's strip is rows 0..55, so the first six pixels of
+row 0 are band territory in the band's entry column; that is the band's pre-existing
+behaviour and it is left alone.
+
+### The gesture, and the two things it refuses
+
+A press is **latched** at its down edge — swallowed for its whole life or not at all, so
+one that starts off the list never becomes ours when it wanders on. Nothing is sent at
+the down edge, so even a tap that never moves costs one report; there is no per-report
+step to starve the loop the band, the window and the drawers share.
+
+| the report | what happens |
+|---|---|
+| down on the list | swallowed and latched; the landing point is the anchor and the row under it is remembered |
+| move | one `K_SELECTOR` rotation per **52 px of travel from the ANCHOR**, minus what this press has already sent — so a resting finger re-sends nothing and a direction change reverses by exactly the difference. Bounded by **16** per answer, then the remainder follows on the next report |
+| release, wandered (>24 px) | swallowed, nothing sent: a drag is not a tap |
+| release, on the anchor | **TAP**: `row_at_press − cursor` rotations, then `K_SELECTOR` press + release (Enter) |
+| any report after the screen leaves UTILITY | **`MZ_FEED_NONE`** — the press is dropped and rbp is handed the report |
+
+**What those rotations MEAN is rbp's decision, not this module's, and it changes with
+rbp's state.** Not editing, they scroll the list. Editing, the very same `K_SELECTOR`
+rotation **changes the highlighted item's value** — one injected rotate turned **LOAD
+LOCK from UNLOCK to LOCK**. It is the same number on the same wire either way; only rbp's
+cursor mode tells them apart.
+
+**This was got backwards in the first release, and the operator found it.** That release
+refused every rotation while editing, on the argument that a scroll which silently
+rewrites a setting is worse than a gesture that does nothing. The hazard was real and the
+remedy was wrong: it left the operator able to **enter** a value row and unable to change
+it, which is precisely what came back —
+
+> *"selecting items in utility menu also works, only issue is that i have no way of
+> changing the values once selected"*
+
+And the trade is not the shim's to make, because rbp makes it. On the RX3 the same encoder
+both moves the highlight and edits the value, and **no control scrolls a list while an
+item is in edit mode**. So the rule is now the operator's own, and it is the whole of the
+gesture:
+
+> **a tap enters edit mode; a drag changes the value; a tap leaves.**
+
+The one thing kept from the refusal is on the release: while editing the tap's travel
+count stays **zero**, so the Enter that leaves edit mode cannot also drag the highlight
+onto whatever row the finger happened to be over.
+
+**A drag never taps**, even one that ends back on its anchor: the list has already moved
+under it, so "the row you touched" is no longer what the operator was aiming at.
+
+**The screen can go away under a press.** The FLX4's BACK reaches rbp without passing
+through this module, so both the move path and the release refuse once the mode has
+changed — otherwise a drag left latched across a screen change would land its Enter on
+whatever screen is now up. rbp never saw the press, so it is owed no release either.
+
+The count is sent as a **burst with no sleep between the steps**: rbp's rotate is a
+posted message and a wait here would starve the shared input loop (the same TRAP 2 this
+file records for the band). `map_kbd.c`'s `kbd_rot` bounds and sends the same way; this
+is that sender's second caller, with the count coming from a finger instead of a wheel.
+
+None of this reaches rbp's touch path at all — a swallowed report never calls
+`tscfake_emit()`, which is what keeps the six columns working over that screen.
+
+### What is owed, and by whom
+
+Everything above is code and host tests (`test_util.c`: 422 checks, every boundary, the
+coalescing, the cap, the travel, the refusal when the screen changes, and the value-edit
+drag). What has **not** been done is driving
+the gesture on the glass with the operator's own finger. Injection has proven the
+instruments — `keysend.py` reaches `map_kbd.c` and `utilprobe.py` reads the fields back —
+so the drill is: open UTILITY, drive the new gesture through the panel's pointer node
+(`work/poke.py`), and read rbp's frame diff **bracketed against a same-length drift
+control**, because that screen is the one where a marqueeing title passes for a reaction
+(the trap at the top of this file). The unit was left exactly as it was found —
+`cursor=[0,0] initial=[0,0]`, LOAD LOCK back to `UNLOCK` — after the edit-mode
+measurement above.
+
+
+## The waveform swipe (`wave_zone.c`)
+
+> *"can you add pinch to zoom in/out on the wave form in performance mode (whatever the
+> one that is that displays the wave file)"* … *"can you build the pinch to zoom in the
+> waveform view ?"* … and then, on the build:
+>
+> *"yeah, what you did is no good. it messes up scrolling everywhere else, instead of
+> pinch can you just allow swiping on the waveform up/down for zoom in/out."*
+
+The first two asks produced a pinch. **That pinch was rejected on the glass**, and the
+rejection is the design of what replaced it — so both halves are written down here.
+
+### Why the pinch regressed everything else
+
+`pinch_zone.c` answered **`MZ_FEED_TAKEN`**. Its second contact latched the gesture and
+*every* report after that was swallowed until **both** fingers lifted — including reports
+with one finger or none. A phantom or stale slot therefore latched it, and from then on the
+shim ate presses it never meant to own; a swallowed press is a press rbp never sees, and on
+every screen but the performance one a single-finger drag is *the scroll*. The synthesized
+`K_SELECTOR` rotation is itself not zoom-specific either: off the performance screen that
+same keycode moves rbp's list cursor. The operator's own words for it are the heading above.
+
+### What replaced it: a one-finger vertical swipe, and the additive rule
+
+**`wave_zone.c` cannot take a report at all.** Its one door returns a **signed step count**
+and nothing else — there is no vocabulary in the module with which to swallow anything. rbp
+is handed exactly the stream it is handed today; the only new thing on the wire is a
+`K_SELECTOR` rotation, and the gate below is what bounds where that can happen. There is no
+latch that can be left behind, no release owed, and nothing to go deaf
+(`declined-press-must-still-see-release` is a hazard this gesture structurally cannot have).
+
+It is asked **first** in `pointer_report()`'s ladder, and that is not a tidiness preference:
+every other feeder answers `MZ_FEED_*` and a TAKEN report returns early, so a module asked
+later would not see the reports a surface swallowed — and a gesture that does not see every
+report of a press cannot hold an anchor for one. It is re-gated on every report for the same
+kind of reason: rbp can leave the screen under a press that is already down.
+
+**The zoom is still encoder-only.** `CursorWaveZoom` @`0x102720` is the binary's *only*
+caller of `setPlayModeWaveScale()` @`0x133734`, and its only caller is `BrowseEncoderRotate`
+@`0x1212a4` — a selector rotation. The on-screen `− ZOOM  GRID` (logical x 1130..1250,
+y 390..410) is an **indicator**: `ui::touch_panel::ZoomGrid`'s vtable at `0x004d8580` is
+referenced nowhere in the code, and three taps and a drag across it were measured on the
+glass to change nothing. So the swipe is spent as `K_SELECTOR` rotations — the same wire the
+encoder uses and the same one the UTILITY gesture drives — and rbp then zooms through **its
+own** code path, with its own clamping (0..4) and its own indicator.
+
+| the report | what happens |
+|---|---|
+| anything, and the gate is closed | **0**, and rbp gets the report untouched. This is every report of every touch anywhere but the performance screen |
+| down inside the rect, gate open | the press becomes **ours**; the landing point is the anchor and the current scale is the base. **0 sent** — a tap on the wave costs one report and does nothing |
+| down anywhere else | not ours, and it never becomes ours when it wanders in |
+| move, ours | whole steps out of the **vertical travel from the anchor**, minus what this press already sent, clamped to rbp's 0..4 ladder **from the base** — so a resting finger re-sends nothing, a wobble inside a band sends nothing, and a reversal pays back exactly what it overran |
+| move, not vertical (`|dy| < |dx|`) | **0**. A drag *along* the wave is rbp's own gesture — scrubbing, searching — and it must not zoom |
+| gate closes mid-press | the press stops being ours, silently; the rest of it is rbp's, and rbp has had every report of it all along |
+| release | **0**; the zoom is delivered while the finger moves |
+
+**Up is zoom IN.** `calcParticularWave` @`0x123014`'s samples-per-screen ladder is
+{1600,800,400,200,100} for scales 0..4, so a **bigger** scale is zoomed further in: the
+finger moving up makes the count positive. `WAVE_STEP_PX` is **40** logical px a step, and a
+step is crossed exactly at a multiple, in both directions.
+
+**The rect is `x 200..1080, y 60..480`**, measured off a live `/dev/fb0` capture of the
+performance screen at 1280×800: the top bar is y 8..41, the DECK 1/2 panels x 10..183,
+BEAT FX x 1090..1269 (rbp binds *touch* to that one and it stays his), the wave canvas
+y 47..490, the HOT CUE label row y 499..509 and the two pad rows y 518..567. The top edge is
+y 60 and not 47 for a second reason: the shim's swipe-down band takes rows 0..55 and **opens**
+on any press inside them, so a rect that reached into that strip could open the band out from
+under the gesture.
+
+### The gate
+
+`ComputeCursorMode` @`0x113084` returns the wave-zoom cursor mode only from its mode-1
+branch, and only when `uiBrowse[0x18] != 1` and the grid-adjust flag is clear. On that screen
+a selector rotation is either a wave zoom or a **beat-grid move**, and the beat grid is the
+analysis of the operator's own track — so the gate refuses the whole gesture while that flag
+is set. It reads the **live** flag (`0x03254a9c`), not the mirror rbp caches at `0x0216bad0`:
+the mirror is stale between rotations, and a stale copy here is a swipe that moves the grid.
+`RB_WAVE_ZOOM_OK()` in `rbp_abi.h` is that branch spelled out, so a step is sent exactly when
+rbp itself would have sent the rotation to the waveform.
+
+One condition rbp knows nothing about is added: **nothing of the shim's may be in front of
+that screen.** The band and the drawers are drawn *over* rbp's own, and zooming a waveform
+the operator cannot see is the same defect the UTILITY gesture's "nothing is up" terms exist
+to prevent. The operator's own answer applies — swipe the drawer away first.
+
+### What is measured, and what is not
+
+`test_wave.c` is **71 checks**: the four rect walls and the four regions the rect must stay
+clear of (the band's dead rows, the deck panels, BEAT FX, the hot-cue row), the module's
+private copy of the ladder pinned against `rbp_abi.h`'s, every term of the gate re-read
+mid-press, the latch rules, the step size in both directions, the ratchet's convergence and
+the exact payback of a reversal, the ladder's refusals at both ends, and the vertical-
+dominance rule. All 71 pass on the host, and the whole suite (`make test`) passes unchanged.
+
+**Not measured: the gesture on the operator's own finger.** The instruments are the ones
+that proved the pinch's *sending* half — `work/poke.py` drives the panel's pointer node with
+logical coordinates and the shim log answers with
+`pointsrc: wave zoom IN 1 step(s) at (600,300)` — and `work/zoomprobe2.py` is deployed and
+looping (`/tmp/zoomprobe2.log`, a known-good `ZoomGridDirection` marker plus the gate's three
+words) if the scale is wanted as a second witness. **A track must be loaded** on a deck before
+rbp will zoom at all: `IsAbleZoom` @`0x113574` returns 0 unless one of the two per-deck words
+at `0x03267238 + 0x1610` / `+0x1670` (stride `0x60`) reads 7 or 18, and an empty deck reads 1.
+
+**Stated limit, and it is the honest half of "additive".** Because the gesture does not
+consume the report, whatever rbp itself binds under the rect still fires: a *drag* along the
+wave reaching rbp's own needle-search path is exactly the case the dominance rule is there to
+keep apart from the zoom, but a press that is not vertical-dominant is still rbp's, and if
+that turns out to do something unwanted in the operator's hands the cure is to swallow the
+press at the down edge — which is the pinch's design, and would need the rect to be right for
+every screen rbp can be showing.
 
 ## Required files
 

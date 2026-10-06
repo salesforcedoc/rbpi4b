@@ -4,6 +4,22 @@ Symptom → cause → fix. Rows are grouped by subsystem; the ones marked
 **(previous target)** are kept because they explain a design decision in this
 port, even though the hardware that produced them is gone.
 
+**Start here.** Before working down any table, run the unit's own check:
+
+```sh
+sh /opt/rblive4/doctor.sh
+```
+
+It changes nothing — no write, no mount, no module load, no `systemctl` call; the
+one thing it executes is a chroot'd `busybox echo` — and it reports what it found
+plus a single paste-ready fix block. Its most valuable row is the one this port
+has most often got wrong: **each shim's deployed build against the copy `rbp` is
+actually loading**, read out of the running process's `/proc/<pid>/maps`. That
+answers "my new build made no difference" before you start debugging the build
+itself ([17](17-rx3-flx4-comparison.md), where the idea came from). Every path it
+tests comes from `rb.conf` and `lib.sh`, so it cannot drift from the scripts it
+is checking.
+
 ## Nothing works at all
 
 | Symptom | Cause | Fix |
@@ -135,6 +151,7 @@ the rectangle that was actually drawn into.
 
 | Tool | What it tells you |
 |---|---|
+| **`doctor.sh`** | The first thing to run on a unit whose behaviour does not match its build. Read-only by construction: it checks the layout, `rb.conf`'s schema, every shim's **deployed** build against the copy `rbp` is **actually loading** (from `/proc/<pid>/maps`) and each one's absence from the load list, whether `crashcatch.so` is first in `RB_LD_PRELOAD`, the chroot's ability to execute a 32-bit binary, `/dev/fb0` + `/dev/snd/seq` + `/dev/input`, `/dev/mem`'s mode, the four binds, the device stubs and FIFOs, `paudiog0`'s **absence**, the `etc/mtab` symlink, the unit's mode and enablement, the two media mounts, and whether `rbp` is running at all. Prints one paste-ready fix block; exits 1 if anything failed. Reachable as `sh install.sh doctor` ([13](13-raspberrypi4.md)) |
 | `tools/fbdump` | `/dev/fb0`'s real geometry, format, pan step — the present path's inputs ([06](06-display.md)) |
 | `tools/evdevdump --list` | every input device's name, caps and absinfo, plus a ready-to-paste `POINT_KIND`/`POINT_DEV` verdict ([07](07-touch.md)) |
 | `crashcatch.so` | SIGSEGV `pc`/`lr` → `/tmp/crash.log`. Load it when bringing a target up |

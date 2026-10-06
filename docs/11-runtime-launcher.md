@@ -82,6 +82,21 @@ line is what keeps the console off the screen at all
     (S10.6). When the exit *is* the restart the display watcher asked for, the
     request has already reached systemd, so stopping it here cancels nothing.
 
+    **"Report" is the word to be careful with.** The loop is `while kill -0 "$RBP";
+    do sleep 2; done`, and the last command on every path is an `echo` — so the
+    script exits 0 whatever rbp did, the unit always looks like a *successful*
+    stop, and **rbp's exit status is never captured**. Reading `start-rb: rbp
+    exited` therefore says only *that* it left, never *why*: a deliberate stop and
+    a player that died on its own print the same thing, and the journal is the only
+    place they differ (`Stopped rblive4.service` versus **`Scheduled restart job,
+    restart counter is at N`**). rbp has left on its own seven times between
+    2026-09-27 and 2026-10-05, and the reason is the one thing nothing on the box
+    recorded until the exit witness was armed — `crashcatch.so`, first in
+    `RB_LD_PRELOAD`, which interposes `exit`/`_exit`/`_Exit` and the fatal signals
+    and logs to disk at the chroot-relative `/root/pdj/crash.log`. **A death with
+    no line there is evidence too: it was SIGKILLed**, which is what `cleanup`
+    sends. The whole measurement is in [13](13-raspberrypi4.md) S3.7.
+
 ## The rbp launch line
 
 ```sh

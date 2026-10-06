@@ -687,7 +687,20 @@ override:
   level is re-asserted in;
 * only for a channel whose own control has not reported yet (`g_fader_seen[m]`).
   The moment the physical fader moves, the map's value takes over and the seed
-  stops being re-sent, so a fader that is physically down is *not* fought.
+  stops being re-sent, so a fader that is physically down is *not* fought. A
+  **side drawer's fader** (`07-touch.md`) counts as that control reporting: it
+  writes `g_fader[ch]` and `g_fader_seen[ch]`, so on a machine with no FLX4 the
+  drawer is the writer and the seed stops for that channel at the first touch.
+
+Those two arrays are defined **once**, in `fader_state.c`, with default visibility,
+and that object is linked into both `fbshim.so` and `knobshim.so` — because the seed
+lives in knobshim and the drawer's send lives in fbshim. A second copy would be
+invisible to the other shim and the seed would silently overwrite the operator's fader
+for the first 30 s of every run. `07-touch.md` shows the `R_ARM_GLOB_DAT` relocations
+and the live GOT entries that prove the two bind to one array. Measured in the running
+process after a drawer fader drag: `g_fader = (1023, 0, 1023)`, `g_fader_seen =
+(0, 1, 0)` — channel 1 claimed by the drawer, seed disarmed for it, and unchanged 35 s
+later.
 
 The consequence to know about: **on a first start, both channels come up at
 unity until their faders are touched once.** A channel fader parked at the
