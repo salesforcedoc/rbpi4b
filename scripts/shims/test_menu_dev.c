@@ -393,6 +393,8 @@ static void run_tick(void)
  * what the module would draw -- not a copy of the palette that could drift.
  * ------------------------------------------------------------------------- */
 
+/* One image per `pressed`: 0 (no cell) and every column. Sized off the column count
+ * rather than written as a literal, so a slide cannot index past the end of this. */
 static unsigned short ref[MZ_COLS + 1][FB_PITCH * MZ_PANEL_H];
 static int ref_built = -1;
 
@@ -501,6 +503,11 @@ static int outside_untouched(const char *what, int line)
  * ------------------------------------------------------------------------- */
 
 #define BTN_MID(i) ((menu_button_x0(i) + menu_button_x1(i)) / 2)
+/* The middle of a CELL as the gesture names them, which is now the middle of a column
+ * for every cell there is. It stays a separate name from BTN_MID() because the gesture
+ * numbers cells from 1 and the column geometry from 0, and mixing the two up slides to
+ * the neighbouring button without failing anything else. */
+#define CELL_MID(b) BTN_MID((b) - 1)
 
 /* The rows the gesture is driven at, DERIVED rather than written as the literals
  * they were. They were BTN_ROW 55 and BELOW_ROW 107, and both of those describe the
@@ -562,9 +569,9 @@ static void slide_to(int b)
     if (b == 0)
         feed(1, BTN_MID(2), BELOW_ROW);
     else
-        feed(1, BTN_MID(b - 1), BTN_ROW);
+        feed(1, CELL_MID(b), BTN_ROW);
     CHECK(menu_is_open(), "sliding to %d closed the panel", b);
-    CHECK(menu_pressed() == b, "the finger on button %d reads as %d", b, menu_pressed());
+    CHECK(menu_pressed() == b, "the finger on cell %d reads as %d", b, menu_pressed());
 }
 
 /* The operator's dismissal: a press that begins with the panel out, on the border
@@ -717,9 +724,9 @@ static void scenario_slide(void)
     }
     CHECK(menu_is_open(), "the slide closed the panel");
 
-    /* Every one of the thirteen transitions was incremental -- thirteen column
-     * rebuilds and no whole panel. The one transition that has nothing to carry
-     * over is the prewarm's, and that is not in this window. */
+    /* Every one of the twelve transitions was incremental -- twelve column rebuilds
+     * and no whole panel. The one transition that has nothing to carry over is the
+     * prewarm's, and that is not in this window. */
     CHECK(!log_has("whole panel for"), "a slide transition was classified whole-panel;"
           " the mask is not doing its job");
     CHECK(log_has("columns 0x"), "no slide transition logged a column rebuild");

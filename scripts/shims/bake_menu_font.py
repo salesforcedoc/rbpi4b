@@ -42,7 +42,10 @@ answered. It is one command to change, and the drills ask them to settle it by e
 
 WHY 8-BIT COVERAGE AND NOT 1-BIT INK. Because it is the only way to get the
 antialiasing that the operator asked for, and because it costs almost nothing:
-under 6 KB for the whole 37-glyph set at any size in the ladder above. The painter
+6.8 KB for the whole 73-glyph set at 16 px, and it scales with the square of the
+size, so about 15 KB at the top of the ladder above -- 37 of those glyphs are the
+panel's labels, which is what the first version of this file baked, and 36 more were
+added on 2026-10-04 for the browser window's URL bar and popup keyboard. The painter
 blends each covered pixel against the button colour; coverage 0 and coverage 255
 write *exactly* the background and label colours, so the panel's idempotence and
 conditional-restore rules (menu_paint.h) survive the change untouched.
@@ -75,7 +78,26 @@ DEFAULT_PX = 16
 # table this replaces, so menu_font_index() keeps its meaning and every existing
 # label keeps working. A label with a character outside this set draws a gap (see
 # menu_font_index in the generated header), which is what the old table did too.
-CHARS = " " + "0123456789" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+#
+# THE SET WAS EXTENDED ONCE, ON 2026-10-04, AND ONLY BY APPENDING. Lowercase and
+# ten punctuation marks went on the END, for the browser window's URL bar and
+# its popup keyboard (menu_keyboard.h): everything the panel already draws keeps
+# the index it had, so the seven menu labels are byte-for-byte the glyphs they
+# were -- verified by re-baking the old set on the machine that extended it and
+# diffing the header, which came back identical. That is the property to preserve
+# if this ever grows again, and it is why the punctuation is in this order and not
+# in ASCII order.
+PUNCT = "./-_:?=&@#"
+
+CHARS = (" " + "0123456789" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
+         "abcdefghijklmnopqrstuvwxyz" + PUNCT)
+
+# The keyboard's own alphabet, which is what the URL bar and any page input are
+# typed with, as opposed to the panel's labels above. It is checked against CHARS
+# below, so a key that would draw a gap is a failed bake rather than a keyboard
+# with a dead key on it.
+KEY_ALPHABET = ("0123456789" "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                "abcdefghijklmnopqrstuvwxyz" + PUNCT)
 
 LABELS = ["SOURCE", "BROWSE", "TAG LIST", "PLAYLIST", "SEARCH", "MENU"]
 COL_W = 1280 // 6
@@ -117,24 +139,74 @@ def hexdump(data, per_line=16):
     return "\n".join(out)
 
 
+def index_source():
+    """The generated lookup, built FROM CHARS so the map and the table cannot drift.
+
+    Three contiguous runs are ranges and the rest is a switch -- which is the shape
+    the hand-written version had, and it is worth keeping the ranges because they
+    read as what they are. What is new is that the offsets are computed here rather
+    than typed: appending to CHARS moves nothing that comes before it, and a run
+    inserted in the middle would change the numbers below without anyone editing
+    them, which is the failure this function exists to make impossible.
+    """
+    lines = []
+    lines.append("static inline int menu_font_index(unsigned char c)")
+    lines.append("{")
+    lines.append("    if (c == ' ')")
+    lines.append("        return 0;")
+    for lo, hi in (("0", "9"), ("A", "Z"), ("a", "z")):
+        lines.append("    if (c >= '%s' && c <= '%s')" % (lo, hi))
+        lines.append("        return %d + (c - '%s');" % (CHARS.index(lo), lo))
+    lines.append("    switch (c) {")
+    for i, ch in enumerate(CHARS):
+        if ch.isalnum() or ch == " ":
+            continue
+        lines.append("    case '%s':" % ("\\'" if ch == "'" else ch))
+        lines.append("        return %d;" % i)
+    lines.append("    }")
+    lines.append("    return -1;")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def check_alphabet():
+    """Every key the popup keyboard can draw must be a glyph in the atlas."""
+    missing = [c for c in KEY_ALPHABET if c not in CHARS]
+    if missing:
+        sys.exit("KEY_ALPHABET names %r, which CHARS does not carry -- those keys "
+                 "would draw a gap" % ("".join(missing),))
+    if len(set(CHARS)) != len(CHARS):
+        sys.exit("CHARS has a duplicate in it")
+    for c in "abcdefghijklmnopqrstuvwxyz":
+        if CHARS.index(c) != CHARS.index("a") + ord(c) - ord("a"):
+            sys.exit("the lowercase run is not contiguous")
+
+
 def main():
     px = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PX
     if not os.path.exists(TTF):
         sys.exit("%s is missing -- it is gitignored, so it exists only in a "
                  "checkout that has the firmware extracted" % TTF)
+    check_alphabet()
 
     ascent, descent, line, glyphs, cov = bake(px)
 
     widths = {}
     for lb in LABELS:
         widths[lb] = sum(glyphs[CHARS.index(c)][0] for c in lb)
-    ink_h = max(g[4] for g in glyphs)
+    # THE BAND, not the tallest glyph. Those were the same number for as long as the
+    # set was capitals, digits and a space -- every glyph had the same 11-row ink box,
+    # so the tallest ink was the band and INK_H, INK_TOP and INK_BOT were three ways
+    # of saying one thing. Lowercase brought descenders (the underscore reaches four
+    # rows under the baseline, 'i' and 'j' four rows above the capitals) and the two
+    # came apart: no single glyph spans rows 4..19, so INK_H as "the tallest ink"
+    # would be a number that describes nothing the layout can use. The band is what
+    # the name promises and what the witness needs, so the band is what it is, and the
+    # tallest glyph is only asserted to fit inside it.
     ink_top = min(g[2] for g in glyphs if g[4])
-    # Inclusive of the last ink row, so INK_BOT - INK_TOP + 1 == INK_H reads as the
-    # band it is -- the generator asserts that identity below and test_menu.c
-    # asserts it against the table.
     inkbot = max(g[2] + g[4] for g in glyphs) - 1
-    assert inkbot - ink_top + 1 == ink_h, (ink_top, inkbot, ink_h)
+    ink_h = inkbot - ink_top + 1
+    assert max(g[4] for g in glyphs) <= ink_h, (ink_top, inkbot, ink_h)
 
     body = "\n".join("    { %2d, %3d, %3d, %2d, %2d, %5d }," % g for g in glyphs)
 
@@ -170,10 +242,18 @@ def main():
  * glyph edges blend, and they blend against the button colour the painter already
  * knows.
  *
- * THE SET is space, '0'-'9' and 'A'-'Z' -- the same set in the same order as the
- * table this replaced, so menu_font_index() kept its meaning and every existing
- * label kept working. A character outside the set draws a gap of the space
- * advance's width rather than garbage, which is also what the old table did.
+ * THE SET is space, '0'-'9', 'A'-'Z', 'a'-'z' and %(punct)s -- with the first
+ * three in the same order as the table this replaced, so menu_font_index() kept its
+ * meaning and every existing label kept working. Lowercase and the punctuation were
+ * APPENDED, for the browser window's URL bar and its popup keyboard, and appending
+ * is the rule: everything the panel already draws keeps the index it had. A
+ * character outside the set draws a gap of the space advance's width rather than
+ * garbage, which is also what the old table did.
+ *
+ * THE SET IS ALSO THE KEYBOARD'S. menu_keyboard.h's keys name characters from it,
+ * and bake_menu_font.py's KEY_ALPHABET is checked against this same string at bake
+ * time -- so a key that would draw a gap fails the bake instead of shipping as a
+ * dead key.
  *
  * THE LAYOUT IS THE FONT'S OWN METRICS, not a fixed cell. Each glyph carries its
  * pen advance and the position of its ink box relative to the pen origin and to the
@@ -192,13 +272,26 @@ def main():
 #define MENU_FONT_DESCENT %(descent)d    /* below it                             */
 #define MENU_FONT_LINE    (MENU_FONT_ASCENT + MENU_FONT_DESCENT)
 
-/* space, then '0'-'9', then 'A'-'Z'. See menu_font_index(). */
+/* space, '0'-'9', 'A'-'Z', 'a'-'z', then the punctuation -- in that order. See
+ * menu_font_index() for the indices; the last run is listed there one case at a
+ * time because it is not a contiguous ASCII range. */
 #define MENU_FONT_GLYPHS  %(nglyph)d
 
-/* The tallest ink in the set, and the band it occupies inside the line box: rows
- * MENU_FONT_INK_TOP .. MENU_FONT_INK_BOT inclusive. test_menu.c asserts these
- * against the table, and the witness in menu_draw.c relies on the label band being
- * where this says it is -- it samples 15 points that must not be ink. */
+/* The punctuation run, in index order, appended after the lowercase -- the marks a
+ * URL needs and a label never did. menu_keyboard.h's bottom row is built from it, so
+ * the keyboard and the atlas name the same characters rather than two lists that
+ * agree today; test_menu.c uses it to place the runs. */
+#define MENU_FONT_PUNCT   "%(punct)s"
+
+/* The band the whole set's ink can occupy: rows MENU_FONT_INK_TOP ..
+ * MENU_FONT_INK_BOT inclusive, MENU_FONT_INK_H rows tall. It is the union over the
+ * glyphs and not one glyph's box -- a descender sets the bottom and the dot of an
+ * 'i' sets the top, and no single glyph touches both. It runs past MENU_FONT_ASCENT
+ * now that the set carries descenders, and still ends inside MENU_FONT_LINE.
+ *
+ * test_menu.c asserts these against the table, and the witness in menu_draw.c
+ * depends on the labels' ink being where the layout puts it -- it samples 15 points
+ * that must not be ink. */
 #define MENU_FONT_INK_H    %(ink_h)d
 #define MENU_FONT_INK_TOP  %(ink_top)d
 #define MENU_FONT_INK_BOT  %(inkbot)d
@@ -227,16 +320,7 @@ static const unsigned char menu_font_coverage[] = {
  * Unsupported characters are not an error: the painter draws them as a gap of the
  * space advance's width, so an unexpected character in a label is a gap rather
  * than a smear. */
-static inline int menu_font_index(unsigned char c)
-{
-    if (c == ' ')
-        return 0;
-    if (c >= '0' && c <= '9')
-        return 1 + (c - '0');
-    if (c >= 'A' && c <= 'Z')
-        return 11 + (c - 'A');
-    return -1;
-}
+%(index)s
 
 /* The glyph for a character, or the space when the font has none -- so a caller
  * never has to ask twice, and a gap is always the same width as a space. */
@@ -300,7 +384,8 @@ static inline int menu_font_selfcheck(void)
 #endif /* RBLIVE4_MENU_FONT_H */
 ''' % dict(here=HERE, px=px, ascent=ascent, descent=descent, nglyph=len(CHARS),
            ink_h=ink_h, ink_top=ink_top, inkbot=inkbot, line=line, body=body,
-           cov=hexdump(cov), covlen=len(cov))
+           cov=hexdump(cov), covlen=len(cov), index=index_source(),
+           punct=PUNCT)
 
     with open(OUT, "w") as f:
         f.write(src)

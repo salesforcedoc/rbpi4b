@@ -79,8 +79,12 @@
  * operator's own unit (2026-09-29, a raw dump of rows 0..119) the row profile is
  * frame 0..1, fill 2..7, BUTTONS 8..47, fill 48..53, frame 54..55, rbp's own black
  * at 56 -- so the drawn band is exactly these 56 rows and not one more. The label
- * ink is rows 23..33, 11 rows, which is menu_font.h's MENU_FONT_INK_TOP/HEIGHT
- * inside a 20-row line box centred in the band. The damage witness's band points
+ * ink is rows 23..33, 11 rows: the capitals' and digits' ink box, five rows into a
+ * 20-row line box centred in the band (rows 8..47 put the line box at 18, and the
+ * cap box runs 5..15 of it). Every character the seven labels use is in that box --
+ * menu_font.h's set has since grown lowercase and punctuation, which reach above and
+ * below it, but a label is capitals, digits and a space and the LAYOUT is the line
+ * box, so nothing here moved. The damage witness's band points
  * are the button band's edges one row in (menu_paint.c's menu_witness_point()),
  * i.e. rows 9 and 46 -- fourteen rows clear above the ink, thirteen below. It used
  * to be 5/16 and 11/16 of the PANEL, which is a proportion, and a proportion is
@@ -105,6 +109,31 @@
  * widest label, "USB STOP", is 65 px, so the seventh costs every label 31 px of
  * slack and none of them notices. */
 #define MZ_COLS        7     /* SOURCE BROWSE TAG LIST PLAYLIST SEARCH MENU USB STOP */
+
+/* THE EIGHTH CELL IS GONE, AND WHY IT WENT RATHER THAN CHANGED ITS MARK.
+ *
+ * It was the web cell: a mark in the panel's last 48 px that opened the deck's browser
+ * window -- the operator's own asks, "a > button for an extended menu and have it open
+ * up a browser window" and then "change the chevron to a web icon". The browser was
+ * ABANDONED 2026-10-04 ("ok, you can abandon the exercise, i don't need a browser"),
+ * which left the cell opening a window with no browser behind it: a live button that
+ * does nothing, sitting in the one band the operator looks at most. So the cell is
+ * REMOVED, not re-marked -- restoring the ">" would only make a dead button look like
+ * the one that used to work.
+ *
+ * WHAT THAT GIVES BACK. The seven were narrowed 182 -> 176 px to make the cell's 48,
+ * and removing it returns all six pixels to each of them. 1280 does NOT divide by 7
+ * (182.857 a column), so the columns are no longer equal -- menu_button_x0/x1 tile
+ * them exactly regardless, with no gap and no overlap, and that is the property
+ * menu_button_at() and menu_paint_cols() rest on; test_menu.c asserts it at every
+ * column rather than asserting a width. The widest label, "USB STOP" at 65 px, has
+ * more than 55 px of slack in the narrowest column either way, so no label moves.
+ *
+ * WHAT IS NOT GONE: the window module itself still ships and still works
+ * (menu_window.c, menu_window_paint.c, browser_link.c) -- the operator abandoned the
+ * browser, not the code -- and menu_draw.c's MENU_WINDOW=1 opener still opens it. What
+ * is gone is the menu's door to it, because a door to nowhere is worse than no door. */
+#define MZ_BTN_W        MZ_LOGICAL_W   /* 1280: what the seven tile on their own */
 
 /* The touch space, in logical px. 1280x800 on every panel this port runs on --
  * the numbers fb_cursor.c calls POINT_LOGICAL_W/POINT_LOGICAL_H. Literals here
@@ -176,14 +205,21 @@
  * confirmed it by feel: asked whether the delay was right, the operator said "yes
  * right amount of delay" (2026-09-29). It ships as measured and felt.
  *
- * MZ_HOLD_KEY_MS -- how long the KEY is held, and it is a synthesized number: the
- * panel fires on the *release*, so the operator's own duration cannot be replayed
- * to rbp as a key-down (firing at the down edge would send keys during the
- * dismiss-swipe -- see the fire-on-release rule below). It has to exceed rbp's
- * measured upper bound of 400 ms with room, and the release then has to be sent at
- * all, which costs the caller one bounded sleep per hold -- the same trade the tap
- * replay makes for its 45 ms. test_menu.c asserts both inequalities, so a retune
- * cannot quietly land under rbp's threshold.
+ * MZ_HOLD_KEY_MS -- how long the KEY is held, and it is a synthesized number, not
+ * the finger's own duration. What rbp's timer has to see is a key-down at least as
+ * long as its threshold, and a finger that qualifies as a hold here may clear
+ * MZ_HOLD_FINGER_MS by a single millisecond -- which is *inside* rbp's measured
+ * 300..400 ms band -- so the finger's duration would reach UTILITY by luck. A fixed
+ * span that clears the band's upper bound with room does it every time, and costs
+ * the caller one bounded sleep per hold -- the same trade the tap replay makes for
+ * its 45 ms. test_menu.c asserts both inequalities, so a retune cannot quietly land
+ * under rbp's threshold.
+ *
+ * (The old reason this read differently has gone: the key used to go out at the
+ * release, so firing at the down edge would have sent rbp keys during a press that
+ * turned out to be the dismiss-swipe. The swipe cannot fire at all now -- the mid-
+ * press rule below requires the press to have started on a button -- and the key
+ * goes out at the threshold with the finger still on the glass.)
  *
  * MZ_HOLD_FINGER_MS <= 0 turns the hold off: menu_hold_fires() is then always 0
  * and every press is a plain tap again. That is the A/B lever, and the bench knob
@@ -204,10 +240,12 @@ int menu_button_x1(int i);
  * comes from menu_text_width(). */
 const char *menu_label(int button);
 
-/* Which button a logical point is over: 1..MZ_COLS, or 0 for none. A point in the
- * panel but in the border, or in the strip above the buttons, is 0 -- "not a
- * button" and "outside the panel" are the same answer to the only question the
- * gesture asks, which is why there is no third value. Bounds are inclusive. */
+/* Which cell a logical point is over: 1..MZ_COLS for a labelled button, or 0 for
+ * none. A point in the panel but in the border, or in the strip above the buttons,
+ * is 0 -- "not a cell" and "outside the panel" are the same answer to the only
+ * question the gesture asks, which is why there is no further value. Bounds are
+ * inclusive. The seven columns tile the whole logical width, so every x that is in
+ * the button band answers with a column; 0 is reached by y alone. */
 int menu_button_at(int x, int y);
 
 /* What menu_feed() decided about one report, in full. The caller's skeleton is:
@@ -256,6 +294,14 @@ int menu_button_at(int x, int y);
  *                                          finger; an upward MZ_CLOSE_PX from the
  *                                          press start closes it, same verticality
  *                                          test.
+ *   while down, open, and this         -- once the finger has been down
+ *   press started on a button             MZ_HOLD_FINGER_MS, the panel closes itself
+ *                                         and the button fires, the finger still on
+ *                                         the glass: menu_hold_pending() below.
+ *                                         The one rule here that is the caller's
+ *                                         CLOCK rather than a position, and it is
+ *                                         why the key can now be held for as long
+ *                                         as rbp's own timer needs -- see below.
  *   release, started open               -- fires *button if it started and ended
  *                                          on the same button, then closes. A
  *                                          release on the background, off a
@@ -319,6 +365,29 @@ int menu_feed(int down, int x, int y, int *button);
  * from the caller (the bench knob over MZ_HOLD_FINGER_MS); <= 0 means "hold off".
  * held_ms < 0 means the caller has no measurement for this press, which is a tap. */
 int menu_hold_fires(int held_ms, int threshold_ms);
+
+/* The same hold, asked WHILE the finger is still down. Returns the button that has
+ * just become a hold -- having closed the panel itself -- or 0.
+ *
+ * menu_hold_fires() answers "was this press long enough" for a press that is over.
+ * This answers it for one that is not, and it exists because the operator said the
+ * difference out loud (2026-10-04): *"for holding the MENU to get utility, after two
+ * seconds the menu should disappear and it should just go to utility by itself"*.
+ * rbp's timer runs on the KEY and does not care when the panel lifts, so firing the
+ * hold only at the release cost nothing functionally and everything in feel: the
+ * panel sat there showing no reaction for as long as the finger stayed down, and
+ * only the lift told the operator anything. The threshold is the *same* number and
+ * is shared with the release path -- MZ_HOLD_FINGER_MS, which they had already
+ * approved by feel -- so this changes only WHEN the same hold is answered, never
+ * what counts as one. It is not a second, longer press to learn.
+ *
+ * Called on a press that is still down, once per tick of the caller's clock. The
+ * first call that sees held_ms >= threshold_ms closes the panel and returns the
+ * button; every later call returns 0, because a closed panel has no button to hold
+ * and because the press stays swallowed to its end -- the release that follows is
+ * the MZ_FEED_TAKEN it already was, so the caller must not treat that release as a
+ * second fire. */
+int menu_hold_pending(int held_ms, int threshold_ms);
 
 /* Where the press that menu_feed() just answered MZ_FEED_TAP for began, in logical
  * px -- the point the replay is emitted at, and the point the operator actually

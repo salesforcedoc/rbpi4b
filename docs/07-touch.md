@@ -206,11 +206,16 @@ two transcriptions equal.
 what I am seeing?" question — with it off, a scan of `/dev/fb0` finds no arrow at
 all, which is how the feature was verified rather than merely eyeballed.
 
-**The real fix for the flicker, not attempted:** a hardware cursor plane
-(`drmModeSetCursor` on `/dev/dri/card0`), which the display controller composites
-independently of anything rbp paints. It would make the redraw rate irrelevant.
-It is out of scope because it means taking DRM master from the mode DirectFB set
-up, which is a good way to lose the display.
+**The real fix for the flicker, being attempted:** a second DRM plane on
+`/dev/dri/card1`, which the display controller composites independently of
+anything rbp paints. It would make the repair rate irrelevant.
+
+*This paragraph used to name `/dev/dri/card0` and `drmModeSetCursor`, and both were
+wrong:* `card0` is `v3d`, the render node, and `card1` is `vc4-drm`, which is what fb0
+(`vc4drmfb`) scans out of. The device inventory, the two instrument traps and the
+result are in [the overlay-plane section](#the-overlay-plane-on-card1--the-cure-that-does-not-go-through-rbp)
+below; what belongs here is only the pointer, because this is the section a reader
+arrives at when they ask why the arrow costs what it costs.
 
 ### What is verified on the Pi, and what is not
 
@@ -597,16 +602,22 @@ Two rules keep rbp's stream honest:
   (which is `touch_zone.c`'s rule), because the shim owns the highlight here and
   slide-off-to-cancel is what a button is expected to do. Nothing is replayed while
   the panel is open: a press that dismisses it must not also press what is under it.
-* **The fire has two forms, and the second is rbp's**: a release whose press was down
-  for `MZ_HOLD_FINGER_MS` (350) or more sends the same keycode **held** for
+* **The fire has two forms, and the second is rbp's**: a press that was down for
+  `MZ_HOLD_FINGER_MS` (350) or more sends the same keycode **held** for
   `MZ_HOLD_KEY_MS` (500 ms) instead of a press/release pair. The rule is
   `menu_hold_fires()` in this module — pure, host-pinned, and off when the threshold
-  is ≤ 0 — while the clock that feeds it is `pointsrc.c`'s, read at the press's two
-  edges. It exists because rbp gives MENU two meanings on one keycode and runs the
-  timer itself ([08](08-controls.md) note 13), so the shim's only job is to hold the
-  key past rbp's threshold. Holding the other five buttons was measured to land where
-  a tap lands, and the generic hold is deliberate: the alternative is a per-button
-  table that would have to be re-measured every time rbp's firmware is.
+  is ≤ 0 — while the clock that feeds it is `pointsrc.c`'s. It exists because rbp gives
+  MENU two meanings on one keycode and runs the timer itself
+  ([08](08-controls.md) note 13), so the shim's only job is to hold the key past rbp's
+  threshold. Holding the other five buttons was measured to land where a tap lands,
+  and the generic hold is deliberate: the alternative is a per-button table that would
+  have to be re-measured every time rbp's firmware is.
+* **And it fires while the finger is still down.** `menu_hold_pending()` answers the
+  same question mid-press: the moment the threshold passes, the panel closes itself
+  and the button fires, with the finger still on the glass, and the release that
+  follows is the silent swallow it always was. The threshold is the same 350 ms, shared
+  with the release path — this moved *when* the same hold is answered, not what counts
+  as one. See below.
 * **Dismissal:** a press that began open and travels `MZ_CLOSE_PX` (56) upward,
   predominantly vertically, closes the panel mid-press. It may start anywhere — the
   operator must be able to travel up without starting on the panel.
@@ -629,6 +640,45 @@ label therefore sits in a 182 px column with 117 px of margin, and the seventh c
 the other six 31 px each — the reason the drawn band was never narrowed to the entry
 zone's third of the screen, which would have cut a column to 61 px and truncated
 words ([menu_zone.h]'s `MZ_COLS` note).
+
+**The panel briefly had an eighth cell, and it is gone again (2026-10-04).** It was a
+globe in the band's last 48 logical px, and a tap on it opened the deck's browser
+window — the operator's own asks (*"add a > button for an extended menu and have it open
+up a browser window"*, and then *"change the chevron to a web icon"*). The browser was
+**abandoned** the same day the window shipped (*"ok, you can abandon the exercise, i
+don't need a browser"*), which left the cell opening a window with nothing behind it: a
+live button that does nothing, in the band the operator looks at most. So the cell was
+**removed rather than re-marked** — restoring the `>` would only make a dead button look
+like the one that used to work — and the seven columns retiled over it. The 182×40 px
+each described above is what they have again: `MZ_BTN_W` is `MZ_LOGICAL_W`, and
+`MZ_EXPAND_W`, `MZ_BTN_EXPAND`, `menu_expand_x0/x1` and the globe's own drawing
+(`menu_paint.c`'s `menu_web_cov()`) are deleted, with `test_menu.c`'s tiling assertions
+and `test_menu_dev.c`'s slide putting the panel's right edge back on the last column.
+The window module itself still ships and still works — `menu_window.c`,
+`menu_window_paint.c`, `browser_link.c`, `tools/rbrowser/` — because what the operator
+abandoned was the browser, not the code; what is gone is the menu's door to it, and
+`MENU_WINDOW=1` in `menu_draw.c` is now the only way in — which is also how the window's
+own close and minimize marks were pressed on the glass when the chrome was settled.
+
+**Measured after the removal, on the unit by injection into the panel's own node**
+(`fbshim.so` md5 `78c2d7420bcef0e80a8ef8fbaa294c5a`, 2026-10-05, `work/poke.py`'s `drag:`
+to open the panel and `touch:` to press). A press at logical x **1079** — which the
+seventh column owned before the retile (`USB STOP`, 1056..1231) — now logs `menu 'MENU'
+held 361ms (hold is 350ms) -> key 0x206`, and the control at logical x **1004** (MENU in
+both geometries) answers identically, so the instrument and the discriminator agree. The
+globe's own pixels, logical 1232..1279, are the seventh column's now, and that is why this
+drill stops at 1079: a press there is a press on `USB STOP`, and `USB STOP` stops the
+operator's media — the exact reason the cell could not be left in place as a dead button
+and the exact reason it is not tapped to prove it. What pins those pixels is the tiling
+assertion in `test_menu.c` (every column, x 0..1279 with no gap), which the same run's
+two points agree with. Host suite green at the same binary: `test_menu` 6,572 checks,
+`test_menu_dev` 79 on both strides, `test_window` 258, `test_keyboard` 1,044.
+
+**And confirmed off the glass by the operator's own eye, 2026-10-05** — *"yep it looks
+good"*, swiping the bar down on the deployed `fbshim.so` `78c2d742…`. That is the one
+thing injection could not say: a drill can prove which column a point now answers with,
+but only the eye can say a mark is **absent**, and it is absent because the seven columns
+own those pixels rather than because the drawing is broken.
 
 `POINT_MENU_MOUSE=1` is the bench override that makes the menu answer a *relative*
 device too. It is off by default because a mouse has no swipe, and because it keeps
@@ -845,6 +895,44 @@ default and not a bench setting, and it now rests on a finger as well as on the
 boundary measurement above. The one thing still unasked is whether the ~500 ms the shim holds the key
 for (`MZ_HOLD_KEY_MS`) feels like the player's own button — the finger decided when the
 hold *starts*, not how long the key is then pressed.
+
+**The same hold now fires the moment it becomes one, and the operator's own log is
+what asked for it** (2026-10-04): *"for holding the MENU to get utility, after two
+seconds the menu should disappear and it should just go to utility by itself"*. The
+"two seconds" is a description of the old behaviour, not a new threshold, and the
+shim's own log proves it — the line this port shipped with, from their finger:
+
+```
+pointsrc: menu 'MENU' held 3368ms (hold is 350ms) -> key 0x206 down for 500ms, rbp's own hold action
+```
+
+**3368 ms**: they held MENU for three and a third seconds, and the key did not go out
+until they let go, because that was where the fire-on-release rule put it. rbp's timer
+runs on the *key*, which the shim only presses at that moment, so the panel showed no
+reaction for as long as the finger stayed down and the lift was the first thing that
+told them anything. `menu_hold_pending()` now closes the panel and returns the button
+at the threshold instead, and `read_loop_abs()` polls on a 20 ms tick
+(`POINT_MENU_HOLD_TICK_MS`) rather than blocking in `read()` while such a press is
+outstanding — the only press in that loop that can complete with no event to wake it.
+The gate is `menu_pressed()`, so every other press is answered by the blocking read
+exactly as before, and the `press_btn`/`cur_btn` guards mean the swipe that opens the
+panel and a press on the panel's border can no more become a hold than they can fire
+on release. The threshold did **not** move: 350 ms stands, as felt and approved above.
+
+Measured on the unit by injection (`work/poke.py`, panel swiped open, `touch:1508,37,2000`
+= logical `(1004,27)` = the MENU column, with the device silent for the whole 2 s —
+which is the case a purely event-driven loop cannot answer):
+
+```
+pointsrc: menu button 6 held 360ms and the finger is still down -> the panel dismissed itself
+pointsrc: menu 'MENU' held 360ms (hold is 350ms) -> key 0x206 down for 500ms, rbp's own hold action
+menu: panel closed
+```
+
+360 ms of a 2000 ms hold, two log lines and nothing else for the remaining 1640 — no
+second fire, no re-open, no tap replayed. The same drill on the USB STOP column
+(`touch:1783,37,2000`) fires button 7 identically, which is the generic-hold rule
+above still holding.
 
 #### UTILITY is not a touch screen
 
@@ -1088,6 +1176,46 @@ change and these are its terms:
   also the sound card. That is the number to weigh against a few hundred µs of
   shimmer, and it is the operator's to weigh.
 
+**"Could we run it 60 fps and be rid of it?" — measured, and the answer is the
+opposite** (`work/menu31.sh`, 2026-10-03: `fbpanel`, 6000 samples at a nominal
+500 µs, the panel opened and closed by injection so no hand is in the run). The
+question was the operator's, and it is the right question to ask of a *compositor*
+and the wrong one for this design, because of one number: what ships is
+`POINT_MENU_MS=0.1`, so the repair poll runs at **10,000 Hz** — ~167× faster than
+60 fps and ~570× faster than the 57.1 Hz at which rbp erases the band. The panel is
+not presented; it is **repaired**, and slowing the repair can only widen the window
+that rbp's own repaint leaves erased.
+
+| `POINT_MENU_MS` | rate | duty | worst miss run |
+|---|---|---|---|
+| 0.1 (shipped default) | 10,000 Hz | **99.07 %** | **857 µs** |
+| 0.5 | 2,000 Hz | 97.05 % | 1807 µs |
+| 10 | 100 Hz | 71.20 % | 6–10 ms |
+| **16.67 ("60 fps")** | **60 Hz** | **53.83 %** | **16761 µs** |
+
+At 60 fps the band is **absent for 47.12 % of the window** (194 miss runs, 47.12 %
+total, `neither` — no border pixel at all — in 2700 of 6000 samples) against 0.96 %
+in the same session at the shipped setting. That is **49× worse**, and the histogram
+says why rather than merely that: 76 runs exceed 10 ms and the longest is **16761 µs,
+one tick to the microsecond**. The miss is not random — it is bounded above by the
+repair period, because the only thing that ever notices rbp's clobber is the poll.
+Shortening the tick shortens the miss and lengthening it lengthens the miss, which is
+precisely the property a frame-rate change cannot exploit. **60 fps cannot prevent
+this flicker; it is the worst setting measured.** The cure has to stop the band being
+erased — F5, or a presenter — and no tick is a substitute for it.
+
+*The instrument was stale on the first attempt and nearly produced a plausible wrong
+answer.* `/opt/rblive4/fbpanel` was built 2026-09-29 12:44, **before** `PANEL_ROWS`
+was halved to 56, and it announced itself as `panel rows 0..111`: it read rows 110-111
+— 56 rows *below* the 56-row panel — as the bottom border, so the bottom pair was
+never ours and the trace came back as a `T`/`.` storm reading `duty 0.0%, bottom
+0/row`. The tell was in the tool's own first line, not in the duty. Rebuilt from the
+tree (`arm-linux-gnueabi-gcc -O2 -static -march=armv5t -mfloat-abi=soft`) and
+redeployed, it reads `panel rows 0..55` and its first point reproduces the 99.07 %
+floor above. **A measurement tool deployed on the unit is a deploy like any other**
+— check its vintage before believing a number, and prefer the case where the tool
+prints the constant it was built with.
+
 **Nothing here is a defect left open.** The press-boundary blanking is fixed and
 measured (above), the tick is priced on the unit, and what remains is bounded,
 counted and cheaper than its cure. The plan that carries F5 in full is
@@ -1096,6 +1224,87 @@ so the terms above are the record, and the questions that are *not* the flicker
 (swipe height, button size, label legibility, the 45 ms tap delay, the seventh
 button, the replay in daily use) are listed in [13](13-raspberrypi4.md)'s S3.5 row
 under **Only the operator can settle**.
+
+#### The overlay plane on `card1` — the cure that does not go through rbp
+
+Everything above treats the band as something the shim has to keep *putting back*.
+There is a route that removes the contest instead of winning it: scan the band out of
+a **second DRM plane**, which rbp's redraw cannot reach because rbp's redraw is a write
+into the *primary* plane's memory and nothing else. `docs/07` has carried that as "the
+real fix, not attempted" since the flicker was first measured. On 2026-10-03 it was
+attempted, and the mechanism is on the glass.
+
+**The device, corrected.** That note used to say `drmModeSetCursor` on `/dev/dri/card0`.
+Measured with `work/drmplane.c probe`: **`card0` is `v3d`, the render node, with no CRTC
+at all**; `card1` is `vc4-drm` (`brcm,bcm2711-vc5`, `OF_FULLNAME=/gpu`). fb0 is
+`vc4drmfb`, and the probe finds **`plane 91, type=PRIMARY, BOUND crtc=102 fb=722`** —
+`crtc[3]` is the one live CRTC at 1280×800, and fb 722 is the buffer rbp draws into.
+So rbp's framebuffer *is* the vc4 primary plane, and the band wants an **overlay**
+plane beside it, not a cursor plane.
+
+The inventory is **60 plane objects** — 6 primary (ids 48, 67, 79, 91, 103, 115), 48
+overlay (127…644), 6 cursor (655…710) — of which **16 overlays carry
+`possible_crtcs=0x3e`**, so they can target the live CRTC, and all report 39 formats
+with `XR24` first.
+
+**Two instrument traps, both of which produced a confident wrong answer first.** A
+client that has not raised `DRM_CLIENT_CAP_UNIVERSAL_PLANES` is shown **only the 48
+overlays** — the primaries and cursors are absent from the list entirely, so the first
+probe reported 48 planes and no primary, and read like hardware that had none. And
+`drm_mode_get_plane` returns `EINVAL` when the caller's `count_format_types` is smaller
+than the plane's real format count, which is **39** here, not the 32 that was assumed;
+a `continue` on failure then turned that into a short plane list *and* an empty format
+list, i.e. "this hardware has no XRGB8888 overlay". Ask the count with
+`count_format_types = 0` first, then ask for that many.
+
+**The third trap is a 32-bit one.** `mmap` of the dumb buffer failed with `EINVAL`
+until the build added `-D_FILE_OFFSET_BITS=64`. DRM hands out fake mmap offsets
+starting at `DRM_FILE_PAGE_OFFSET_START`, which is exactly `0x100000000` = 4 GiB — the
+tool now prints `map_dumb offset=0x1001f4000` — and a default `off_t` on this target is
+32 bits, so the offset truncated to 0 and `drm_gem_mmap` found no object there. The
+symptom names the buffer; the cause is the argument. Compare
+[13](13-raspberrypi4.md)'s `long`-is-4-bytes clock wrap: on this target, check the
+width before believing the error.
+
+**What the kernel says while it is held**, with the panel open and rbp redrawing, from
+`/sys/kernel/debug/dri/1/state`:
+
+```
+plane[91]: plane-3   crtc=pixelvalve-2  fb=722  format=RG16  normalized-zpos=0
+                     allocated by = [fbcon]
+plane[127]: plane-6  crtc=pixelvalve-2  fb=723  format=XR24  normalized-zpos=1
+                     allocated by = drmplane   crtc-pos=640x56+0+0
+```
+
+Both planes on the **same** CRTC, ours at the higher zpos, i.e. composited over rbp's
+picture and out of its reach. On exit the plane reads `crtc=(null) fb=0` again, and the
+primary is untouched throughout — so taking DRM master did not disturb the mode
+DirectFB set up, which was the stated reason for never attempting this.
+
+**PASS, on the operator's own eye, 2026-10-04.** The bar was deliberately only the
+**left half** of the strip (`x 0..639`, rows 0..55) so the test carried its own
+negative control in one glance, and that is exactly how it read: *"yep. i see the
+magenta, its solid and the other side flickers"*. One half of one strip, one process,
+both regimes — so the flicker is not a property of the panel, of the tick, or of the
+band's content, and the cure is to stop the band being rbp's drawing at all. The drill
+is `work/drmbar.sh`; it is not installed at boot, so a reboot always clears it, and
+`pkill -x drmplane` (or `/opt/rblive4/drmplane off`) clears it sooner.
+
+**What the follow-on costs is smaller than it looks, and one measured detail is why.**
+The band is drawn by `menu_paint.c` in the *framebuffer's* pixel format, which on this
+unit is **RG16** (RGB565, pitch 2560) — see `plane[91]`'s `format=RG16` above. The vc4
+overlay planes list **`RG16` among their 39 formats**, so a plane can be created in
+exactly the format the band is already drawn in: same pixels, same pitch, same
+`menu_paint()` call, different buffer. The change is therefore *where the band's writes
+land*, not what they contain.
+
+That in turn retires the repair machinery rather than tuning it. `menu_draw.c`'s tick
+exists to notice that the band is gone and put it back (its "witness", `menu_paint.h`),
+and both of those are answers to rbp overwriting the band. If the band is not in rbp's
+buffer, there is nothing to witness and nothing to repair, and the tick can fall back to
+noticing only *content* changes — a tap, an open, a close. **The fallback must stay
+exactly as it is today** for any machine where the plane cannot be set up: the DRM path
+is an addition, and its failure has to leave the shipped behaviour untouched.
 
 **The six buttons, with the positive control in the same run.** Each was tapped
 through the panel with the shipped table, from a known screen:

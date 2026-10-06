@@ -37,15 +37,18 @@
  *    differs only inside the pressed button, and that no label pixel ever lands
  *    outside its own column -- at every panel size, not just at 1280x800.
  *
- * 5. The press-and-hold, which is the button's SECOND meaning and the one thing in
- *    this module that looks at how long a finger was down: menu_hold_fires() and
- *    the two constants it splits, against the measurement they were chosen from
- *    (rbp's own timer accepts a hold between 300 and 400 ms). The failure this
- *    stands in front of is a retune: drop the synthesized key under rbp's threshold
- *    and a long press on MENU quietly stops being UTILITY, with nothing else in the
- *    tree to say so. Also pinned: the gesture a hold ends on is the gesture a tap
- *    ends on, so a long finger cannot fire a *different* button or survive the
- *    slide-off-to-cancel rule.
+ * 5. The press-and-hold, which is the button's SECOND meaning and the only two
+ *    things in this module that look at how long a finger was down: menu_hold_fires()
+ *    and menu_hold_pending(), and the two constants the first splits, against the
+ *    measurement they were chosen from (rbp's own timer accepts a hold between 300
+ *    and 400 ms). The failure this stands in front of is a retune: drop the
+ *    synthesized key under rbp's threshold and a long press on MENU quietly stops
+ *    being UTILITY, with nothing else in the tree to say so. Also pinned: the gesture
+ *    a hold ends on is the gesture a tap ends on, so a long finger cannot fire a
+ *    *different* button or survive the slide-off-to-cancel rule -- and, for the
+ *    mid-press answer, that it closes the panel at the threshold rather than at the
+ *    lift, that it fires the button only once, and that the release still to come is
+ *    the silent swallow it has always been.
  *
  * Build + run (static, so no rootfs is needed to load it):
  *     make test
@@ -156,6 +159,12 @@ static struct menu_view mkview_pix(int fw, int fh, void *pix)
  * rather than through a copy of the column arithmetic: a pixel belongs to button i
  * exactly when classifying with i pressed reports it as pressed. Returns 0 for a
  * pixel that belongs to no button (fill, border, seam, or outside). */
+/* WHICH CELL OWNS THIS PIXEL, asked the only way that cannot be fooled: paint the
+ * pixel as if each cell in turn were pressed and see which one changes it. That is
+ * what makes it a test of the drawing rather than a copy of the geometry. The loop is
+ * the seven labelled columns because they are the whole panel's width again -- when
+ * the menu had an eighth cell its mark was ink and had to be asked too, or every pixel
+ * of it would have been reported as belonging to no cell at all. */
 static int owner_of(const struct menu_view *v, int fx, int fy)
 {
     int i;
@@ -177,12 +186,21 @@ static void test_geometry(void)
 
     CHECK(menu_button_x0(0) == 0, "column 0 does not start at 0 (got %d)",
           menu_button_x0(0));
+    /* THE SEVEN REACH THE PANEL'S EDGE AGAIN, because the menu's eighth cell went with
+     * the browser (menu_zone.h's block). The panel's right edge is the LAST COLUMN's
+     * now, and that is what this asserts -- a menu that still stopped the columns at
+     * 1232 would leave a 48 px dead strip where the globe used to be, and the operator
+     * would see it as a gap rather than as a bug. */
     CHECK(menu_button_x1(MZ_COLS - 1) == MZ_LOGICAL_W - 1,
           "the last column does not end at %d (got %d)", MZ_LOGICAL_W - 1,
           menu_button_x1(MZ_COLS - 1));
+    /* ...and the widths are NOT all equal, which is worth pinning rather than
+     * glossing: 1280 does not divide by 7, so menu_button_x0/x1 give 182, 184...184,
+     * 183. The tiling below is the property that matters; a test that asserted
+     * MZ_BTN_W % MZ_COLS == 0 as well would be asserting something untrue. */
 
     /* Tile exactly: each column starts one past the last one's end, and the widths
-     * add up to the whole logical width. */
+     * add up to MZ_BTN_W. */
     for (i = 0; i < MZ_COLS; i++) {
         int w = menu_button_x1(i) - menu_button_x0(i) + 1;
 
@@ -192,13 +210,34 @@ static void test_geometry(void)
                   "column %d starts at %d, one past column %d's end at %d",
                   i, menu_button_x0(i), i - 1, menu_button_x1(i - 1));
     }
-    /* Spelled off MZ_COLS rather than off a number: this assertion is the canary
-     * for "the column count changed and nothing else was updated", and a literal
-     * 213 here would go on passing at six columns and fail at seven -- which is
-     * precisely the change it exists to catch. (At 1280 px it reads 213 at six
-     * columns and 182 at seven.) */
-    CHECK(menu_button_x0(MZ_COLS - 1) + 0 == MZ_LOGICAL_W - 1 - (MZ_LOGICAL_W / MZ_COLS),
-          "the last column's width changed");
+    /* THE COLUMNS COVER THE WHOLE BAND, spelled off MZ_COLS rather than off a number.
+     * This is the canary for "the column count changed and nothing else was updated":
+     * the total above is 1280 at seven columns, 1280 at six and 1280 at eight, but the
+     * pair of bounds that produce it move with the count, so a stale literal -- 1279
+     * from the six-column band, or 1231 from the retile that made room for the globe --
+     * fails here.
+     *
+     * AND THEY ARE NOT ALL THE SAME WIDTH, which is the other half of the canary: 1280
+     * does not divide by 7, so they are 182, 184, 184, 184, 184, 184, 183. An exact
+     * tiling is what the seam rule in class_in_layout() and the masked repaint in
+     * menu_paint_cols() both rest on; equal widths would be nicer and are not on offer
+     * at this width, and a test that asked for them would be asking for a lie. */
+    CHECK(menu_button_x0(0) == 0 && menu_button_x1(MZ_COLS - 1) == MZ_LOGICAL_W - 1 &&
+          menu_button_x1(MZ_COLS - 1) - menu_button_x0(0) + 1 == MZ_BTN_W,
+          "the columns span %d..%d, not 0..%d",
+          menu_button_x0(0), menu_button_x1(MZ_COLS - 1), MZ_BTN_W - 1);
+    {
+        int lo = menu_button_x1(0) - menu_button_x0(0) + 1;
+        int hi = lo;
+
+        for (i = 1; i < MZ_COLS; i++) {
+            int w = menu_button_x1(i) - menu_button_x0(i) + 1;
+
+            if (w < lo) lo = w;
+            if (w > hi) hi = w;
+        }
+        CHECK(hi - lo <= 1, "the columns run from %d to %d px", lo, hi);
+    }
 
     /* Inclusive at both ends, and one pixel outside on each side is the neighbour
      * -- not a gap, and not this column. */
@@ -259,8 +298,10 @@ static void test_geometry(void)
                   "button %d's label has a character the font cannot draw: '%c'",
                   i, s[j]);
             CHECK(!(s[j] >= 'a' && s[j] <= 'z'),
-                  "button %d's label is lowercase, and the font has no lowercase",
-                  i);
+                  "button %d's label is lowercase: the panel is set in capitals, and"
+                  " the atlas has carried lowercase since the window's keyboard"
+                  " needed it, so this is a style pin now and no longer a font"
+                  " limitation", i);
         }
         for (j = 1; j < i; j++)
             CHECK(strcmp(menu_label(j), s) != 0, "buttons %d and %d share a label",
@@ -282,8 +323,16 @@ static void test_geometry(void)
  * work/bake_menu_font.py). What the tests can still pin without re-rasterising it:
  * that the table is well formed, that every character any label uses has ink, that
  * the advances are the ones the layout will centre with, and -- the one with teeth
- * -- that the tallest ink really is where MENU_FONT_INK_TOP/BOT say it is, because
- * the damage witness's sample rows are chosen against that band.
+ * -- that no glyph's ink leaves MENU_FONT_INK_TOP..MENU_FONT_INK_BOT, because the
+ * damage witness's sample rows are chosen against that band.
+ *
+ * The set is no longer just the panel's labels. Lowercase and ten punctuation marks
+ * were appended on 2026-10-04 for the browser window's URL bar and its popup
+ * keyboard, and two of the pins below moved with them: 'Z' is no longer the last
+ * glyph and 'a' is no longer absent. The append-only rule is what keeps the rest of
+ * this file -- and the operator's seven felt buttons -- untouched, and the keyboard's
+ * own alphabet is now pinned here too, so a key the atlas cannot draw is caught on
+ * the host rather than found as a blank cap on the glass.
  * ------------------------------------------------------------------------- */
 static void test_font(void)
 {
@@ -384,15 +433,47 @@ static void test_font(void)
     CHECK(menu_font_cov(menu_font_glyph('~'), 1, 1) == 0,
           "an unsupported character has ink");
     CHECK(menu_font_index(' ') == 0, "' ' is not the first glyph");
-    CHECK(menu_font_index('Z') == MENU_FONT_GLYPHS - 1, "'Z' is not the last glyph");
-    CHECK(menu_font_index('a') < 0, "the font claims a lowercase glyph");
+    CHECK(menu_font_index('Z') == 26 + 10, "'Z' is not where the digit run ends");
+    CHECK(menu_font_index('a') == MENU_FONT_GLYPHS - 26 - strlen(MENU_FONT_PUNCT),
+          "'a' does not start exactly where the punctuation's run begins");
+    CHECK(menu_font_index('~') < 0, "the font claims a glyph for '~'");
     CHECK(menu_font_glyph('~')->adv == menu_font_glyph(' ')->adv,
           "an unsupported character does not resolve to a space");
 
-    /* THE INK BAND, walked out of the table rather than trusted: the tallest ink
-     * reaches exactly MENU_FONT_INK_TOP..MENU_FONT_INK_BOT, and no glyph's ink
-     * leaves that band. The witness's sample rows are chosen to miss the ink, and
-     * the generator's comment claims this identity; this is where it is checked. */
+    /* THE KEYBOARD'S ALPHABET IS IN THE ATLAS. menu_keyboard.h's caps name these
+     * characters and the URL bar is typed with them; a character the atlas lacks
+     * draws a gap, which on a key cap is a blank button the operator cannot tell
+     * from a broken one. bake_menu_font.py checks the same string at bake time, so
+     * this is the belt to that braces -- it catches a keyboard that names a
+     * character the font deliberately never carried. */
+    {
+        static const char *keys =
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            "./-_:?=&@#";
+
+        for (i = 0; keys[i]; i++) {
+            const struct menu_glyph *g = menu_font_glyph((unsigned char)keys[i]);
+            int ink = 0;
+
+            CHECK(menu_font_index((unsigned char)keys[i]) >= 0,
+                  "the keyboard's '%c' has no glyph in the atlas", keys[i]);
+            for (j = 0; j < g->h; j++)
+                for (k = 0; k < g->w; k++)
+                    ink += menu_font_cov(g, k, j);
+            CHECK(ink > 0, "the keyboard's '%c' is blank", keys[i]);
+        }
+    }
+
+    /* THE INK BAND, walked out of the table rather than trusted: no glyph's ink
+     * leaves MENU_FONT_INK_TOP..MENU_FONT_INK_BOT, both ends of the band are really
+     * used, and the band is MENU_FONT_INK_H rows of it. The witness's sample rows
+     * are chosen to miss the ink, and this is where the band it misses is checked.
+     *
+     * IT IS A BAND AND NOT A GLYPH. It was three ways of saying one thing while
+     * every glyph was a capital or a digit with the same 11-row box; lowercase
+     * brought descenders and the two came apart, so what is asserted now is the
+     * union -- the top row is the dot of an 'i' and the bottom row is the
+     * underscore, and no single glyph touches both. */
     {
         int top = 999, bot = -1, tallest = 0;
 
@@ -408,21 +489,24 @@ static void test_font(void)
             if (g->top + g->h > bot)
                 bot = g->top + g->h;
         }
-        CHECK(tallest == MENU_FONT_INK_H, "the tallest ink is %d rows, not %d",
-              tallest, MENU_FONT_INK_H);
         CHECK(top == MENU_FONT_INK_TOP, "the ink starts at row %d, not %d",
               top, MENU_FONT_INK_TOP);
         CHECK(bot - 1 == MENU_FONT_INK_BOT, "the ink ends at row %d, not %d",
               bot - 1, MENU_FONT_INK_BOT);
         CHECK(MENU_FONT_INK_BOT - MENU_FONT_INK_TOP + 1 == MENU_FONT_INK_H,
               "the ink band and the ink height disagree");
+        CHECK(tallest <= MENU_FONT_INK_H,
+              "a %d-row glyph does not fit the %d-row band", tallest,
+              MENU_FONT_INK_H);
+        CHECK(MENU_FONT_INK_TOP >= 0, "the ink band starts above the line box");
         CHECK(MENU_FONT_INK_BOT < MENU_FONT_LINE,
               "the ink runs past the line box (%d rows)", MENU_FONT_LINE);
-        /* Every glyph in this set is a capital, a digit or a space, so all of the
-         * ink is above the baseline and inside the ascent -- which is what makes the
-         * line box a safe vertical extent for the layout to centre. */
-        CHECK(MENU_FONT_ASCENT >= MENU_FONT_INK_BOT + 1,
-              "ink reaches row %d but the ascent is only %d",
+        /* The band now reaches BELOW the baseline: that is what a descender is, and
+         * the underscore is the deepest of them. It is still inside the line box,
+         * which is the extent the layout centres in -- so an undersized band is
+         * still refused by menu_view_ok() on the same rule as before. */
+        CHECK(MENU_FONT_INK_BOT >= MENU_FONT_ASCENT - 1,
+              "the ink band ends at row %d, above the baseline at %d",
               MENU_FONT_INK_BOT, MENU_FONT_ASCENT);
     }
 }
@@ -430,8 +514,16 @@ static void test_font(void)
 /* ---------------------------------------------------------------------------
  * 3. The gesture.
  * ------------------------------------------------------------------------- */
-#define X1_ 100                              /* the middle of column 1 */
-#define X3_ 533                              /* the middle of column 3 */
+/* THE MIDDLE OF A COLUMN, ASKED OF THE COLUMN. These were literals and they went
+ * stale: X3_ read 533, which was the middle of column 3 when the band had SIX
+ * columns, and it stayed 533 through the seventh column's arrival -- where it was
+ * still inside column 3 by luck of the wider tiling -- and then landed in column 4
+ * the moment the web cell retiled the seven to 176 px. Four gesture tests failed on
+ * that one number and every one of them looked like a gesture bug. Deriving them
+ * means the next retile moves the tests with the geometry instead of under it. */
+#define X1_ ((menu_button_x0(0) + menu_button_x1(0)) / 2)   /* the middle of column 1 */
+#define X3_ ((menu_button_x0(2) + menu_button_x1(2)) / 2)   /* the middle of column 3 */
+#define X7_ ((menu_button_x0(MZ_COLS - 1) + menu_button_x1(MZ_COLS - 1)) / 2)  /* the middle of MENU */
 #define ENTRY_X 639                          /* the middle of the entry zone */
 #define OPEN_Y BTN_ROW                       /* in the button band */
 #define STRIP_Y 20                           /* in the strip */
@@ -551,11 +643,21 @@ static void test_gesture(void)
     CHECK(menu_pressed() == 1, "the highlight is on button %d, not 1", menu_pressed());
     CHECK(menu_feed(0, 20, OPEN_Y, &b) == MZ_FEED_TAKEN, "its release was not swallowed");
     CHECK(b == 1, "the leftmost column fired %d, not 1", b);
+    /* The RIGHTMOST CELL is MENU again, now that the eighth cell has gone: x 1279 is
+     * inside the seventh column, and this block covers the panel's ends -- the last
+     * pixel of the panel is the last pixel of a real button, which is the property the
+     * globe's 48 px broke and the removal restores. */
     open_panel();
-    CHECK(menu_feed(1, 1270, OPEN_Y, &b) == MZ_FEED_TAKEN, "an open press on the last column was not swallowed");
+    CHECK(menu_feed(1, 1279, OPEN_Y, &b) == MZ_FEED_TAKEN, "an open press on the last cell was not swallowed");
+    CHECK(menu_pressed() == MZ_COLS,
+          "the highlight is on cell %d, not %d", menu_pressed(), MZ_COLS);
+    CHECK(menu_feed(0, 1279, OPEN_Y, &b) == MZ_FEED_TAKEN, "its release was not swallowed");
+    CHECK(b == MZ_COLS, "the rightmost cell fired %d, not %d", b, MZ_COLS);
+    open_panel();
+    CHECK(menu_feed(1, X7_, OPEN_Y, &b) == MZ_FEED_TAKEN, "an open press on MENU was not swallowed");
     CHECK(menu_pressed() == MZ_COLS, "the highlight is on button %d, not %d", menu_pressed(), MZ_COLS);
-    CHECK(menu_feed(0, 1270, OPEN_Y, &b) == MZ_FEED_TAKEN, "its release was not swallowed");
-    CHECK(b == MZ_COLS, "the rightmost column fired %d, not %d", b, MZ_COLS);
+    CHECK(menu_feed(0, X7_, OPEN_Y, &b) == MZ_FEED_TAKEN, "its release was not swallowed");
+    CHECK(b == MZ_COLS, "MENU fired %d, not %d", b, MZ_COLS);
     /* ...and while open, a press in the strip above the buttons is still swallowed
      * (and closes), because the panel covers that band and dismissing it must not
      * press what is under it. */
@@ -601,19 +703,21 @@ static void test_gesture(void)
     CHECK(!menu_is_open(), "the panel stayed open after a button fired");
     CHECK(menu_pressed() == 0, "the highlight survived the release");
 
-    /* Every button, by its own centre. */
+    /* Every cell, by its own centre -- the seven labelled columns, which are now every
+     * cell the panel has. Spelled off MZ_COLS so a change to the count moves this loop
+     * with the geometry rather than under it. */
     {
-        int i;
+        int cell;
 
-        for (i = 0; i < MZ_COLS; i++) {
-            int cx = (menu_button_x0(i) + menu_button_x1(i)) / 2;
+        for (cell = 1; cell <= MZ_COLS; cell++) {
+            int cx = (menu_button_x0(cell - 1) + menu_button_x1(cell - 1)) / 2;
 
             open_panel();
-            CHECK(menu_feed(1, cx, OPEN_Y, &b) == 1, "press on column %d", i);
-            CHECK(menu_pressed() == i + 1, "column %d highlighted %d", i, menu_pressed());
-            CHECK(menu_feed(0, cx, OPEN_Y, &b) == 1, "release on column %d", i);
-            CHECK(b == i + 1, "column %d fired %d", i, b);
-            CHECK(!menu_is_open(), "the panel stayed open after column %d", i);
+            CHECK(menu_feed(1, cx, OPEN_Y, &b) == 1, "press on cell %d", cell);
+            CHECK(menu_pressed() == cell, "cell %d highlighted %d", cell, menu_pressed());
+            CHECK(menu_feed(0, cx, OPEN_Y, &b) == 1, "release on cell %d", cell);
+            CHECK(b == cell, "cell %d fired %d", cell, b);
+            CHECK(!menu_is_open(), "the panel stayed open after cell %d", cell);
         }
     }
 
@@ -1055,7 +1159,7 @@ static void test_labels_fit(void)
         int fw = TSIZES[s].w, fh = TSIZES[s].h;
         struct menu_view v = mkview(fw, fh);
         int x0, y0, x1, y1, fx, fy, i, bad = 0;
-        int seen[MZ_COLS];
+        int seen[MZ_COLS];        /* one counter per column */
 
         CHECK(menu_view_ok(&v) == TSIZES[s].usable,
               "%dx%d is %s, and this test says %s", fw, fh,
@@ -1074,29 +1178,33 @@ static void test_labels_fit(void)
             for (fx = x0; fx <= x1; fx++) {
                 int c = menu_class_at(&v, fx, fy, 0);
                 int own = owner_of(&v, fx, fy);
+                int cx0, cx1;
 
                 if (c != MENU_LABEL)
                     continue;
                 if (own < 1) {
                     bad++;
                     if (bad < 3)
-                        printf("  %dx%d: label ink at (%d,%d) is in no button\n",
+                        printf("  %dx%d: label ink at (%d,%d) is in no cell\n",
                                fw, fh, fx, fy);
                     continue;
                 }
                 seen[own - 1]++;
-                /* ...and the pixel really is inside that button's own column. */
-                if (fx < menu_button_x0(own - 1) * fw / MZ_LOGICAL_W ||
-                    fx > menu_button_x1(own - 1) * fw / MZ_LOGICAL_W)
+                /* ...and the pixel really is inside that cell's own column, which is
+                 * the bound menu_label_cov() clips at -- a label drawn past its column
+                 * is a truncated word, not an overlap, and this is what says so. */
+                cx0 = menu_button_x0(own - 1) * fw / MZ_LOGICAL_W;
+                cx1 = menu_button_x1(own - 1) * fw / MZ_LOGICAL_W;
+                if (fx < cx0 || fx > cx1)
                     bad++;
             }
         }
-        CHECK(bad == 0, "%dx%d has %d label pixels outside their own button", fw, fh, bad);
-        /* Every button drew SOME ink: a size where a label is entirely clipped away
-         * is a button with no words on it, which is a different defect from a
-         * label that spills. Every usable size above draws every label whole. */
+        CHECK(bad == 0, "%dx%d has %d label pixels outside their own cell", fw, fh, bad);
+        /* Every column drew SOME ink: a size where a label is entirely clipped away is
+         * a button with no words on it, which is a different defect from a label that
+         * spills. */
         for (i = 0; i < MZ_COLS; i++)
-            CHECK(seen[i] > 0, "%dx%d drew nothing for button %d", fw, fh, i + 1);
+            CHECK(seen[i] > 0, "%dx%d drew nothing for cell %d", fw, fh, i + 1);
     }
 
     /* The panels this port is actually run on: the widest label has to fit the
@@ -1408,7 +1516,10 @@ static void test_partial_repaint(void)
 
         CHECK(menu_view_ok(&vi), "%dx%d is not a usable view", w, h);
 
-        /* A full mask is the whole-panel paint. */
+        /* A full mask is the whole-panel paint -- and a full mask is EIGHT bits now,
+         * because the web cell is a cell: a seven-bit mask leaves its cell holding
+         * whatever was in the buffer, which is exactly what this check exists to
+         * catch and exactly what it caught when the retile landed. */
         memset(img, 0, bytes);
         memset(fb16, 0, bytes);
         menu_paint_cols(&vi, 3, (1u << MZ_COLS) - 1u);
@@ -1440,6 +1551,10 @@ static void test_partial_repaint(void)
         vi = mkview_pix(w, h, img);
         vr = mkview_pix(w, h, ref);
 
+        /* Every image, a = 0 (no cell) through every column: a finger arriving on or
+         * leaving any cell is a transition whose mask must name it, and the sweep is
+         * over all pairs rather than over the neighbours because an incremental
+         * rebuild that is wrong by one cell is wrong in a way only a pair catches. */
         for (a = 0; a <= MZ_COLS; a++) {
             for (b = 0; b <= MZ_COLS; b++) {
                 unsigned int mask = 0;
@@ -1535,6 +1650,20 @@ static void test_layout_hoist(void)
  * to get it wrong is to move it by a millisecond or to retune a number past rbp's
  * threshold.
  * ------------------------------------------------------------------------- */
+/* The three reports that bring the panel out. Every case below has to start with
+ * one, and the finger has to come OFF before the next press is a press -- feeding a
+ * press while another is still down is the same press at a new position, and reads
+ * as a move (the note in test_hold's own body is that lesson, learned the hard way). */
+static void swipe_panel_open(void)
+{
+    int b;
+
+    CHECK(menu_feed(1, ENTRY_X, STRIP_Y, &b) == MZ_FEED_TAKEN, "the swipe's press was not swallowed");
+    CHECK(menu_feed(1, ENTRY_X, STRIP_Y + MZ_SWIPE_PX, &b) == MZ_FEED_TAKEN, "the swipe did not open the panel");
+    CHECK(menu_feed(0, ENTRY_X, STRIP_Y + MZ_SWIPE_PX, &b) == MZ_FEED_TAKEN, "the swipe's release was not swallowed");
+    CHECK(menu_is_open(), "the panel is not open after a swipe");
+}
+
 static void test_hold(void)
 {
     int b;
@@ -1617,6 +1746,75 @@ static void test_hold(void)
     CHECK(menu_feed(0, menu_button_x0(1) + 5, BTN_ROW, &b) == MZ_FEED_TAKEN, "the slid-off release was not swallowed");
     CHECK(b == 0, "a hold that slid to another column fired button %d", b);
     CHECK(!menu_is_open(), "the panel stayed open after a slid-off release");
+
+    /* ---------------------------------------------------------------------
+     * The same hold asked WHILE the finger is still down -- the operator's
+     * follow-up on the same button (2026-10-04): *"for holding the MENU to get
+     * utility, after two seconds the menu should disappear and it should just go to
+     * utility by itself"*. The comparison is the one pinned above; what is new is
+     * WHEN it is asked, so what these have to catch is a mid-press answer that
+     * leaves the panel standing, fires twice, or lets the release fire as well.
+     * ------------------------------------------------------------------- */
+    menu_reset();
+    swipe_panel_open();
+    CHECK(menu_feed(1, mx, BTN_ROW, &b) == MZ_FEED_TAKEN, "the held press on MENU was not swallowed");
+
+    /* One millisecond short is not a hold, and must not touch the panel on the way
+     * to deciding -- this is the check an off-by-one in the threshold would fail. */
+    CHECK(menu_hold_pending(MZ_HOLD_FINGER_MS - 1, MZ_HOLD_FINGER_MS) == 0,
+          "a finger one ms short of the threshold became a hold mid-press");
+    CHECK(menu_is_open(), "the panel closed short of the hold's threshold");
+    CHECK(menu_pressed() == MZ_COLS, "the short-of-threshold report left the highlight on %d", menu_pressed());
+
+    /* The threshold itself: the button comes back and the panel is already gone, in
+     * the same call -- the caller's very next act is to send the key, and it must not
+     * be sending it over a panel that is still on the glass. */
+    CHECK(menu_hold_pending(MZ_HOLD_FINGER_MS, MZ_HOLD_FINGER_MS) == MZ_COLS,
+          "the threshold did not fire MENU mid-press");
+    CHECK(!menu_is_open(), "the panel stayed open after a mid-press hold");
+    CHECK(menu_pressed() == 0, "a button is still highlighted after a mid-press hold");
+
+    /* Once, and only once: the tick that asked the first time asks again 20 ms later. */
+    CHECK(menu_hold_pending(MZ_HOLD_FINGER_MS + 5000, MZ_HOLD_FINGER_MS) == 0,
+          "the mid-press hold fired a second time");
+
+    /* And the release still to come -- the finger is on the glass throughout -- is the
+     * silent swallow it has always been. A second MENU here would be a second key. */
+    CHECK(menu_feed(0, mx, BTN_ROW, &b) == MZ_FEED_TAKEN, "the release after a mid-press hold was not swallowed");
+    CHECK(b == 0, "the release after a mid-press hold fired button %d", b);
+    CHECK(!menu_is_open(), "the panel came back after a mid-press hold's release");
+
+    /* The slide-off rule, asked one press earlier: a finger that wanders onto the
+     * next column is not holding the button it started on, however long it stays. */
+    swipe_panel_open();
+    CHECK(menu_feed(1, mx, BTN_ROW, &b) == MZ_FEED_TAKEN, "the slid press on MENU was not swallowed");
+    CHECK(menu_feed(1, menu_button_x0(1) + 5, BTN_ROW, &b) == MZ_FEED_TAKEN, "the slide off MENU was not swallowed");
+    CHECK(menu_hold_pending(60000, MZ_HOLD_FINGER_MS) == 0,
+          "a finger that slid off MENU fired a mid-press hold");
+    CHECK(menu_is_open(), "the panel closed on a mid-press hold that had slid off its button");
+    CHECK(menu_feed(0, menu_button_x0(1) + 5, BTN_ROW, &b) == MZ_FEED_TAKEN, "the slid press's release was not swallowed");
+
+    /* A press the menu owns but no button does -- the panel's top border row, above the
+     * buttons -- can no more become a hold than the swipe can, because `press_btn` is 0
+     * for it. STRIP_Y is not that row: the panel is drawn over the strip, so the row a
+     * swipe starts in when the panel is CLOSED is the fourth button when it is open. */
+    swipe_panel_open();
+    CHECK(menu_button_at(ENTRY_X, MZ_PANEL_Y0) == 0, "the panel's border row is a button");
+    CHECK(menu_feed(1, ENTRY_X, MZ_PANEL_Y0, &b) == MZ_FEED_TAKEN, "the press on the border was not swallowed");
+    CHECK(menu_hold_pending(60000, MZ_HOLD_FINGER_MS) == 0,
+          "a press that landed on no button fired a mid-press hold");
+    CHECK(menu_is_open(), "the panel closed on a press that was not on a button");
+    CHECK(menu_feed(0, ENTRY_X, MZ_PANEL_Y0, &b) == MZ_FEED_TAKEN, "the border press's release was not swallowed");
+
+    /* The A/B lever, pulled mid-press as well as at the release: a threshold of 0 is
+     * "the hold is off", and it has to mean the panel never dismisses itself. */
+    swipe_panel_open();
+    CHECK(menu_feed(1, mx, BTN_ROW, &b) == MZ_FEED_TAKEN, "the last press on MENU was not swallowed");
+    CHECK(menu_hold_pending(60000, 0) == 0, "a threshold of 0 did not turn the mid-press hold off");
+    CHECK(menu_hold_pending(60000, -5) == 0, "a negative threshold did not turn the mid-press hold off");
+    CHECK(menu_is_open(), "the panel closed with the hold turned off");
+    CHECK(menu_feed(0, mx, BTN_ROW, &b) == MZ_FEED_TAKEN, "the last press's release was not swallowed");
+    CHECK(!menu_is_open(), "the panel stayed open after an ordinary release");
 }
 
 int main(void)

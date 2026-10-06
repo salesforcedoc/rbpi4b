@@ -204,6 +204,25 @@ master_policy.o: master_policy.c master_policy.h
 #                  (pure, unit-tested). The second thing this shim draws.
 #   menu_draw.o    the panel's driver: maps the real /dev/fb0 and keeps the panel
 #                  on it from a thread of its own (fb_cursor.c's shape)
+#   menu_window.o  the browser window's geometry, state and hit test: the X, the
+#                  minimize, the title bar, the url field, the page rect (pure,
+#                  unit-tested). NOT a second plane -- menu_window.h states why
+#   menu_window_paint.o  the window's chrome, drawn over the page (pure, and the
+#                  same palette as the panel by construction: menu_pixel())
+#   menu_keyboard.o  the popup keyboard's table, geometry and hit test (pure,
+#                  unit-tested). Its caps are drawn from menu_font.h, which is why
+#                  the atlas grew lowercase and punctuation before this existed
+#   browser_link.o the shim's end of the pipe to the browser on the host -- the
+#                  frame mmap, the status read and the command append, and the ONLY
+#                  file I/O in the menu (browser_link.h says why /tmp is shared)
+#   drmband.o      the overlay plane the band is presented on instead, when the
+#                  machine has one (drmband.h). It carries its own copy of the
+#                  thirteen DRM uapi structs it needs rather than taking a
+#                  libdrm-dev dependency into an armel build -- the same reasoning
+#                  tools/build-toolchain/Dockerfile gives for leaving
+#                  libasound2-dev out -- so there is no include path and nothing
+#                  to link. The WINDOW is presented on this same plane, handed
+#                  over from the band: DRM master is one per device.
 #
 # This is the SECOND shim to reach rbp: pointsrc.c turns a recognized tap into
 # the keycode rbp has for that button (send_rx_key, rbp_key.o below). It is a
@@ -211,10 +230,13 @@ master_policy.o: master_policy.c master_policy.h
 # which is why the one object it needs is a leaf with its own rule rather than
 # rbp_bridge.o, whose meter hook must not exist in two copies.
 FBSHIM_OBJS := fb_shim.o tscfake.o pointsrc.o point_xform.o touch_zone.o \
-               fb_cursor.o cursor_paint.o menu_zone.o menu_paint.o menu_draw.o
+               fb_cursor.o cursor_paint.o menu_zone.o menu_paint.o menu_draw.o \
+               menu_window.o menu_window_paint.o menu_keyboard.o \
+               browser_link.o drmband.o
 FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h touch_zone.h syscalls.h \
                envutil.h fb_cursor.h cursor_paint.h fbdev.h menu_zone.h \
-               menu_paint.h menu_font.h menu_draw.h
+               menu_paint.h menu_font.h menu_draw.h drmband.h menu_window.h \
+               menu_window_paint.h menu_keyboard.h browser_link.h
 
 fbshim.so: $(FBSHIM_OBJS) rbp_key.o $(FBSHIM_HDRS) \
            $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
@@ -246,7 +268,25 @@ menu_paint.o: menu_paint.c menu_paint.h menu_zone.h menu_font.h
 # rule above already covers menu_draw.h through $(FBSHIM_HDRS), which is where its
 # header is listed.
 menu_draw.o: menu_draw.c menu_draw.h menu_paint.h menu_zone.h fbdev.h \
-             point_xform.h pointsrc.h
+             point_xform.h pointsrc.h drmband.h menu_window.h menu_window_paint.h
+# menu_window_paint.o takes menu_paint.h for the palette and the view, and
+# menu_window.h for the rectangles it must draw the marks exactly inside -- a
+# dependency that is not written down is a rebuild that silently does not happen.
+menu_window.o: menu_window.c menu_window.h menu_zone.h menu_keyboard.h
+menu_window_paint.o: menu_window_paint.c menu_window_paint.h menu_window.h \
+                     menu_paint.h
+# menu_keyboard.o is pure and knows nothing but its own table: it draws nothing
+# (menu_window_paint.c does) and it holds no state that crosses a thread, so its
+# one header is its whole dependency.
+menu_keyboard.o: menu_keyboard.c menu_keyboard.h
+# browser_link.o is the one object in the menu that opens a file, so its header is
+# where the three paths and the frame's own header layout live -- nothing else in
+# the shim names /tmp/rbwin.*.
+browser_link.o: browser_link.c browser_link.h
+# drmband.o is the only object that talks to the DRM device, and it does it with
+# raw ioctls through syscalls.h's real_* wrappers -- the shim interposes open and
+# ioctl, so the raw path is not optional.
+drmband.o: drmband.c drmband.h syscalls.h pointsrc.h
 
 # The one rule for the objects above. -Wall -Wextra is on, so a genuinely
 # unused helper fails the build rather than lingering.
@@ -337,7 +377,8 @@ pcmprobe: ../../tools/pcmprobe.c
 # fb_cursor.o is linked and the kernel is scripted, so what is pinned is the retry
 # and the rectangle -- see that file's header.
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
-         test_evdev test_cursor_dev test_menu test_menu_dev
+         test_evdev test_cursor_dev test_menu test_window test_keyboard \
+         test_menu_dev
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -353,6 +394,37 @@ test_menu: test_menu.c menu_zone.c menu_paint.c menu_zone.h menu_paint.h \
            menu_font.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_menu.c menu_zone.c menu_paint.c
+
+# test_window links the PRODUCTION menu_window.c and menu_window_paint.c, plus
+# menu_paint.c because the chrome's palette comes from menu_pixel() -- one table,
+# so the window cannot drift into colours the panel does not have -- and
+# menu_zone.c for MZ_LOGICAL_* and MZ_STRIP_Y1, which the geometry test checks the
+# window against. Its surface is a local array: no framebuffer, no plane, no
+# thread, no browser. What it stops is a state machine or a hit test that is only
+# ever exercised by a finger -- and, in the geometry test, a window that grows over
+# the menu's own way back.
+#
+# menu_keyboard.c is here because menu_window.c calls it: the URL field raises the
+# keyboard, a cap types into the buffer and OK hides it, so the window's own tests
+# cannot be built without it. It is the PRODUCTION source, not a copy, so what the
+# window's tests exercise is the table that ships.
+test_window: test_window.c menu_window.c menu_window_paint.c menu_paint.c \
+             menu_zone.c menu_keyboard.c menu_window.h menu_window_paint.h \
+             menu_paint.h menu_zone.h menu_font.h menu_keyboard.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_window.c menu_window.c \
+	    menu_window_paint.c menu_paint.c menu_zone.c menu_keyboard.c
+
+# test_keyboard pins the popup keyboard ALONE: the 46 character keys are exactly the
+# atlas's keyboard alphabet with no duplicate, the four specials are where the layout
+# puts them, the key rects tile the keyboard with no gap and no overlap, a hit is -1
+# while the keyboard is down, and SHIFT is consumed by a character and merely shown by
+# a cap. menu_font.c does not exist -- menu_font.h is the atlas and its coverage is a
+# table in the header -- so this needs menu_keyboard.c and nothing else, which is
+# exactly what "pure" was supposed to buy.
+test_keyboard: test_keyboard.c menu_keyboard.c menu_keyboard.h menu_font.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_keyboard.c menu_keyboard.c
 
 test_audio: test_audio.c s24pack.c s24pack.h mirror_policy.c mirror_policy.h \
             master_policy.c master_policy.h pace_policy.c pace_policy.h
@@ -496,8 +568,23 @@ test_cursor_dev.o: test_cursor_dev.c fb_cursor.h fbdev.h cursor_paint.h \
 # last thing one of its iterations does, so granting it one iteration at a time is
 # what makes every assertion about what the module DID rather than about who won a
 # race. See that file's header.
+# drmband.o is here as the REAL object and not a stub, and that is deliberate: on
+# a host with no /dev/dri/card1 drm_band_setup() fails the way it fails on a unit
+# whose plane cannot be had, so every assertion below is made against the FALLBACK
+# route -- the fb0 path this shipped with. That is exactly the path the tests were
+# written for, and it has to keep working.
+# menu_window.o and menu_window_paint.o are here because menu_draw.o now calls
+# them: the window's plane sync is part of the driver this pins. They are the REAL
+# objects for the same reason drmband.o is -- the states and the pixels have to be
+# the shipped ones, or the fallback route below is being tested against a fiction.
+# menu_keyboard.o and browser_link.o are here for the same reason one level down:
+# menu_window.o calls the keyboard, and menu_draw.o's tick calls browser_link.o. The
+# link has to resolve them, and on a host with no /tmp/rbwin.* every browser_link
+# call takes its absent-file arm -- which is the route the window must survive on a
+# unit where the host browser is not running.
 MENU_TEST_OBJS := test_menu_dev.o menu_draw.o menu_paint.o menu_zone.o \
-                  point_xform.o
+                  menu_window.o menu_window_paint.o menu_keyboard.o \
+                  browser_link.o point_xform.o drmband.o
 
 test_menu_dev: $(MENU_TEST_OBJS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -533,6 +620,27 @@ check: $(SHARED)
 	    echo "   !! FAIL: references a symbol version newer than the target's 2.13"; rc=1; \
 	  fi; \
 	  $(CROSS)readelf -A $$f | grep -i 'Tag_ABI_VFP_args' && { echo "  !! HARD-FLOAT"; rc=1; } || true; \
+	done; \
+	echo "== undefined symbols the vendor libc cannot supply =="; \
+	have=""; for l in $(RX3)/lib/libc.so.6 $(RX3)/lib/libdl.so.2 $(RX3)/lib/librt.so.1 \
+	                  $(RX3)/lib/libm.so.6 $(RX3)/lib/libpthread.so.0; do \
+	  have="$$have $$($(CROSS)objdump -T $$l 2>/dev/null | awk '{print $$NF}' \
+	         | sed 's/@.*//' | tr '\n' ' ')"; \
+	done; \
+	for f in $(SHARED); do \
+	  und=$$($(CROSS)objdump -T $$f 2>/dev/null | awk '$$4=="*UND*" && $$NF!="" {print $$NF}' \
+	        | sed 's/@.*//' | sort -u); \
+	  miss=""; \
+	  for s in $$und; do \
+	    case $$s in _ITM_*|__gmon_start__) continue;; esac; \
+	    echo " $$have " | grep -q " $$s " || miss="$$miss $$s"; \
+	  done; \
+	  if [ -n "$$miss" ]; then \
+	    echo "-- $$f: !! FAIL -- not in the target libc:$$miss"; \
+	    echo "   (this links fine and then kills rbp at startup: symbol lookup error)"; rc=1; \
+	  else \
+	    echo "-- $$f: all resolved"; \
+	  fi; \
 	done; exit $$rc
 
 clean:

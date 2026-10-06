@@ -119,6 +119,9 @@ struct menu_layout {
     int lx1[MZ_COLS];            /* ...and where it ends, inclusive */
     int ly;                      /* the top of the line box, shared by every label */
     int ln[MZ_COLS];             /* label length, so the per-pixel path does no strlen */
+    /* The seven column rects above tile the whole panel: MZ_BTN_W is MZ_LOGICAL_W
+     * since the menu's eighth cell went (menu_zone.h's block). There is no cell
+     * geometry beyond them. */
 };
 
 /* Sanity: the view can be drawn into at all. Callers check this once rather than
@@ -174,8 +177,8 @@ void menu_witness_point(const struct menu_view *v, int i, int *fx, int *fy);
 void menu_paint(const struct menu_view *v, int pressed);
 
 /* Draw only the columns whose bit is set in `mask` -- bit i is button i+1, so
- * (1u << MZ_COLS) - 1 is the whole panel and 0 writes nothing. THE REST OF THE PANEL
- * IS LEFT ALONE, and that is the point of it.
+ * (1u << MZ_COLS) - 1 covers all seven, which is the whole band, and 0 writes
+ * nothing. THE REST OF THE PANEL IS LEFT ALONE, and that is the point of it.
  *
  * The only pixels whose value depends on `pressed` are inside the pressed button's own
  * column: class_in_layout() reaches its pressed test only after the column's x range
@@ -186,8 +189,8 @@ void menu_paint(const struct menu_view *v, int pressed);
  * one button to the next. test_menu.c pins that identity pixel for pixel, at four
  * panel sizes, for every (old, new) pair.
  *
- * Columns tile the panel exactly, so a full mask is a full paint and no column can be
- * addressed twice or missed. Bits above MZ_COLS-1 are ignored. */
+ * The columns and the web cell tile the panel exactly, so a full mask is a full paint and
+ * no cell can be addressed twice or missed. Bits above MZ_COLS are ignored. */
 void menu_paint_cols(const struct menu_view *v, int pressed, unsigned int mask);
 
 /* One framebuffer pixel, as menu_paint() would read it. Exposed for the damage

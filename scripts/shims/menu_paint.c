@@ -218,7 +218,9 @@ void menu_layout_make(const struct menu_view *v, struct menu_layout *L)
         L->lx[i] = L->bx0[i] + (col_w - w) / 2;
         L->lx1[i] = L->lx[i] + w - 1;
     }
+
 }
+
 
 /* How much ink covers this framebuffer pixel of button i's label, 0..255.
  *
@@ -288,6 +290,10 @@ static int class_in_layout(const struct menu_layout *L, int fx, int fy, int pres
             break;
         }
     }
+    /* No column claims this pixel. The seven tile the whole logical width, so inside
+     * the band this cannot happen -- it is reached only through the rounding in
+     * menu_layout_make() on a framebuffer narrower than the logical width, where the
+     * scaled column rects can leave a pixel of fill between two of them. */
     if (!btn)
         return MENU_FILL;
     /* The seam belongs to the column on its right, inside that column's own hit
@@ -526,11 +532,18 @@ void menu_paint_cols(const struct menu_view *v, int pressed, unsigned int mask)
 
     mask &= (1u << MZ_COLS) - 1u;
 
+    /* One iteration per cell, and the cells are the seven labelled columns; one loop
+     * rather than a second pass so a column cannot be painted twice or missed by a
+     * mask that names it. */
     for (i = 0; i < MZ_COLS; i++) {
+        int cx0, cx1;
+
         if (!(mask & (1u << i)))
             continue;
+        cx0 = L.bx0[i];
+        cx1 = L.bx1[i];
         for (fy = L.y0; fy <= L.y1; fy++)
-            for (fx = L.bx0[i]; fx <= L.bx1[i]; fx++)
+            for (fx = cx0; fx <= cx1; fx++)
                 px_set(v->pix, v->pitch, v->bpp, fx, fy,
                        pixel_value(v, &L, pal, fx, fy, pressed));
     }

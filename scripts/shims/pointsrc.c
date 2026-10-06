@@ -17,6 +17,7 @@
 #include "tscfake.h"
 #include "touch_zone.h"
 #include "menu_zone.h"
+#include "menu_window.h"
 #include "syscalls.h"
 #include "envutil.h"
 
@@ -118,6 +119,15 @@ _Static_assert(sizeof(struct ev_absinfo) == 24,
  * one keycode two meanings, press = the menu and hold = UTILITY, and its own timer
  * is what decides -- between 300 and 400 ms, measured 2026-09-29. */
 #define POINT_RESCAN_MS        500
+
+/* How often read_loop_abs() looks at the clock while a press is still down on a menu
+ * button -- i.e. the resolution of the moment the panel lets go of the screen by
+ * itself. It exists only so that loop does not have to block through that moment,
+ * and it is deliberately not a bench knob: it is how often a question is asked, not
+ * an answer to it, and there is no feel to tune. 20 ms is under the point where a
+ * delay is visible and coarse enough that a hold costs fifty wake-ups a second on a
+ * thread that is idle the rest of the time. */
+#define POINT_MENU_HOLD_TICK_MS 20
 
 static pthread_t reader_tid;
 static int reader_started = 0;
@@ -622,7 +632,10 @@ static void menu_keys_init(void)
  * hardware, implemented by rbp itself on the same keycode (measurement in
  * menu_zone.h's MZ_HOLD_FINGER_MS). This function does not implement UTILITY; it
  * holds the key and rbp's timer does the rest, which is why the rule here is a
- * duration and not a screen.
+ * duration and not a screen. Two callers reach this arm and it does the same thing
+ * for both: the release, and read_loop_abs() the moment the threshold passes with
+ * the finger still down -- the operator's follow-up ask, *"the menu should disappear
+ * and it should just go to utility by itself"*, which is menu_hold_pending().
  *
  * CH_GLOBAL, not a deck channel, because these are the browse/library family: on
  * hardware they are global keys with no deck of their own (map_kbd.c sends all
@@ -641,6 +654,11 @@ static void menu_fire(int button, int held_ms)
     const char *label = menu_label(button);
     int hold_ms, send_ms, code;
 
+    /* A button with no label fires nothing and says nothing. The menu's eighth cell
+     * -- the globe that opened the browser window -- used to be the one case here;
+     * it is gone with the browser (menu_zone.h's block), so menu_button_at() now
+     * answers 1..MZ_COLS or 0 and this is belt-and-braces against a future cell
+     * being added to the hit test before it is added to the label table. */
     if (label == NULL)
         return;
     code = menu_key_eff[button - 1];
@@ -656,8 +674,11 @@ static void menu_fire(int button, int held_ms)
      * menu_zone.h's MZ_HOLD_FINGER_MS for the measurement and the two numbers).
      *
      * The send blocks this reader thread for send_ms, which is the price of a
-     * synthesized hold: the key cannot be released when the finger lifts, because
-     * the finger has already lifted by the time the panel knows where it landed.
+     * synthesized hold: the key's edges are not the finger's edges. rbp's timer needs
+     * a key-down of its own threshold or longer, and a finger that is a hold at all
+     * is only guaranteed to be *just* past MZ_HOLD_FINGER_MS -- inside rbp's measured
+     * 300..400 ms band -- so replaying the finger's own duration would reach UTILITY
+     * by luck. A fixed span that clears the band with room does it every time.
      * Bounded, and once per hold -- the same trade menu_replay_tap() makes for its
      * 45 ms, with the same justification (evdev buffers, so a touch arriving during
      * it is delayed and not lost). Send 0 and the two edges go out back to back: a
@@ -735,10 +756,16 @@ static void menu_replay_tap(void)
     tscfake_emit(0, tx, ty);
 }
 
-/* One report, in the one order that works: the menu decides whether rbp sees this
- * press at all, then the QUANTIZE box interprets it, then it goes to rbp.
+/* One report, in the one order that works: the browser WINDOW decides first if it
+ * is open, then the menu decides whether rbp sees this press at all, then the
+ * QUANTIZE box interprets it, then it goes to rbp.
  *
- * THE MENU IS FIRST because it owns the whole report when it takes it. rbp gets
+ * THE WINDOW IS FIRST because it is opaque and drawn OVER the menu's own rectangle:
+ * a press that landed on the window must not also be judged by the swipe rules
+ * underneath it. It answers only for points on itself, so nothing else in this
+ * chain changes.
+ *
+ * THE MENU IS NEXT because it owns the whole report when it takes it. rbp gets
  * nothing -- not the touch, and not the QUANTIZE box either: a press that
  * dismisses the panel must not also press whatever is drawn under it, and
  * touch_zone_feed() is reached only through quantize_tap() below, so a swallowed
@@ -764,7 +791,20 @@ static void pointer_report(int down, int x, int y, int allow_menu, int held_ms)
     int button = 0;
     int verdict = MZ_FEED_NONE;
 
-    if (allow_menu)
+    /* THE WINDOW FIRST, and it is asked before the menu rather than after because
+     * the two overlap on the glass: the window is opaque, so a press inside its
+     * rectangle must never reach the menu's gesture rules underneath it. It only
+     * answers for points on itself (menu_window.h), so a press anywhere else still
+     * gets both the menu and rbp exactly as before -- which is what keeps the
+     * swipe-down gesture and test_menu.c's 6,373 checks untouched.
+     *
+     * A window report is always TAKEN, never TAP: the caller must not replay it to
+     * rbp, and `button` is left alone because the window acts on its own state
+     * machine inside menu_window_feed() rather than handing a button back. */
+    if (allow_menu && menu_window_is_open())
+        verdict = menu_window_feed(down, x, y);
+
+    if (verdict == MZ_FEED_NONE && allow_menu)
         verdict = menu_feed(down, x, y, &button);
 
     if (verdict == MZ_FEED_TAP) {
@@ -816,11 +856,57 @@ static void read_loop_abs(int fd, const struct point_xform *x)
     int rx = 0, ry = 0, down = 0;
     unsigned long long down_ms = 0;  /* when the press now down began, monotonic */
     int have_down = 0;               /* and that the stamp above is THIS press's */
+    int hold_ms = env_int("POINT_MENU_HOLD_MS", MZ_HOLD_FINGER_MS);
 
     seed_abs_position(fd, &rx, &ry);
 
     for (;;) {
-        ssize_t n = real_read(fd, &ev, sizeof ev);
+        ssize_t n;
+
+        /* THE ONE PRESS THIS LOOP MUST NOT BLOCK THROUGH.
+         *
+         * Everywhere else here the blocking read below *is* the loop: nothing can
+         * happen until the panel sends an event. A finger held on a menu button is
+         * the exception, and it is the operator's own ask (2026-10-04): *"for
+         * holding the MENU to get utility, after two seconds the menu should
+         * disappear and it should just go to utility by itself"*. rbp's hold timer
+         * runs on the key, and the key cannot go down until the shim knows the
+         * finger has been there long enough -- which, if the only wake-up is an
+         * event from a finger that is deliberately holding still, is never.
+         *
+         * So while such a press is outstanding this waits in POINT_MENU_HOLD_TICK_MS
+         * slices instead, and asks menu_hold_pending() at each one. menu_pressed()
+         * is the gate that keeps this off every other press in the file: it is
+         * non-zero only while the panel is open with a button under the finger, so
+         * a press that cannot become a hold -- anywhere on the glass, with the panel
+         * shut -- is answered by the blocking read exactly as before. */
+        if (menu_enabled && hold_ms > 0 && down && have_down && menu_pressed()) {
+            int held = (int)(shim_now_ms() - down_ms);
+            int button = menu_hold_pending(held, hold_ms);
+
+            if (button) {
+                /* Says which of the two paths answered this hold. menu_fire() below
+                 * logs the key it sends, but its line looks the same either way, and
+                 * "did the panel dismiss itself or did the finger have to lift" is
+                 * the whole of what this block changed. */
+                pointsrc_log("pointsrc: menu button %d held %dms and the finger is"
+                             " still down -> the panel dismissed itself", button, held);
+                menu_fire(button, held);
+                /* It does not `continue`: the press is not over, and the read below
+                 * is what will see the finger leave. menu_pressed() is 0 now, so
+                 * this block is behind us for the rest of the press. */
+            } else {
+                struct pollfd p;
+
+                p.fd = fd;
+                p.events = POLLIN;
+                p.revents = 0;
+                if (real_poll(&p, 1, POINT_MENU_HOLD_TICK_MS) == 0)
+                    continue;        /* still holding: look at the clock again */
+            }
+        }
+
+        n = real_read(fd, &ev, sizeof ev);
         if (n != (ssize_t)sizeof ev) {
             if (n < 0 && (errno == EINTR || errno == EAGAIN))
                 continue;

@@ -46,13 +46,19 @@ static int iabs(int v)
     return v < 0 ? -v : v;
 }
 
+/* The seven labelled columns tile the whole logical width -- MZ_BTN_W is
+ * MZ_LOGICAL_W since the web cell went (menu_zone.h's block). 1280 does not divide by
+ * 7, so the widths are 182/184 and NOT equal; what is exact is the tiling, each column
+ * starting one past the last one's end with no gap and no overlap. That is the
+ * property menu_button_at() and menu_paint_cols() both rest on, and test_menu.c
+ * asserts it at every column rather than asserting a width. */
 int menu_button_x0(int i)
 {
     if (i < 0)
         i = 0;
     if (i > MZ_COLS - 1)
         i = MZ_COLS - 1;
-    return (i * MZ_LOGICAL_W) / MZ_COLS;
+    return (i * MZ_BTN_W) / MZ_COLS;
 }
 
 int menu_button_x1(int i)
@@ -61,7 +67,7 @@ int menu_button_x1(int i)
         i = 0;
     if (i > MZ_COLS - 1)
         i = MZ_COLS - 1;
-    return ((i + 1) * MZ_LOGICAL_W) / MZ_COLS - 1;
+    return ((i + 1) * MZ_BTN_W) / MZ_COLS - 1;
 }
 
 const char *menu_label(int button)
@@ -101,6 +107,38 @@ int menu_hold_fires(int held_ms, int threshold_ms)
     if (held_ms < 0)
         return 0;              /* no measurement for this press: not a hold */
     return held_ms >= threshold_ms;
+}
+
+int menu_hold_pending(int held_ms, int threshold_ms)
+{
+    int btn;
+
+    /* Only a press this module owns, on the panel it owns, still down, and not
+     * already answered. `press_btn` is non-zero exactly for a press that began with
+     * the panel open AND landed on a button -- so the swipe that opened the panel
+     * and a press on the panel's own background are both excluded, which is what
+     * keeps "a finger is on the glass" from being the same question as "a finger is
+     * holding a button". `cur_btn == press_btn` is the slide-off rule the release
+     * path has, applied one press earlier: a finger that drifted onto the next
+     * column is not holding the button it started on. */
+    if (!open_state || !swallow || !press_btn || cur_btn != press_btn)
+        return 0;
+    if (!menu_hold_fires(held_ms, threshold_ms))
+        return 0;
+
+    btn = press_btn;
+
+    /* Close the panel HERE rather than leaving it for the caller: the whole point
+     * is that the panel is gone at this moment and not at the release. It is also
+     * what makes a second call a no-op -- with open_state clear the guard above
+     * cannot pass again -- and what makes the release still to come the silent
+     * swallow it already was: `started_open` finds a closed panel and no button, so
+     * menu_feed()'s release arm fires nothing and returns MZ_FEED_TAKEN. The press
+     * stays swallowed to its end, so rbp hears neither edge. */
+    open_state = 0;
+    press_btn = 0;
+    cur_btn = 0;
+    return btn;
 }
 
 void menu_tap_point(int *x, int *y)
