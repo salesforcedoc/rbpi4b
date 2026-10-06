@@ -37,6 +37,16 @@ rbp-*
 *.a
 *.elf
 
+# The test binaries and the crashcatch test subject. They have no extension, so
+# none of the rules above catches them, and they were tracked for a while by
+# accident — which had a tell: `make clean` runs `rm -f … $(TESTS)`, so on a
+# fresh checkout it deleted 17 *tracked* files and `git status` showed the tree
+# as dirty. `make test` rebuilds all of them (Makefile:796); nothing deploys
+# them. The negation keeps the sources, which are the part worth versioning.
+/scripts/shims/test_*
+!/scripts/shims/test_*.c
+/scripts/shims/ccexit
+
 # --- Rust ------------------------------------------------------------------
 target/
 

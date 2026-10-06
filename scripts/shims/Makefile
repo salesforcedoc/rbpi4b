@@ -840,7 +840,11 @@ check: $(SHARED)
 	done; exit $$rc
 
 clean:
-	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) pcmprobe *.o
+	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) pcmprobe ccexit *.o
+# ccexit is named literally because it is deliberately not in TESTS (see its rule
+# above): it must stay dynamic, so `make test` cannot run it under the static
+# suite. It is still a build output, and leaving it here would make `clean`
+# incomplete -- which is how a stale one survived a rebuild once already.
 
 # The always-out-of-date prerequisite that keeps the two fixture-baking objects
 # above from being reused across working directories.
