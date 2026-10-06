@@ -29,6 +29,16 @@ say()  { echo "install: $*"; }
 warn() { echo "install: WARNING: $*" >&2; }
 die()  { echo "install: ERROR: $*" >&2; exit 1; }
 
+# `sh install.sh doctor` is the check-only entry point: it runs doctor.sh, which
+# changes nothing at all, and exits with its status. Deliberately BEFORE the root
+# and tarball checks below — a diagnostic is most useful on a unit where those
+# two are exactly what is in question. (The sibling port has the same subcommand;
+# see docs/17-rx3-flx4-comparison.md.)
+if [ "${1:-}" = "doctor" ]; then
+  shift
+  exec sh "$HERE/doctor.sh" "$@"
+fi
+
 # --- preconditions ----------------------------------------------------------
 
 [ "$(id -u)" = "0" ] || die "must run as root (the chroot needs /dev/mknod and bind mounts)"
@@ -127,7 +137,7 @@ fi
 # The list is explicit rather than a glob: this directory also holds install.sh
 # itself, plus README.md and the build-side inputs, none of which belong on the
 # unit.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh boot-trim.sh rb.conf; do
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh boot-trim.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
@@ -339,6 +349,12 @@ After the reboot the player starts on its own. Day to day:
 To run it by hand instead (a target without the unit enabled):
 
   sh /opt/rblive4/start-rb.sh
+
+When something looks wrong, check the unit without changing anything. It reports
+each shim's deployed build against the copy rbp is actually loading, which is the
+one question this tree has most often got wrong:
+
+  sh /opt/rblive4/doctor.sh        # exit 0 = nothing failed; prints one paste-ready fix
 EOF
 echo
 echo "  (paths above assume RB_DEPLOY_ROOT=$DEPLOY)"

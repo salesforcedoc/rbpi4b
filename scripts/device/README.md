@@ -10,6 +10,7 @@ deploy tarball and land at the deploy root (`/opt/rblive4` by default) beside th
 ├── rb.local.conf    machine-LOCAL overrides, sourced last; never overwritten
 ├── lib.sh           shared: rb.conf loading, the /proc process lookup
 ├── install.sh       one-time (and idempotent) deploy: untar, verify, fix-dev
+├── doctor.sh        check a deployed unit and report; changes NOTHING
 ├── fix-dev.sh       bind mounts + device stubs; run again after every reboot
 ├── start-rb.sh      the launcher: services, shims, edb_streamd, rbp, USB watcher
 ├── usb-watch.sh     media hotplug -> mount -> bind into the chroot -> notify rbp
@@ -21,13 +22,14 @@ deploy tarball and land at the deploy root (`/opt/rblive4` by default) beside th
 
 | Script | Purpose |
 |---|---|
-| `install.sh` | Untars the deploy root, checks `rb.conf`, proves the chroot can execute a 32-bit binary, checks `/dev/fb0` and `/dev/snd/seq`, then runs `fix-dev.sh`. Run once per deploy. |
+| `install.sh` | Untars the deploy root, checks `rb.conf`, proves the chroot can execute a 32-bit binary, checks `/dev/fb0` and `/dev/snd/seq`, then runs `fix-dev.sh`. Run once per deploy. `install.sh doctor` runs `doctor.sh` instead. |
+| `doctor.sh` | Checks a *deployed* unit and reports. **Changes nothing** — no write, no mount, no module, no service call; the one thing it executes is a chroot'd `busybox echo`. Its headline check is the one this tree has most often got wrong: every shim's deployed build against **the copy `rbp` is actually loading**, read out of the running process's `/proc/<pid>/maps`. Prints one paste-ready fix block and exits 1 if anything failed. Every path it knows comes out of `rb.conf` and `lib.sh`, so it cannot drift from them. |
 | `fix-dev.sh` | Binds `/dev /proc /sys /tmp` into the chroot, creates the device stubs rbp expects, the `/tmp/udev_*` FIFOs and the `etc/mtab` symlink. Run after **every** reboot. |
 | `start-rb.sh` | Stops the services that would fight for the display or the stick (each behind a read-only guard, so the steady state reloads nothing), kills stale processes, runs `fix-dev.sh`, translates `rb.conf` into the shim environment, starts `edb_streamd` then `rbp`, waits for rbp to open its USB FIFO, records the display baseline, starts both watchers, then waits for rbp to exit. |
 | `usb-watch.sh` | `start`/`stop`/`status`/`run`. Watches for USB mass storage, mounts it, binds it into the chroot at the path baked into the player, and notifies rbp through `/tmp/udev_usb1`, retrying until rbp opens `export.pdb`. |
 | `display-watch.sh` | `start`/`stop`/`status`/`run`/`baseline` (`--dry-run` on the first two). Compares the framebuffer's geometry against the one `rbp` was launched with and restarts the unit when it changes — the driver and the pointer each read the real geometry once and hold it, so a monitor swap otherwise leaves a sheared or blank picture until someone intervenes. Bounded by a cooldown and a per-boot cap, so a flapping monitor cannot become a restart loop. |
 | `boot-trim.sh` | `apply`/`revert`/`status`/`report` (`items`: `services cloudinit apt unit bootfiles`). The boot-time trim, run by `install.sh` and reversible: it persists the service masks so the launcher's step 1 stops reloading systemd for no-ops, turns cloud-init off, takes the apt timers off the boot path, and ensures the `/boot/firmware` tokens and directives. `report` prints the boot's monotonic milestones so a before/after is a diff. |
-| `lib.sh` | Sourced by the other four — not run directly. |
+| `lib.sh` | Sourced by the other five — not run directly. |
 
 ## Notes
 

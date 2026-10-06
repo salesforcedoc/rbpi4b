@@ -1,0 +1,480 @@
+#!/bin/sh
+# doctor.sh — check a deployed rblive4 unit and report on it. Changes NOTHING.
+#
+#   sh /opt/rblive4/doctor.sh
+#   RB_DEPLOY_ROOT=/srv/rblive4 sh doctor.sh
+#   sh install.sh doctor            # same thing, via the installer's entry point
+#
+# Exit status: 0 if nothing failed, 1 if something did. Warnings alone do not
+# fail the run — they are things worth knowing, not things that break a set.
+#
+# --- why this exists --------------------------------------------------------
+#
+# The sibling public port (github.com/mutlisensor/Rx3-flx4) ships an
+# `install.sh doctor`: the ordinary install path with a failure accumulator,
+# exiting *before* the first `sudo -v`, printing one paste-ready fix. Its value
+# is that it is the same code that would do the work, so the check cannot drift
+# from what an install really requires.
+#
+# This port's install.sh interleaves its checks with the mutations they protect,
+# and this tree deploys by `scp` far more often than by running install.sh at
+# all. So doctor is a separate script — and to keep the drift the sibling
+# avoids by construction, every path and every name below is read out of the
+# SAME SOURCES OF TRUTH the other scripts use: rb.conf, lib.sh and
+# start-rb.sh's own override list. It hardcodes no path of its own. If a check
+# is added here, the comment says which file the check came from.
+#
+# --- what it does NOT do ----------------------------------------------------
+#
+# It opens nothing for writing, creates nothing, mounts nothing, loads no
+# module, and starts or stops nothing. The one thing it executes is a chroot'd
+# /bin/busybox, which prints one line and exits (line 9 of the chroot check).
+# That restraint is the point: this is safe to run on a live unit in the middle
+# of a set — including from a shell whose next command is a restart.
+#
+# It also does not look for `rbp` by name. It reads the running process's maps
+# to say WHICH BUILD IS ACTUALLY LOADED, which is the single question this tree
+# has most often got wrong: start-rb.sh's install_override() skips a shim whose
+# deploy-root copy is absent, in silence, leaving an older one in the chroot.
+
+set -u
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+FAILS=0
+WARNS=0
+FIX=""
+
+say()  { echo "doctor: $*"; }
+hdr()  { echo; echo "[$1] $2"; }
+ok()   { echo "  ok    $*"; }
+warn() { echo "  warn  $*"; WARNS=$((WARNS + 1)); }
+bad()  { echo "  FAIL  $*"; FAILS=$((FAILS + 1)); }
+note() { echo "        $*"; }
+
+# Collect a paste-ready line for the summary at the end, de-duplicated: two
+# failing checks frequently have the same one-line fix, and printing it twice
+# makes the summary look like two problems.
+fix() {
+	case "${FIX_SEEN:-}" in
+		*"|$1|"*) return 0;;
+	esac
+	FIX="$FIX
+  $1"
+	FIX_SEEN="${FIX_SEEN:-}|$1|"
+}
+
+# --- the sources of truth ---------------------------------------------------
+
+# RB_DEPLOY_ROOT goes first because rb.conf uses it to find rb.local.conf, and
+# rb.local.conf is where this unit's measured overrides live.
+RB_DEPLOY_ROOT="${RB_DEPLOY_ROOT:-/opt/rblive4}"
+RB_CONF_FILE="${RB_CONF_FILE:-$HERE/rb.conf}"
+[ -f "$RB_CONF_FILE" ] || RB_CONF_FILE="$RB_DEPLOY_ROOT/rb.conf"
+
+if [ ! -f "$RB_CONF_FILE" ]; then
+	echo "doctor: no rb.conf at $RB_CONF_FILE, and none at $RB_DEPLOY_ROOT/rb.conf." >&2
+	echo "  Nothing below can be checked without it: every path this script" >&2
+	echo "  tests comes out of rb.conf. Run install.sh, or set RB_DEPLOY_ROOT." >&2
+	exit 1
+fi
+
+# lib.sh for RB_CONF_SCHEMA (the one place the schema number lives) and
+# pids_matching() (which finds the player the same way the launcher does —
+# through /proc/<pid>/cmdline, never `ps | awk`).
+. "$HERE/lib.sh"
+. "$RB_CONF_FILE"
+
+# The two paths every other script derives the same way (lib.sh:58-59).
+RB_CHROOT="${RB_CHROOT:-$RB_DEPLOY_ROOT/rbx3-run}"
+MNT="${RB_MEDIA_MOUNT:-$RB_DEPLOY_ROOT/media/usb1}/sda1"  # usb-watch.sh:32
+CH_MNT="$RB_CHROOT${RB_CHROOT_MEDIA:-/media/usb1/sda1}"   # usb-watch.sh:39
+
+say "deploy root $RB_DEPLOY_ROOT"
+say "chroot      $RB_CHROOT"
+say "config      $RB_CONF_FILE"
+
+if [ "$(id -u)" != "0" ]; then
+	warn "not root: the chroot execution test is skipped (it needs chroot(2)),
+  and some of the device checks read as absent when they are only unreadable."
+	note "re-run as root for the full report: sudo sh $HERE/doctor.sh"
+fi
+
+# --- small helpers ----------------------------------------------------------
+
+# First 8 hex digits of a file's md5, for display only. Equality is decided by
+# cmp, which needs no md5 tool at all — so a target without md5sum still gets a
+# correct verdict, just a less readable table.
+_sum() {
+	if [ -x "$(command -v md5sum 2>/dev/null)" ]; then
+		md5sum "$1" 2>/dev/null | cut -c1-8
+	else
+		echo '--------'
+	fi
+}
+
+# Is $1 a mountpoint? mountpoint(1) is util-linux; /proc/mounts is everywhere.
+# Falling back to it keeps a minimal target from reporting every bind as absent,
+# which is the failure mode a diagnostic can least afford. (Neither form is
+# fooled by the chroot's own /etc/mtab, which fix-dev.sh points at /proc/mounts.)
+is_mount() {
+	mountpoint -q "$1" 2>/dev/null && return 0
+	awk -v p="$1" '$2 == p { f = 1 } END { exit !f }' /proc/mounts 2>/dev/null
+}
+
+# A deployed-from file and the copy the player actually loads. $1 = label,
+# $2 = the deploy-root copy (what start-rb.sh's install_override reads),
+# $3 = the chroot copy (what LD_PRELOAD names).
+#
+# Three outcomes, and the middle one is the trap this whole section exists for:
+# install_override() returns 0 in silence when $2 is absent, so the chroot keeps
+# whatever older build was there and rbp runs it. Memory, 2026-10-06: "check the
+# shim's vintage before diagnosing any on-unit symptom".
+pair() {
+	_p2=$2
+	_p3=$3
+	if [ ! -f "$_p3" ]; then
+		bad "$1: $3 is MISSING — rbp runs without it"
+		note "ld.so prints 'cannot preload' and continues, so this is silent on the glass."
+		if [ -f "$_p2" ]; then
+			fix "cp $_p2 $_p3"
+		else
+			# No paste-ready line, deliberately: the fix is to build the file,
+			# which is not a command. Saying so here beats printing a cp whose
+			# source does not exist.
+			note "and there is nothing at the deploy root to copy from: $_p2"
+		fi
+		return 0
+	fi
+	if [ ! -f "$_p2" ]; then
+		warn "$1: no deploy-root copy at $2"
+		note "start-rb.sh only copies when that file exists, so the chroot's"
+		note "copy ($(_sum "$_p3")) is what will run."
+		return 0
+	fi
+	if cmp -s "$_p2" "$_p3"; then
+		ok "$1: $(_sum "$_p3") (deployed copy and loaded copy are the same file)"
+	else
+		bad "$1: the loaded copy is a DIFFERENT build from the deployed one"
+		note "deployed $(_sum "$_p2")  ->  loaded $(_sum "$_p3")"
+		fix "cp $_p2 $_p3"
+	fi
+	return 0
+}
+
+# --- 1. the layout install.sh would have produced ---------------------------
+
+hdr 1 "layout"
+[ -d "$RB_DEPLOY_ROOT" ] || { bad "$RB_DEPLOY_ROOT does not exist — not installed here"; }
+[ -d "$RB_CHROOT" ] || bad "$RB_CHROOT does not exist (the chroot)"
+
+if [ -d "$RB_CHROOT" ]; then
+	ok "chroot tree present: $RB_CHROOT"
+fi
+
+# The schema guard, the same comparison lib.sh:48 makes — but reported rather
+# than fatal, because reporting is the whole job here.
+if [ "${RB_CONF_VERSION:-0}" = "$RB_CONF_SCHEMA" ]; then
+	ok "rb.conf schema v${RB_CONF_VERSION} matches lib.sh's v$RB_CONF_SCHEMA"
+else
+	bad "rb.conf is schema v${RB_CONF_VERSION:-?}; these scripts expect v$RB_CONF_SCHEMA"
+	note "every script that sources lib.sh exits on this, so the unit looks"
+	note "broken rather than misconfigured. Re-deploy a matching pair."
+fi
+
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh; do
+	[ -f "$RB_DEPLOY_ROOT/$s" ] || {
+		bad "$RB_DEPLOY_ROOT/$s is missing"
+		fix "scp scripts/device/$s root@<unit>:$RB_DEPLOY_ROOT/"
+	}
+done
+
+# rb.local.conf is where a value MEASURED ON THIS UNIT belongs: rb.conf is
+# shipped and overwritten on every install, this file never is (install.sh:148).
+if [ -f "$RB_DEPLOY_ROOT/rb.local.conf" ]; then
+	ok "rb.local.conf present (machine-local overrides survive a reinstall)"
+else
+	warn "no rb.local.conf — this unit has no place for measured values"
+	note "RB_POINT_KIND=rel is the one that has actually been needed here; set by"
+	note "hand, it reverts on the next install without this file."
+	fix "printf 'RB_POINT_KIND=rel\\n' > $RB_DEPLOY_ROOT/rb.local.conf"
+fi
+
+# --- 2. the shims: deployed, versus what the loader will actually take ------
+
+hdr 2 "shims: the deployed file and the copy rbp loads"
+
+# The list comes from RB_LD_PRELOAD itself (rb.conf:636), so a shim added to the
+# preload list is checked here without touching this script. basename of each
+# entry is also the deploy-root filename, which is exactly what start-rb.sh's
+# install_override() list mirrors (start-rb.sh:115-120).
+_seen_preload=0
+for p in $(echo "${RB_LD_PRELOAD:-}" | tr ':' ' '); do
+	_seen_preload=$((_seen_preload + 1))
+	pair "$(basename "$p")" "$RB_DEPLOY_ROOT/$(basename "$p")" "$RB_CHROOT$p"
+done
+if [ "$_seen_preload" -eq 0 ]; then
+	bad "RB_LD_PRELOAD is empty in $RB_CONF_FILE — rbp would run with no shims at all"
+	fix "set RB_LD_PRELOAD in $RB_CONF_FILE"
+fi
+
+# The patched DirectFB system module, whose two names differ (start-rb.sh:122).
+pair "libdirectfb_fbdev (rot16)" \
+     "$RB_DEPLOY_ROOT/libdirectfb_fbdev-rot16.so" \
+     "$RB_CHROOT/usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so"
+
+# The player itself. A deploy-root rbp-audio is the exception, not the rule —
+# build-chroot.sh bakes the player into the chroot — so only the chroot copy is
+# required, and a deploy-root copy that differs is the interesting case.
+if [ -f "$RB_CHROOT/root/pdj/rbp" ]; then
+	ok "player present: $RB_CHROOT/root/pdj/rbp ($(_sum "$RB_CHROOT/root/pdj/rbp"))"
+else
+	bad "the player is missing: $RB_CHROOT/root/pdj/rbp"
+	fix "# build rbp-audio, scp it to $RB_DEPLOY_ROOT/, then run start-rb.sh"
+fi
+if [ -f "$RB_DEPLOY_ROOT/rbp-audio" ] && [ -f "$RB_CHROOT/root/pdj/rbp" ]; then
+	if cmp -s "$RB_DEPLOY_ROOT/rbp-audio" "$RB_CHROOT/root/pdj/rbp"; then
+		ok "rbp-audio override matches the installed player"
+	else
+		warn "rbp-audio at the deploy root differs from the installed player"
+		note "start-rb.sh copies it at launch, so this is a player deployed since"
+		note "the last launch, or a copy that did not happen."
+		fix "cp $RB_DEPLOY_ROOT/rbp-audio $RB_CHROOT/root/pdj/rbp"
+	fi
+fi
+
+# --- 3. the loader wiring ---------------------------------------------------
+
+hdr 3 "loader wiring"
+case "${RB_LD_PRELOAD:-}" in
+	*/crashcatch.so*) ok "crashcatch.so is first in RB_LD_PRELOAD (its constructor must arm first)";;
+	*) bad "crashcatch.so is NOT first in RB_LD_PRELOAD"
+	   note "RB_LD_PRELOAD=$RB_LD_PRELOAD"
+	   note "the exit witness has to install its handler before any other preload"
+	   note "can fault or exit, so an earlier shim can hide a crash entirely."
+	   fix "put /usr/lib/crashcatch.so first in RB_LD_PRELOAD ($RB_CONF_FILE)";;
+esac
+
+# --- 4. the ABI test: can this kernel actually run the tree -----------------
+
+hdr 4 "chroot execution (the real ABI test)"
+if [ "$(id -u)" = "0" ]; then
+	# stderr is captured into a variable rather than a temp file, so the whole
+	# script still opens nothing for writing. The redirection order matters:
+	# `2>&1` must come first, while stdout is still the command substitution.
+	_err=$(chroot "$RB_CHROOT" /bin/busybox echo ok 2>&1 >/dev/null)
+	if [ -z "$_err" ]; then
+		ok "the chroot runs a 32-bit ARM EABI5 binary against its own glibc"
+	else
+		bad "the chroot could NOT execute a 32-bit binary"
+		printf '%s\n' "$_err" | sed 's/^/        /'
+		note "usually a 64-bit kernel with 32-bit emulation disabled (CONFIG_COMPAT)."
+		note "Every shim and the player are ARM32 soft-float; there is no 64-bit rbp."
+		fix "install Pi OS Lite 32-bit (armhf) — see docs/13-raspberrypi4.md"
+	fi
+else
+	warn "skipped (not root)"
+fi
+
+# --- 5. device nodes --------------------------------------------------------
+
+hdr 5 "device nodes"
+if [ -e /dev/fb0 ]; then
+	ok "/dev/fb0 present (no display without it)"
+else
+	bad "/dev/fb0 is missing — there is no display and rbp exits early"
+	fix "enable dtoverlay=vc4-kms-v3d in /boot/firmware/config.txt and reboot"
+fi
+
+if [ -e /dev/snd/seq ]; then
+	ok "/dev/snd/seq present (no sequencer = no controller input at all)"
+else
+	bad "/dev/snd/seq is missing — rbp starts and receives no control events"
+	note "the classic silent 'controls do nothing'; snd-seq is not autoloaded"
+	note "on every boot, and fix-dev.sh's modprobe is the only thing that fixes it."
+	fix "modprobe snd-seq   # and check CONFIG_SND_SEQUENCER in the kernel"
+fi
+
+if [ -d /dev/input ] && [ -n "$(ls /dev/input 2>/dev/null)" ]; then
+	ok "/dev/input: $(ls /dev/input 2>/dev/null | tr '\n' ' ')"
+else
+	warn "/dev/input is empty — no keyboard, mouse or panel"
+	note "the keyboard map still drives playback; pointing needs a device."
+fi
+
+# The second of the two defences around rbp's i.MX6 register mappings
+# (fix-dev.sh:123); audioshim's mmap interposition is the first.
+if [ -e /dev/mem ]; then
+	_dm=$(stat -c '%a' /dev/mem 2>/dev/null || echo '?')
+	if [ "$_dm" = "0" ]; then
+		ok "/dev/mem mode 000 (rbp cannot reach real peripherals)"
+	else
+		warn "/dev/mem mode is $_dm, not 000"
+		note "fix-dev.sh sets this at every start; a value here means the launcher"
+		note "has not run since the last boot."
+		fix "chmod 000 /dev/mem"
+	fi
+fi
+
+# --- 6. what fix-dev.sh is supposed to have put in place --------------------
+
+hdr 6 "binds, stubs and FIFOs (fix-dev.sh's output)"
+if [ -d "$RB_CHROOT" ]; then
+	for d in dev proc sys tmp; do
+		if is_mount "$RB_CHROOT/$d"; then
+			ok "$RB_CHROOT/$d is a mount"
+		else
+			bad "$RB_CHROOT/$d is NOT mounted"
+			note "rbp cannot open /tmp (the shim rendezvous), /dev or /proc without it."
+			fix "sh $RB_DEPLOY_ROOT/fix-dev.sh"
+		fi
+	done
+
+	# The FIFOs: rbp polls these at full speed, and a regular file makes the poll
+	# return immediately and forever, pegging a core under RT priority 98
+	# (fix-dev.sh:95-105). So the check is the file type, not the presence.
+	for d in subucom_spi1.0 subucom_spi2.0 subucom_spi_rdy3.0 subucom_spi_rdy4.0 hidg0; do
+		if [ -p "$RB_CHROOT/dev/$d" ]; then
+			:
+		elif [ -e "$RB_CHROOT/dev/$d" ]; then
+			bad "$RB_CHROOT/dev/$d exists but is not a FIFO"
+			fix "sh $RB_DEPLOY_ROOT/fix-dev.sh"
+		else
+			warn "$RB_CHROOT/dev/$d is missing"
+		fi
+	done
+	[ -p "$RB_CHROOT/dev/subucom_spi1.0" ] && ok "the SPI/hid FIFOs are in place"
+
+	# paudiog0 must NOT exist: with it present JUCE takes the USB-gadget-audio
+	# path and issues gadget ioctls this kernel does not have (fix-dev.sh:119).
+	if [ -e "$RB_CHROOT/dev/paudiog0" ]; then
+		bad "$RB_CHROOT/dev/paudiog0 exists — JUCE will take the gadget-audio path"
+		fix "rm -f $RB_CHROOT/dev/paudiog0"
+	else
+		ok "no paudiog0 (the gadget-audio path is closed)"
+	fi
+
+	# glibc 2.13 reads /etc/mtab as a regular file; it has to point at the real
+	# mount table or the chroot sees the tarball's stale copy (fix-dev.sh:141).
+	if [ -L "$RB_CHROOT/etc/mtab" ]; then
+		ok "$RB_CHROOT/etc/mtab -> $(readlink "$RB_CHROOT/etc/mtab")"
+	else
+		warn "$RB_CHROOT/etc/mtab is not a symlink to /proc/mounts"
+		fix "sh $RB_DEPLOY_ROOT/fix-dev.sh"
+	fi
+fi
+
+if [ -p /tmp/udev_usb1 ]; then
+	ok "/tmp/udev_usb1 FIFO present (this is how rbp hears about the stick)"
+else
+	bad "/tmp/udev_usb1 is missing or not a FIFO — rbp will never see the media"
+	fix "sh $RB_DEPLOY_ROOT/fix-dev.sh"
+fi
+
+# --- 7. the service, and what is ACTUALLY running ---------------------------
+
+hdr 7 "the service, and the build actually loaded"
+if [ -f /etc/systemd/system/rblive4.service ]; then
+	_um=$(stat -c '%a' /etc/systemd/system/rblive4.service 2>/dev/null || echo '?')
+	if [ "$_um" = "644" ]; then
+		ok "rblive4.service installed, mode 644"
+	else
+		warn "rblive4.service mode is $_um (644 is what install.sh sets)"
+	fi
+else
+	bad "/etc/systemd/system/rblive4.service is not installed"
+	fix "sh $RB_DEPLOY_ROOT/install.sh   # or: systemctl enable --now rblive4"
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+	_en=$(systemctl is-enabled rblive4.service 2>/dev/null || echo unknown)
+	if [ "${RB_AUTOSTART:-1}" = "1" ]; then
+		case "$_en" in
+			enabled) ok "enabled (RB_AUTOSTART=1) — the player starts at boot";;
+			*)       bad "RB_AUTOSTART=1 in rb.conf but the unit is '$_en' — it will not start at boot"
+			         fix "systemctl enable rblive4";;
+		esac
+	else
+		case "$_en" in
+			enabled) warn "RB_AUTOSTART=${RB_AUTOSTART} but the unit is enabled";;
+			*)       ok "disabled (RB_AUTOSTART=${RB_AUTOSTART})";;
+		esac
+	fi
+fi
+
+# pids_matching, not `ps | awk`: the same lookup start-rb.sh uses (start-rb.sh:269),
+# so doctor and the launcher cannot disagree about which process is rbp. The
+# empty-pattern guard is not decoration: pids_matching() treats its argument as
+# a glob, and an empty one matches every process on the machine.
+if [ -z "${RB_PLAYER:-}" ]; then
+	bad "RB_PLAYER is empty in $RB_CONF_FILE"
+	note "the launcher uses it to find and stop the player; empty, it matches"
+	note "every process on the unit."
+	RBPID=""
+else
+	RBPID=$(pids_matching "$RB_PLAYER" 2>/dev/null | head -1)
+fi
+if [ -z "$RBPID" ]; then
+	warn "rbp is not running (${RB_PLAYER:-?})"
+	note "nothing below can report a loaded build; start it with"
+	note "  systemctl start rblive4"
+else
+	_started=$(stat -c '%y' "/proc/$RBPID" 2>/dev/null | cut -d. -f1 || echo '?')
+	ok "rbp is running: pid $RBPID, started $_started"
+
+	# THE question this tree has most often got wrong. /proc/<pid>/maps names the
+	# file by its path on THIS filesystem — the chroot is a chroot, not a mount
+	# namespace — so the line matches the $RB_CHROOT path directly.
+	if [ -r "/proc/$RBPID/maps" ]; then
+		for p in $(echo "${RB_LD_PRELOAD:-}" | tr ':' ' '); do
+			_host="$RB_CHROOT$p"
+			if grep -qF "$_host" "/proc/$RBPID/maps" 2>/dev/null; then
+				ok "$(basename "$p") is loaded ($(_sum "$_host"))"
+			else
+				bad "$(basename "$p") is NOT loaded into the running rbp"
+			fi
+		done
+	fi
+fi
+
+# --- 8. the media -----------------------------------------------------------
+
+hdr 8 "media"
+if is_mount "$MNT"; then
+	ok "stick mounted host-side: $MNT"
+else
+	note "no stick mounted at $MNT (normal if nothing is plugged in)"
+fi
+if is_mount "$CH_MNT"; then
+	ok "bound into the chroot: $CH_MNT (rbp's view of the media)"
+else
+	if is_mount "$MNT"; then
+		bad "$MNT is mounted but $CH_MNT is not — rbp cannot see the stick"
+		fix "sh $RB_DEPLOY_ROOT/usb-watch.sh   # it owns both mounts"
+	else
+		note "not bound (nothing to bind)"
+	fi
+fi
+
+# --- summary ----------------------------------------------------------------
+
+echo
+if [ "$FAILS" -eq 0 ] && [ "$WARNS" -eq 0 ]; then
+	say "no problems found."
+	exit 0
+fi
+
+say "$FAILS failure(s), $WARNS warning(s)."
+
+if [ -n "$FIX" ]; then
+	echo
+	echo "To fix (paste):"
+	# printf, not echo: this is the one place a line can contain a backslash
+	# (the rb.local.conf line ends in \n), and dash's and bash-in-POSIX-mode's
+	# echo both expand escapes, which would break it across two lines.
+	printf '%s\n' "$FIX"
+fi
+
+echo
+[ "$FAILS" -eq 0 ] || exit 1
+exit 0

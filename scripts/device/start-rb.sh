@@ -115,6 +115,9 @@ install_override() {
 install_override "$RB_DEPLOY_ROOT/fbshim.so"     "$RB_CHROOT/usr/lib/fbshim.so"
 install_override "$RB_DEPLOY_ROOT/knobshim.so"   "$RB_CHROOT/usr/lib/knobshim.so"
 install_override "$RB_DEPLOY_ROOT/audioshim.so"  "$RB_CHROOT/usr/lib/audioshim.so"
+# The exit witness. It is in RB_LD_PRELOAD (rb.conf), so naming it here is what
+# keeps the loaded copy and the deployed copy the same file (docs/13 S3.7).
+install_override "$RB_DEPLOY_ROOT/crashcatch.so" "$RB_CHROOT/usr/lib/crashcatch.so"
 install_override "$RB_DEPLOY_ROOT/rbp-audio"     "$RB_CHROOT/root/pdj/rbp"
 install_override "$RB_DEPLOY_ROOT/libdirectfb_fbdev-rot16.so" \
                  "$RB_CHROOT/usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so"
@@ -192,6 +195,7 @@ LED_VU LED_VU_SEGMENTS LED_PADS LED_DISABLE PAD_BRIGHT JOG_PPR
 JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV MIRROR_GAIN_MID
 KNOB_VERBOSE JOG_VERBOSE TEMPO_VERBOSE LED_VERBOSE
 SHMSTATE_STRICT
+CRASH_LOG
 "
 for v in $SHIM_VARS; do
     eval "val=\${RB_$v:-}"
