@@ -933,6 +933,17 @@ operator: *"yes only the pad i pressed flashed."* Note
 also that **"dim" is the shim's name for 3, not a measurement** — it stands for
 the deck LEDs, where 3 still counts as on and is deliberately left alone.
 
+**The cadence moved on 2026-10-06, for State 2 only.** The three LED entries rbp
+marks State 2 carry a blink period of their own at `LedStat` entry `+28` (deck 1
+PLAY 500 ms, deck 2 PLAY 250 ms, CfxFilter 250 ms), and the shim now renders the
+blink at rbp's period rather than at its own counter — [08](08-controls.md) has
+the reading and [17](17-rx3-flx4-comparison.md) §4 item 2 the port. **State 3 is
+unchanged**: rbp gives the engaged loop pad a state and a colour and *no* period,
+because its intent is dimmer and not faster, so the pad keeps the old 800 ms
+fallback (400 on / 400 off) — the four-send runs measured above. That is why the
+fallback was deliberately left at 800 rather than re-chosen: the before/after of
+this change is legible only if the pads that were not asked to blink do not move.
+
 ### Measuring the notes: the route, and the loopback result
 
 Two things had to be settled before any note could be probed, and both were

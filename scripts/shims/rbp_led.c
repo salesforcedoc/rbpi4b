@@ -55,6 +55,7 @@
 #include "rbp_bridge.h"
 #include "midi_io.h"
 #include "rbp_led.h"
+#include "led_table.h"  /* the settled view of the table, and the blink phase */
 #include "ctrl_map.h"   /* struct led_notes, and ctrl_sel_leds() */
 
 /* "loop-in armed" latch per deck (0 = deck 1), driven by the LOOP IN/OUT keys;
@@ -77,11 +78,10 @@ static int led_dump = 0;
 static int led_pads = 1;      /* LED_PADS=0: no pad output (rbp's state is
                                * still mirrored for the other LEDs) */
 int led_sweep = 0;
-static unsigned long led_tick = 0;        /* 50 ms ticks, for blink */
+static unsigned long led_tick = 0;        /* 50 ms ticks, for the resend cadence */
 static signed char led_last[2][L_SLOT_COUNT]; /* [deck][slot] -1 = unknown */
 static int led_prev_looping[2];
 static int led_dbg_last[2];               /* last logged loop-state bitmask */
-static int led_blink_phase;               /* current blink phase (0/1) */
 
 /* THE PANEL WANTS A STREAM, NOT AN EDGE -- measured on the FLX4, 2026-10-01.
  *
@@ -151,6 +151,109 @@ static unsigned char *ledstat_ptr(void)
      return (unsigned char *)ledmgr + LEDSTAT_OFF;
 }
 
+/* --- the settled view of the table -----------------------------------------
+ *
+ * Everything below reads `led_snap`, never the live array. rbp rebuilds that
+ * array every 20 ms, and a read taken across a rebuild is a state rbp never had;
+ * led_table.h has the whole argument, this is only the plumbing that takes the
+ * two reads and calls it.
+ *
+ * ONE read per tick, not one per LED: led_refresh() snapshots once and then
+ * every lookup -- and there are three per pad per tick -- is a scan of a local
+ * buffer. The cost is one 1.5 ms sleep per 50 ms tick, which is what buys the
+ * agreement.
+ *
+ * The interval is the sibling port's (control-shim.c:94). It has to be short
+ * against rbp's 20 ms rebuild, or the two reads land in different rebuilds and
+ * disagree for a reason that is not a tear -- at 1.5 ms, a pair that straddles
+ * a rebuild is rare and is exactly the case worth rejecting.
+ */
+#define LED_SNAP_GAP_US 1500
+
+static unsigned char led_snap[LED_DUMP_MAX * LED_ENTRY_SIZE];      /* settled */
+static unsigned char led_snap_a[LED_DUMP_MAX * LED_ENTRY_SIZE];
+static unsigned char led_snap_b[LED_DUMP_MAX * LED_ENTRY_SIZE];
+static unsigned char led_snap_out[LED_DUMP_MAX * LED_ENTRY_SIZE];
+static unsigned int led_snap_count;       /* entries in led_snap; 0 = no reading */
+static unsigned int led_snap_flux;        /* entries whose two reads disagreed */
+static int led_flux_last = -1;            /* last logged count, so the log is an event */
+
+static void led_snapshot(void)
+{
+     unsigned char *ls = ledstat_ptr();
+     unsigned char *arr;
+     unsigned int count, i;
+     /* THE PREVIOUS SETTLED COUNT, CAPTURED BEFORE THE RESET BELOW.
+      *
+      * This is not decoration. `led_snap_count` is both "how many entries the
+      * live settled table holds" and the `prev_count` the carry-forward looks
+      * its history up with, and the reset that marks "no reading" writes the
+      * same variable -- so passing `led_snap_count` directly to the merge hands
+      * it a count of ZERO on every tick and the carry-forward can never find
+      * anything. It does not crash and it does not log: it silently degrades
+      * the filter from "an entry in flux keeps its last good value" to "an entry
+      * in flux vanishes for the tick", which is the exact failure the filter
+      * exists to prevent. Measured on the unit 2026-10-06 before this line
+      * existed: `ledsnap 23 of 42 entries disagreed; 19 in the settled table` --
+      * 23 entries dropped, 42 - 23 = 19 left, and not one of the 23 carried. */
+     unsigned int prev_count = led_snap_count;
+
+     led_snap_count = 0;
+     led_snap_flux = 0;
+     if (!ls)
+          return;
+     count = *(unsigned short *)(ls + 4);
+     arr = *(unsigned char **)(ls + 8);
+     if (!arr || count == 0 || count > LED_DUMP_MAX)
+          return;
+
+     memcpy(led_snap_a, arr, (size_t)count * LED_ENTRY_SIZE);
+     usleep(LED_SNAP_GAP_US);
+     /* Re-read the HEADER as well as the array: if the table was resized or
+      * moved between the two reads then neither buffer describes one table, and
+      * there is nothing to merge -- the tick simply has no reading, which every
+      * caller already handles. */
+     count = *(unsigned short *)(ls + 4);
+     arr = *(unsigned char **)(ls + 8);
+     if (!arr || count == 0 || count > LED_DUMP_MAX)
+          return;
+     memcpy(led_snap_b, arr, (size_t)count * LED_ENTRY_SIZE);
+
+     for (i = 0; i < count; i++)
+          if (memcmp(led_snap_a + (size_t)i * LED_ENTRY_SIZE,
+                     led_snap_b + (size_t)i * LED_ENTRY_SIZE, LED_ENTRY_SIZE))
+               led_snap_flux++;
+
+     /* Through a THIRD buffer, because the merge reads the previous settled
+      * table and writes the new one: in place, an entry written early could
+      * overwrite a previous entry the carry-forward has not looked up yet.
+      * `prev_count` and not `led_snap_count` -- see the note at the top. */
+     led_snap_count = led_merge_settled(led_snap_a, led_snap_b, count,
+                                        led_snap, prev_count, led_snap_out);
+     memcpy(led_snap, led_snap_out, (size_t)led_snap_count * LED_ENTRY_SIZE);
+
+     /* Say when the filter fires, but only when the count CHANGES -- the point
+      * of a filter that is invisible in its output is that you cannot tell it
+      * from no filter at all, and a line per tick would be 20 lines a second
+      * forever. Under LED_VERBOSE, which is off by default (and which, on a unit
+      * left with it on, is the ~1 GB/day this tree has already paid for). */
+     if (led_verbose && (int)led_snap_flux != led_flux_last) {
+          led_flux_last = (int)led_snap_flux;
+          klog("knobshim2: ledsnap %u of %u entries disagreed between the two "
+               "reads; %u in the settled table\n",
+               led_snap_flux, count, led_snap_count);
+     }
+}
+
+/* One entry of the settled table, or NULL. The four readers below all go
+ * through this: rbp's State, its colour, the dim flag and the blink period are
+ * four words of ONE entry, and reading them with four scans of a live table was
+ * four chances to see a different rebuild. */
+static const unsigned char *led_entry(unsigned int id, unsigned int ch)
+{
+     return led_find(led_snap, led_snap_count, id, ch);
+}
+
 /* rbp's real per-deck pad mode -- 0 HOT CUE / 1 AUTO BEAT LOOP / 2 SLIP BEAT
  * LOOP / 3 BEAT JUMP -- or -1 if the chain is not up yet.
  *
@@ -195,44 +298,33 @@ static int rbp_pad_mode(int deck)
  * the pad path below blinks state 3 (see the measurement at that call site). */
 static int ledstat_state(unsigned int id, unsigned int ch)
 {
-     unsigned char *ls = ledstat_ptr();
-     unsigned char *arr;
-     unsigned int count, i;
-     if (!ls)
+     const unsigned char *e = led_entry(id, ch);
+     if (!e)
           return -1;
-     count = *(unsigned short *)(ls + 4);
-     arr = *(unsigned char **)(ls + 8);
-     if (!arr || count == 0 || count > LED_DUMP_MAX)
-          return -1;
-     for (i = 0; i < count; i++) {
-          unsigned char *e = arr + LED_ENTRY_SIZE * i;
-          if (*(unsigned int *)(e + 0) == id && *(unsigned int *)(e + 4) == ch)
-               return (int)*(unsigned int *)(e + 16);
-     }
-     return -1;
+     return (int)*(const unsigned int *)(e + LED_ENTRY_OFF_STATE);
+}
+
+/* rbp's own blink period for this LED, in ms, or 0 when rbp is not asking for
+ * one. See LED_ENTRY_OFF_PERIOD for what makes this a reading: on the unit the
+ * only entries carrying a non-zero value are the ones whose State is 2, and an
+ * entry caught starting to blink had it written in the same rebuild. */
+static unsigned int ledstat_period(unsigned int id, unsigned int ch)
+{
+     const unsigned char *e = led_entry(id, ch);
+     if (!e)
+          return 0;
+     return *(const unsigned int *)(e + LED_ENTRY_OFF_PERIOD);
 }
 
 /* Read the stored RGB (3 bytes at Led entry +40/+41/+42; rbp's ColorLed::Rgb
  * is 0..255 per channel).  Returns 0 if rbp has no entry for (id, ch). */
 static int ledstat_rgb(unsigned int id, unsigned int ch, unsigned char *out)
 {
-     unsigned char *ls = ledstat_ptr();
-     unsigned char *arr;
-     unsigned int count, i;
-     if (!ls)
+     const unsigned char *e = led_entry(id, ch);
+     if (!e)
           return 0;
-     count = *(unsigned short *)(ls + 4);
-     arr = *(unsigned char **)(ls + 8);
-     if (!arr || count == 0 || count > LED_DUMP_MAX)
-          return 0;
-     for (i = 0; i < count; i++) {
-          unsigned char *e = arr + LED_ENTRY_SIZE * i;
-          if (*(unsigned int *)(e + 0) == id && *(unsigned int *)(e + 4) == ch) {
-               out[0] = e[40]; out[1] = e[41]; out[2] = e[42];
-               return 1;
-          }
-     }
-     return 0;
+     out[0] = e[40]; out[1] = e[41]; out[2] = e[42];
+     return 1;
 }
 
 /* Has rbp assigned this pad nothing (rbp_abi.h's LED_ENTRY_OFF_UNASSIGNED)?
@@ -243,21 +335,10 @@ static int ledstat_rgb(unsigned int id, unsigned int ch, unsigned char *out)
  * would make the panel's look depend on which of the two reads failed. */
 static int ledstat_unassigned(unsigned int id, unsigned int ch)
 {
-     unsigned char *ls = ledstat_ptr();
-     unsigned char *arr;
-     unsigned int count, i;
-     if (!ls)
+     const unsigned char *e = led_entry(id, ch);
+     if (!e)
           return 0;
-     count = *(unsigned short *)(ls + 4);
-     arr = *(unsigned char **)(ls + 8);
-     if (!arr || count == 0 || count > LED_DUMP_MAX)
-          return 0;
-     for (i = 0; i < count; i++) {
-          unsigned char *e = arr + LED_ENTRY_SIZE * i;
-          if (*(unsigned int *)(e + 0) == id && *(unsigned int *)(e + 4) == ch)
-               return *(unsigned int *)(e + LED_ENTRY_OFF_UNASSIGNED) != 0;
-     }
-     return 0;
+     return *(const unsigned int *)(e + LED_ENTRY_OFF_UNASSIGNED) != 0;
 }
 
 static void led_dump_scan(void)
@@ -297,6 +378,29 @@ static void led_dump_scan(void)
      }
 }
 
+/* The blink phase for one LED, at this instant.
+ *
+ * rbp does not toggle a blinking LED's State -- it sets State 2 and leaves it,
+ * with a period in the entry, and the panel is expected to time the blink. So
+ * the cadence comes from rbp (led_table.h, and LED_ENTRY_OFF_PERIOD for the
+ * measurement) and NOT from a counter this file keeps.
+ *
+ * It replaces `blink = (led_tick & 8)`, which was ~400 ms on / off for every
+ * blinking LED everywhere. Measured on the unit 2026-10-06, rbp asks for three
+ * different periods at once (deck 1 PLAY 500 ms, deck 2 PLAY 250 ms, the CFX
+ * filter 250 ms), so one cadence for all of them was saying something rbp was
+ * not.
+ *
+ * The fallback is for the LEDs rbp does not ask to blink -- the engaged
+ * beat-loop pad, above all, which this file blinks on its own initiative and
+ * which therefore has no period to read. LED_BLINK_FALLBACK_MS is the old
+ * cadence, so nothing rbp has no opinion about moves. */
+static int led_blink_for(unsigned int id, unsigned int ch)
+{
+     return led_blink_on(shim_now_ms(), ledstat_period(id, ch),
+                         LED_BLINK_FALLBACK_MS);
+}
+
 /* Send one LED, if this surface has it. A note or channel of -1 means the
  * surface's table says "no such LED" -- nothing is transmitted, and that is the
  * whole point of the table: an unmeasured or absent row must send nothing rather
@@ -327,9 +431,11 @@ static void led_send(int sch, int note, signed char *last, int on)
 
 /* Prefer rbp's own state for an LED; fall back to a derived value when rbp
  * has no entry for it yet.  State 2 is rbp's blink request (e.g. SYNC blinks
- * when synced but the platter was nudged off beat), so we drive the panel
- * blink ourselves at the same cadence.  State 3 (dim) has no panel equivalent
- * available here and counts as on, which is what the previous target did.
+ * when synced but the platter was nudged off beat), and the cadence for it is
+ * rbp's own, out of the same entry -- "at the same cadence" used to be a claim
+ * about a counter this file kept, and is now the thing itself.  State 3 (dim)
+ * has no panel equivalent available here and counts as on, which is what the
+ * previous target did.
  *
  * That last rule stands for the DECK LEDs, which is all this helper serves.  The
  * pads deliberately differ: there state 3 is measured to mean "this is the
@@ -338,12 +444,13 @@ static void led_send(int sch, int note, signed char *last, int on)
 static void led_from_table(int sch, int note, signed char *last, unsigned int id,
                            int deck, int fallback)
 {
-     int st = ledstat_state(id, (unsigned int)deck + 1);
+     int ch = deck + 1;
+     int st = ledstat_state(id, (unsigned int)ch);
      int on;
      if (st < 0)
           on = fallback;
      else if (st == 2)
-          on = led_blink_phase;
+          on = led_blink_for(id, (unsigned int)ch);   /* rbp's own period */
      else
           on = (st != 0);
      led_send(sch, note, last, on);
@@ -462,14 +569,19 @@ static void led_refresh(void)
      n = led_notes_sel();
      if (!n)
           return;
-     blink = (led_tick & 8) ? 1 : 0;      /* ~400 ms on / off */
-     led_blink_phase = blink;
+     /* ONE filtered read of rbp's table for the whole tick -- every ledstat_*
+      * call below scans this and not the live array. Before anything is read
+      * from it, and after the guards above, so a disabled bridge or an absent
+      * panel costs no 1.5 ms. */
+     led_snapshot();
+     blink = led_blink_on(shim_now_ms(), 0, LED_BLINK_FALLBACK_MS);
      led_force = ((led_tick % LED_RESEND_TICKS) == 0);   /* see above */
 
      /* global LEDs, straight from rbp (id -> whatever note this panel uses) */
      for (int g = 0; g < LED_FX_COUNT; g++) {
           int st = ledstat_state(led_g_tab[g].id, 0);
-          int on = (st < 0) ? 0 : (st == 2 ? blink : (st != 0));
+          int on = (st < 0) ? 0 : (st == 2 ? led_blink_for(led_g_tab[g].id, 0)
+                                           : (st != 0));
           led_apply_g(g, n->fx_ch, n->n_fx[g], on);
      }
 
@@ -528,9 +640,13 @@ static void led_refresh(void)
           led_from_table(sch, n->n_sync, &led_last[i][L_SYNC], LEDSTAT_SYNC, i, sync);
           led_send(sch, n->n_cue, &led_last[i][L_CUE], loaded && !playing);
           /* PLAY: solid while playing, blinks while paused on a loaded
-           * track, dark with nothing loaded. */
+           * track, dark with nothing loaded. The blink is rbp's own when it has
+           * an opinion -- and it does, id 49 with a period per deck (500 ms on
+           * deck 1 and 250 ms on deck 2, read off the unit) -- so the cadence
+           * comes from there and only the DECISION stays derived. */
           led_send(sch, n->n_play, &led_last[i][L_PLAY],
-                   playing ? 1 : (loaded ? blink : 0));
+                   playing ? 1 : (loaded ? led_blink_for(LEDSTAT_PLAY,
+                                                         (unsigned int)i + 1) : 0));
           led_send(sch, n->n_keylock, &led_last[i][L_KEYLOCK], mt);
           led_send(sch, n->n_vinyl, &led_last[i][L_VINYL], vinyl);
           led_send(sch, n->n_slip, &led_last[i][L_SLIP], slip);
@@ -601,13 +717,17 @@ static void led_refresh(void)
                               led_pad_apply(pch, pnote,
                                             &led_pad_last[i][p], 0);
                          } else if (st == 2 || st == 3) {
-                              /* 2 is rbp's blink request. 3 is the state rbp
-                               * puts the ENGAGED beat-loop pad in while its
-                               * seven siblings stay at 1 -- measured
-                               * 2026-10-01 on a paused deck, moving the loop
-                               * from pad 5 to pad 7 and watching the 3 move
-                               * with it, and clearing when the loop was let
-                               * go (ledstat_state's comment has the run).
+                              /* 2 is rbp's blink request, and the cadence for
+                               * it is rbp's own period out of the same entry.
+                               * 3 is the state rbp puts the ENGAGED beat-loop
+                               * pad in while its seven siblings stay at 1 --
+                               * measured 2026-10-01 on a paused deck, moving
+                               * the loop from pad 5 to pad 7 and watching the
+                               * 3 move with it, and clearing when the loop was
+                               * let go (ledstat_state's comment has the run).
+                               * rbp asks for no blink there -- it has no period
+                               * at all for a pad at 3 -- so that one keeps this
+                               * file's own cadence.
                                *
                                * Blink is the rendering, and it is a choice
                                * worth naming: this panel's pads are OFF/ON
@@ -621,9 +741,13 @@ static void led_refresh(void)
                                * this, 3 fell into the solid branch below and
                                * an engaged loop was invisible on the panel
                                * while rbp's own screen highlighted the cell. */
+                              int ph = (st == 2)
+                                   ? led_blink_for(LED_PAD_FIRST + (unsigned)p,
+                                                   (unsigned)i + 1)
+                                   : blink;
                               led_pad_apply(pch, pnote, &led_pad_last[i][p],
-                                   blink ? led_encode(n->pad_enc,
-                                                      rgb[0], rgb[1], rgb[2]) : 0);
+                                   ph ? led_encode(n->pad_enc,
+                                                   rgb[0], rgb[1], rgb[2]) : 0);
                          } else {
                               led_pad_apply(pch, pnote, &led_pad_last[i][p],
                                    led_encode(n->pad_enc, rgb[0], rgb[1], rgb[2]));

@@ -490,6 +490,29 @@ static const signed char bfx_type_to_pos[15] = {
 #define LEDSTAT_OFF          0x30
 #define LED_ENTRY_SIZE       0x2c
 #define LED_DUMP_MAX         256
+#define LED_ENTRY_OFF_STATE  16
+/* rbp's own BLINK PERIOD, in milliseconds, or 0 when rbp is not asking for a
+ * blink. MEASURED on the unit, 2026-10-06, reading the whole table live out of
+ * /proc/pid/mem (work/blinkprobe.py): of 51 entries, the 48 whose State is
+ * anything but 2 all read 0 here, and the THREE whose State is 2 -- deck 1 PLAY
+ * 500 ms, deck 2 PLAY 250 ms, and CfxFilter (id 41) 250 ms -- are the only
+ * non-zero ones. The correlation is not the whole reading: an entry caught
+ * starting to blink mid-watch went 0 -> 300 in the same rebuild that moved its
+ * State to 2, so the field is written *with* the blink request and not merely
+ * near it.
+ *
+ * It is a full CYCLE, and the state word does NOT toggle: rbp tells a panel to
+ * blink and leaves State at 2 for as long as it wants one, which a 6 s watch
+ * confirms -- State 2 entries never changed, they were 2 the whole time. That is
+ * why the panel side has to time the blink itself, and why this field is the
+ * only thing that says how fast.
+ *
+ * The offset and the meaning are also stated by the sibling port, whose decode
+ * this tree read before measuring: "+16 state (1 lit, 2 blinking), +20
+ * brightness (0 full, 1 dim), +28 blink period in ms" (Rx3-flx4,
+ * rx3-handoff/control-shim.c:29). The two readings agree on the offset and the
+ * unit, arrived at independently. */
+#define LED_ENTRY_OFF_PERIOD 28
 
 /* "rbp has assigned this pad nothing": the u32 at entry +20, which is 1 for an
  * empty performance pad and 0 for one that has been given a colour. rbp's own
@@ -506,7 +529,14 @@ static const signed char bfx_type_to_pos[15] = {
  * carry 0, rbp having coloured every one of them ff8c00. So a surface can use
  * this to dark a pad that holds nothing without a per-mode table -- which is
  * what the FLX4 needs, because State alone lights all eight white pads in HOT
- * CUE and the operator's panel showed exactly that. */
+ * CUE and the operator's panel showed exactly that.
+ *
+ * The sibling port reads the same word and calls it BRIGHTNESS -- "0 full, 1
+ * dim" (Rx3-flx4, control-shim.c:29) -- which is not a disagreement, it is the
+ * other end of the same fact: what rbp does to an unassigned pad is draw it dim.
+ * Named from the pad side here because that is the side this tree measured
+ * (cues being set flipped it 1 -> 0 as they landed), and because "may I dark
+ * this pad" is the question the reader has. */
 #define LED_ENTRY_OFF_UNASSIGNED 20
 
 

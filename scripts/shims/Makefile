@@ -98,6 +98,9 @@ rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 #                that one, because the pointer path is where a QUANTIZE tap is
 #                seen and the keycode is what it becomes.
 #   rbp_led.o    panel LEDs, from rbp's own LedStat table and engine state
+#   led_table.o  the SETTLED view of that table (two reads that agree), and the
+#                blink phase read from rbp's own period. Pure, so the filter and
+#                the duty cycle are testable; see test_led_table.
 #   rbp_vu.o     panel meters, from rbp's own meter bitmasks
 #   midi_io.o    the sequencer (in) and the surface's LED/meter port (out)
 #   shimutil.o   the log, the clock, and the environment contract
@@ -115,9 +118,11 @@ rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 # reads out of the global scope. (rbp_key.o is the third object outside this
 # list; it is hidden too, and says why in its own rule above.)
 CTRL_OBJS  := ctrlshim.o ctrl_map.o map_flx4.o map_jp21.o map_kbd.o evdev_io.o \
-              mididump.o rbp_bridge.o rbp_led.o rbp_vu.o midi_io.o shimutil.o
-CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h rbp_vu.h midi_io.h \
-              shimutil.h ctrl_map.h mididump.h evdev_io.h syscalls.h shmstate.h
+              mididump.o rbp_bridge.o rbp_led.o led_table.o rbp_vu.o midi_io.o \
+              shimutil.o
+CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \
+              midi_io.h shimutil.h ctrl_map.h mididump.h evdev_io.h syscalls.h \
+              shmstate.h
 
 knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o $(CTRL_HDRS) \
              $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
@@ -378,7 +383,7 @@ pcmprobe: ../../tools/pcmprobe.c
 # and the rectangle -- see that file's header.
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
          test_evdev test_cursor_dev test_menu test_window test_keyboard \
-         test_menu_dev
+         test_menu_dev test_led_table
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -425,6 +430,19 @@ test_window: test_window.c menu_window.c menu_window_paint.c menu_paint.c \
 test_keyboard: test_keyboard.c menu_keyboard.c menu_keyboard.h menu_font.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_keyboard.c menu_keyboard.c
+
+# test_led_table links the PRODUCTION led_table.c. It is the one pure piece of the
+# LED bridge, which is exactly why it was split out: what it decides -- whether a
+# read of rbp's table is a state rbp could have had, and how fast a blink goes --
+# would otherwise only ever be exercised on a unit. It pins the torn-read filter
+# (including that it FIRES, and that a torn entry with a history keeps it rather
+# than blinking an LED dark), the (id, channel) lookup that every other reader in
+# rbp_led.c now goes through, and the half-duty phase -- on both sides of the
+# 32-bit millisecond boundary, because `long` is four bytes on this target and
+# this tree has already paid for a wrapped clock once.
+test_led_table: test_led_table.c led_table.c led_table.h rbp_abi.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_led_table.c led_table.c
 
 test_audio: test_audio.c s24pack.c s24pack.h mirror_policy.c mirror_policy.h \
             master_policy.c master_policy.h pace_policy.c pace_policy.h

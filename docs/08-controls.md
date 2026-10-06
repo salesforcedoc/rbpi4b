@@ -25,6 +25,7 @@ small set of modules built into `knobshim.so`:
 | `mididump.c` / `.h` | the dump format: record a surface, replay it with no hardware |
 | `rbp_bridge.c` / `.h` | **everything about rbp**: `is_rbp_process()`, the key manager and `send_rx_key()`, the mixer-engine `me_*()` cue helpers, the PlayEngine probes, the `/proc/self/maps` PlayerInnards scan, the LedManager walk, the direct global writes, the `IPowerManager` stubs, `install_meter_hook()`. Every address and offset lives in `rbp_abi.h`. |
 | `rbp_led.c` / `.h` | the LED mirror: rbp's LedStat table and engine state → panel notes, blink, the LED logging |
+| `led_table.c` / `.h` | the **pure** half of the mirror: the settled-table merge (the torn-read filter), the (id, channel) lookup, and the blink phase. No address of rbp's appears in it, so it is tested without a Pi (`test_led_table`). |
 | `rbp_vu.c` / `.h` | the meter bit maths and the segment rescale |
 | `midi_io.c` / `.h` | the sequencer in, and the surface's LED/meter port out |
 | `shimutil.c` / `.h` | `klog()`, the clock, and the environment helpers |
@@ -725,7 +726,7 @@ LED thread therefore polls rbp's own engine state at 20 Hz through the
 |---|---|---|
 | SYNC | `n_sync` | **rbp LedStat id 4** (off / solid / blink) |
 | CUE | `n_cue` | loaded && !playing |
-| PLAY | `n_play` | `isPlaying` → solid; loaded && !playing → blink; else off |
+| PLAY | `n_play` | `isPlaying` → solid; loaded && !playing → blink (at rbp's own period when its LedStat entry carries one, else the 800 ms fallback); else off |
 | KEY LOCK | `n_keylock` | `PlayEngine::isMasterTempo(ch)` |
 | VINYL | `n_vinyl` | `PlayEngine::isVinylMode(ch)` |
 | SLIP | `n_slip` | `PlayEngine::isSlipModeOn(ch)` |
@@ -788,10 +789,42 @@ rbp keeps all LEDs in one table, so a shim can mirror it directly:
   `dd if=/proc/<rbp>/mem bs=1 skip=$((ledstat)) count=16 | od -An -tx4`.
 * `LedStat`: `+4` u16 = entry count, `+8` = `Led*` array, `+14` u16 = stride.
   Each `Led` entry is `0x2c` bytes: **`+0` u32 id, `+4` u32 channel,
-  `+16` u32 State**.
+  `+16` u32 State, `+20` u32 dim/unassigned, `+28` u32 blink period in ms,
+  `+40..42` RGB**.
 
 State values: `0` = off, `1` = solid, `2` = blink, `3` = slip-mode dimming
 applied to whole groups.
+
+**`+28` is rbp's own blink period, and it is the cadence the shim uses — measured
+2026-10-06.** Reading the whole table live out of `/proc/<pid>/mem` (51 entries),
+`+28` came back `0` for the 48 entries whose State is not 2, and non-zero for
+exactly the three that are 2: **deck 1 PLAY 500 ms, deck 2 PLAY 250 ms, CfxFilter
+(id 41) 250 ms**. So the state word says *that* an LED blinks and `+28` says *how
+fast*, and a shim that renders a blink needs both. Three things the reading
+settled: it is a **full cycle** (half duty is `(now % p) < p / 2`, and the
+boundary belongs to the off half); rbp does **not** toggle State to produce the
+blink (a 6 s watch showed State-2 entries never change, and an entry caught
+starting to blink went `0` → `300` in the same rebuild that set State 2); and the
+sibling port decodes the same offset with the same unit, independently
+(`Rx3-flx4`, `rx3-handoff/control-shim.c:29` — whose `+20 brightness (0 full,
+1 dim)` is the other end of the same fact as this tree's "dim/unassigned", not a
+disagreement). The shim's fallback for a blink rbp did *not* ask for is 800 ms
+(400 on / 400 off), which is the cadence the hand-rolled `led_tick & 8` used to
+give — so only the LEDs rbp actually asks to blink changed speed. Record:
+`work/blinkprobe.py`; see also the torn-read filter below. **Confirmed at the wire
+2026-10-06**: with a track cued on each deck, the FLX4's deck-1 PLAY note
+alternated at a 244.9 ms half-period and deck 2's at 121.6 ms — the same LedStat
+id on two decks at two different rates, each matching its own `+28`, which no
+single global fallback could produce.
+
+**The table is read twice, 1.5 ms apart, and only entries that agree are used.**
+rbp rebuilds `LedStat` every 20 ms, so a single read can straddle a rebuild and
+show a State from after with a colour from before. An entry that disagrees with
+itself carries the value it had in the previous settled table (matched by
+(id, channel), not by position); an entry in flux with no history is absent for
+that tick. The read sits behind the `led_disabled || !midi_out_ready()` guard, so
+it costs its 1.5 ms only when there is a panel to light, and it logs under
+`LED_VERBOSE` when the disagreement count changes.
 
 **`3` is not only that, though — measured 2026-10-01, and it is worth knowing
 before reading `3` as slip anything.** On the **pads**, `3` marks the *engaged*
