@@ -19,6 +19,11 @@ keys/*.bin
 /extracted/*
 !/extracted/README.md
 /extracted*/
+# ...and the name itself, which on a machine that renamed the tree is a SYMLINK
+# to the versioned directory. A pattern ending in `/` only matches a real
+# directory, and git does not call a symlink one -- so `/extracted*/` catches
+# `extracted_v120` and misses the very `extracted` it points at.
+/extracted
 
 # Pioneer / Denon binaries
 rbp
