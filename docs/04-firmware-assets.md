@@ -53,7 +53,25 @@ If you already have the **stock** `rbp`, the shared patch set in
 
 ```bash
 python3 tools/patch-rbp/rbp_patch.py /path/to/stock/rbp -o extracted/rbp-audio
+python3 scripts/patch-rbp-nopc.py extracted/rbp-audio -o extracted/rbp-nopc
 ```
+
+**Three binaries, and only the third one runs.** Each is a distinct md5 worth
+knowing, because a unit that misbehaves can be holding any of them and the three
+fail differently:
+
+| build | md5 | what it is |
+|---|---|---|
+| stock `rbp` | `4f2efcfc0c9e3f539289f863acfddcc6` | Pioneer's XDJ-RX3 v1.20, untouched — deadlocks or aborts on this hardware |
+| `rbp-audio` | `3706c68f7242779d46afa09f35a39acf` | + 68 words of interoperability patches; still has the `getPcController()` NULL-deref |
+| `rbp-nopc` | `18a64bc4d0ffd1cbd35f3a6ea447fca8` | + 2 words; **this is what the chroot runs** |
+
+`tools/patch-rbp/PATCHES.md` pins all three and lists every word, and
+`doctor.sh` compares the installed player against them by name rather than only
+reporting that it differs. The names matter past bookkeeping: the deploy-root
+override that `start-rb.sh` copies into the chroot at every launch is called
+**`rbp-audio`** — stage 1 — so a stale file of that name at the deploy root
+silently reinstates the crash on the next restart.
 
 ## What is *not* here
 

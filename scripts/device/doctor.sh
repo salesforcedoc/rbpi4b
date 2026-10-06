@@ -223,23 +223,87 @@ pair "libdirectfb_fbdev (rot16)" \
      "$RB_DEPLOY_ROOT/libdirectfb_fbdev-rot16.so" \
      "$RB_CHROOT/usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so"
 
-# The player itself. A deploy-root rbp-audio is the exception, not the rule —
-# build-chroot.sh bakes the player into the chroot — so only the chroot copy is
-# required, and a deploy-root copy that differs is the interesting case.
-if [ -f "$RB_CHROOT/root/pdj/rbp" ]; then
-	ok "player present: $RB_CHROOT/root/pdj/rbp ($(_sum "$RB_CHROOT/root/pdj/rbp"))"
-else
-	bad "the player is missing: $RB_CHROOT/root/pdj/rbp"
-	fix "# build rbp-audio, scp it to $RB_DEPLOY_ROOT/, then run start-rb.sh"
-fi
-if [ -f "$RB_DEPLOY_ROOT/rbp-audio" ] && [ -f "$RB_CHROOT/root/pdj/rbp" ]; then
-	if cmp -s "$RB_DEPLOY_ROOT/rbp-audio" "$RB_CHROOT/root/pdj/rbp"; then
-		ok "rbp-audio override matches the installed player"
+# The player itself. Two different questions, and keeping them apart is the
+# point: is a player installed, and is it OURS. build-chroot.sh bakes the patched
+# player into the chroot, with scripts/patch-rbp-nopc.py as its last stage
+# (build-chroot.sh:204), so the chroot copy is the one that runs.
+#
+# The three hashes are the three stages of tools/patch-rbp/PATCHES.md, and naming
+# them is what makes a wrong player diagnosable: "differs from what I expected"
+# cannot tell you whether you are looking at Pioneer's stock binary or at our own
+# half-patched stage 1, and those two are not the same problem. It also closes a
+# real trap. The deploy-root override is named `rbp-audio` -- which is STAGE 1 --
+# and start-rb.sh:121 copies it over the installed player at EVERY launch when it
+# exists. So a file of that name at the deploy root does not merely sit there; it
+# wins, and it puts back the getPcController() NULL-deref that kills rbp about a
+# second after start, with no display and no log.
+RB_RBP_STOCK=4f2efcfc0c9e3f539289f863acfddcc6	# Pioneer XDJ-RX3 v1.20, untouched
+RB_RBP_STAGE1=3706c68f7242779d46afa09f35a39acf	# +68 words; no getPcController() fix
+RB_RBP_FINAL=18a64bc4d0ffd1cbd35f3a6ea447fca8	# +2 words; the build that ships
+
+# The full digest, unlike _sum() above which truncates for display: these are
+# compared, not just shown. No md5sum means NO verdict rather than a wrong one,
+# which is why the caller below tests for "?" separately.
+_md5() {
+	if [ -x "$(command -v md5sum 2>/dev/null)" ]; then
+		md5sum "$1" 2>/dev/null | cut -d' ' -f1
 	else
-		warn "rbp-audio at the deploy root differs from the installed player"
-		note "start-rb.sh copies it at launch, so this is a player deployed since"
-		note "the last launch, or a copy that did not happen."
-		fix "cp $RB_DEPLOY_ROOT/rbp-audio $RB_CHROOT/root/pdj/rbp"
+		echo "?"
+	fi
+}
+
+# Name a build from its hash, so that both the report and the fix can say which
+# of the three it is instead of only that it is not the one we wanted.
+_rbp_build() {
+	case "$1" in
+		"$RB_RBP_FINAL")  echo "final -- stock + all interoperability patches";;
+		"$RB_RBP_STAGE1") echo "STAGE 1 ONLY -- missing the getPcController() fix";;
+		"$RB_RBP_STOCK")  echo "Pioneer's stock binary, unpatched";;
+		"?")              echo "unknown (no md5sum on this target)";;
+		*)                echo "not one of the three known builds";;
+	esac
+}
+
+RBP_INSTALLED="$RB_CHROOT/root/pdj/rbp"
+if [ ! -f "$RBP_INSTALLED" ]; then
+	bad "the player is missing: $RBP_INSTALLED"
+	fix "# scripts/build-chroot.sh stages it; or tools/patch-rbp/rbp_patch.py <stock> -o rbp-audio && scripts/patch-rbp-nopc.py rbp-audio -o rbp-nopc"
+else
+	_rbp_sum=$(_md5 "$RBP_INSTALLED")
+	if [ "$_rbp_sum" = "$RB_RBP_FINAL" ]; then
+		ok "player presents as our final build: $_rbp_sum"
+	else
+		# Both of the other known builds are wrong on this hardware, and the
+		# stock one is wrong in a way that reads as "the unit is dead".
+		if [ "$_rbp_sum" = "?" ]; then
+			warn "player present but unverifiable: $(wc -c < "$RBP_INSTALLED") bytes, no md5sum here"
+			note "expected $RB_RBP_FINAL; compare by hand before trusting this unit."
+		else
+			bad "the installed player is NOT our build: $_rbp_sum"
+		fi
+		note "$RBP_INSTALLED -- $(_rbp_build "$_rbp_sum")"
+		note "ours is $RB_RBP_FINAL (tools/patch-rbp/PATCHES.md pins all three)"
+		fix "# rebuild into the chroot, or scp a known-good player over $RBP_INSTALLED"
+	fi
+fi
+
+# The deploy-root override. Not a curiosity: start-rb.sh:121 copies it over the
+# installed player at EVERY launch when it is present, so a stale or stock file
+# here does not sit quietly -- it wins at the next restart. Absent is the normal
+# case and is reported as nothing at all.
+if [ -f "$RB_DEPLOY_ROOT/rbp-audio" ]; then
+	_ovr_sum=$(_md5 "$RB_DEPLOY_ROOT/rbp-audio")
+	if [ "$_ovr_sum" = "$RB_RBP_FINAL" ]; then
+		ok "deploy-root override is the final build, and will re-install cleanly"
+	elif [ "$_ovr_sum" = "$RB_RBP_STAGE1" ] || [ "$_ovr_sum" = "$RB_RBP_STOCK" ]; then
+		bad "$RB_DEPLOY_ROOT/rbp-audio is $(_rbp_build "$_ovr_sum")"
+		note "start-rb.sh copies that over the installed player at every launch, so"
+		note "the next restart would replace a working player with a broken one."
+		fix "mv $RB_DEPLOY_ROOT/rbp-audio $RB_DEPLOY_ROOT/rbp-audio.rejected"
+	else
+		warn "$RB_DEPLOY_ROOT/rbp-audio is $(_rbp_build "$_ovr_sum")"
+		note "start-rb.sh will copy it over the installed player at the next launch."
+		fix "mv $RB_DEPLOY_ROOT/rbp-audio $RB_DEPLOY_ROOT/rbp-audio.rejected   # unless you mean to deploy it"
 	fi
 fi
 
