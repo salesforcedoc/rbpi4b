@@ -36,6 +36,7 @@
 #include "mididump.h"
 #include "evdev_io.h"
 #include "ctrl_map.h"
+#include "controllers.h"   /* the surface table: the default map, the keepalive */
 
 /* KNOB_VERBOSE. Defined here because this is the module that reads the
  * environment; declared in shimutil.h for everyone whose logging it gates. */
@@ -93,19 +94,39 @@ static const struct ctrl_map *const evdev_maps[] = {
 };
 
 /* The surface to fall back to when the environment says nothing, or says
- * something this build has never heard of. The MIDI side falls back to the FLX4
- * for the same reason it always did: it is the surface this port targets, and it
- * is the value rb.conf ships, so a shim started by hand with no environment and
- * a typo'd name both end up where they would have been anyway. The previous
- * target's map is one word away (MIDI_MAP=jp21) -- the point of the fallback is
- * that a mistake is LOUD, not that it is impossible.
+ * something this build has never heard of.
  *
- * The evdev side falls back to the keyboard: it is the only non-MIDI surface
- * there is, it is the value rb.conf ships, and asking for no keyboard on purpose
- * has a name of its own (EVDEV_MAP=none), so the fallback does not have to be
- * one.
+ * THE MIDI SIDE'S FALLBACK IS NOW A LOOKUP, not a pointer to map_flx4. It is the
+ * map that the controller table's default row selects, so "which controller this
+ * port targets" is written down in exactly one place -- controllers.c -- and a
+ * table row naming a map this build does not have is caught twice over (by
+ * test_controllers.c, and by the log line below). The fallback's REASON is
+ * unchanged: the FLX4 is the surface this port targets and the value rb.conf
+ * ships, so a shim started by hand with no environment and a typo'd name both end
+ * up where they would have been anyway. The previous target's map is one word
+ * away (MIDI_MAP=jp21) -- the point of the fallback is that a mistake is LOUD,
+ * not that it is impossible.
+ *
+ * The evdev side is a plain pointer to map_kbd and stays one: it is the only
+ * non-MIDI surface there is, it is the value rb.conf ships, and asking for no
+ * keyboard on purpose has a name of its own (EVDEV_MAP=none), so the fallback
+ * does not have to be one. It is not a controller and has no row.
  */
-static const struct ctrl_map *const default_midi_map = &map_flx4;
+static const struct ctrl_map *default_midi_map(void)
+{
+     const struct controller *c = controllers_default();
+     unsigned i;
+
+     for (i = 0; i < sizeof midi_maps / sizeof midi_maps[0]; i++)
+          if (strcmp(midi_maps[i]->name, c->map_name) == 0)
+               return midi_maps[i];
+
+     klog("knobshim2: the default controller '%s' selects map '%s', which this "
+          "build does not have; falling back to '%s'\n",
+          c->id, c->map_name, midi_maps[0]->name);
+     return midi_maps[0];
+}
+
 static const struct ctrl_map *const default_evdev_map = &map_kbd;
 
 /* Resolve one selection. The warning names the environment variable rather than
@@ -236,7 +257,7 @@ static void *midi_thread(void *arg)
 
      g_midi = pick_map("MIDI_MAP", midi_maps,
                        (unsigned)(sizeof midi_maps / sizeof midi_maps[0]),
-                       default_midi_map);
+                       default_midi_map());
      g_evdev = pick_map("EVDEV_MAP", evdev_maps,
                         (unsigned)(sizeof evdev_maps / sizeof evdev_maps[0]),
                         default_evdev_map);
@@ -348,13 +369,33 @@ static void *midi_thread(void *arg)
 
 /* The maps' ~20 ms heartbeat: button-hold timeouts and idle state, the things
  * that are about time rather than about an event. One thread for all of them,
- * because they are all short checks at the same cadence. */
+ * because they are all short checks at the same cadence.
+ *
+ * THE CONTROLLER KEEPALIVE RIDES THIS TICK rather than getting a thread of its
+ * own. 20 ms against the FLX4's 200 ms period is ten chances per period, which is
+ * finer than the period itself needs, and a second thread sleeping 5 Hz would be
+ * a thread to start, name and keep alive for one message every fifth of a second.
+ *
+ * WHAT IT SENDS AND TO WHOM is the controller table's business, not this
+ * function's: the row comes from the port name of the surface actually
+ * subscribed (controllers_by_hint), so it follows what is PLUGGED IN rather than
+ * what MIDI_MAP selected. Under MIDI_MAP=kbd -- a map with no row -- the FLX4 is
+ * still attached, still lit and still polled, which is the behaviour that
+ * selection has always had. When nothing is attached the name is empty, the
+ * lookup is NULL and the whole thing is one comparison. */
 static void *tick_thread(void *arg)
 {
+     const int ka_on = env_on("CTRL_KEEPALIVE", 1);
+     unsigned long long last_ka = 0;
+     int ka_announced = 0;
      (void)arg;
      if (!is_rbp_process())
           return NULL;
+     if (!ka_on)
+          klog("knobshim2: keepalive: off (CTRL_KEEPALIVE=0); no surface is "
+               "polled\n");
      for (;;) {
+          unsigned long long now;
           usleep(20000);   /* 50 Hz */
           /* Both sides tick, and a shared map ticks once: a hold timeout driven
            * twice per round would expire at half the interval it was written
@@ -363,6 +404,33 @@ static void *tick_thread(void *arg)
                g_midi->tick();
           if (g_evdev && g_evdev != g_midi && g_evdev->tick)
                g_evdev->tick();
+
+          if (!ka_on)
+               continue;
+          now = shim_now_ms();
+          {
+               const struct controller *c =
+                    controllers_by_hint(midi_surface_name());
+
+               /* `last_ka` moves only when the message actually went out, so a
+                * tick that finds no route is retried on the next one instead of
+                * waiting out a period that was never used. That costs nothing
+                * when there is no route -- midi_sysex_out() returns without a
+                * syscall -- and it is why the per-send line is gated on
+                * KNOB_VERBOSE: unplugged, this arm runs every 20 ms forever. */
+               if (controller_keepalive_due(c, now, last_ka) &&
+                   midi_sysex_out(c->keepalive, c->keepalive_len)) {
+                    last_ka = now;
+                    if (!ka_announced) {
+                         ka_announced = 1;
+                         klog("knobshim2: keepalive: '%s' %u byte(s) every %u ms "
+                              "to '%s'\n", c->name, c->keepalive_len,
+                              c->keepalive_ms, midi_surface_name());
+                    } else if (verbose) {
+                         klog("knobshim2: keepalive sent\n");
+                    }
+               }
+          }
      }
      return NULL;
 }

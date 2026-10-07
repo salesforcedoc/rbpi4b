@@ -128,6 +128,24 @@ Their hotplug split is economical: the bridge **exits** on device loss, udev
 restarts it, and the helper decides between *restart only the bridge* (player
 alive, already on that card) and *restart the service* (`controller-hotplug.sh:14-17`).
 
+**This port has the table now** (`scripts/shims/controllers.c`), in C rather than
+Python, with two rows: `flx4`, whose four names are all measured on the unit, and
+`jp21`, the previous target's, whose port hint and card id are recorded as unknown
+rather than guessed. It closed the same hole: one device was named by four
+unrelated tokens in four files that never referenced each other
+— the map (`MIDI_MAP=flx4`), the port-name substring it was *detected* by
+(`MIDI_IN_MATCH=FLX4`), its sound card (`AUDIO_DEV=hw:CARD=DDJFLX4,DEV=0`) and its
+USB id (docs only), with `AUDIO_DEV` completely independent of `MIDI_MAP`, so a
+bench that selected `jp21` left audio pointed at an FLX4. All four ship empty in
+`rb.conf` now, empty meaning "the selected row", and `controllers_cli` is the
+same source asked from a shell so `doctor.sh` and `install.sh` keep no copy of
+any name. Two deliberate differences: **no udev rules** — this port runs as root
+with `/dev` bind-mounted and has none anywhere, so generating them would be new
+machinery for a problem it does not have — and the keepalive is a knob
+(`CTRL_KEEPALIVE`, default on) rather than an unconditional send, because the
+claim that the FLX4 needs one every 200 ms is their reverse-engineering, not this
+port's measurement.
+
 ### 2.5 Smaller things worth knowing
 
 - A **jog watchdog** emitting a synthetic zero tick after 80 ms of idle
@@ -260,8 +278,32 @@ Listed so the comparison is not read as a verdict on the whole design.
    shim resends every ~100 ms and a 125 ms half is sampled at ~1.25 points per
    half; deck 1's 250 ms half has ~2.5 and reads true. Deployed and confirmed
    loaded as `knobshim.so 1f080c96`.
-3. **Structural validation in the object scans (2.2).** Not urgent, but it is
-   the shape of the fix for the class of bug `scan_plinn()` had.
+3. ~~**Structural validation in the object scans (2.2).**~~ **Done, 2026-10-06.**
+   The rule that decides which vtable match is a deck's innards, and the
+   arithmetic a failed scan reports, now live in a pure module
+   (`scripts/shims/plinn_scan.c/.h`) with the **vtable word left behind in
+   `rbp_bridge.c`**, so the scan's read pattern is unchanged — still one word per
+   four-byte address, with the three field reads taken only on a match. This is
+   the sibling's idea (`control-shim.c:34-41`, `:84-86`) in this port's fields.
+
+   The failure line now carries counts as well as pointers. It read
+   `deck1=0xcbaaa780 deck2=(nil)`, which says what is missing and nothing about
+   why — so a scan that matched nothing and a scan that refused everything were
+   **the same line**, and the 2026-10-01 off-by-one was one of those. It now ends
+   `; 31 region(s), 1200000 word(s), 2 vtable hit(s); seats deck1=1 deck2=0;
+   refused chan=1 mode=0 engine=0` — which is that evening's exact signature and
+   at last names the test that refused the missing deck. Every reason is printed
+   even when zero, so the two cases cannot converge again.
+
+   `test_plinn_scan.c` links the production source (82 checks). It pins the
+   shipped **deck-1 off-by-one** as its first case; reinstating the old spelling
+   fails 14 of them, and the first failure is `chan 1 must be deck 0`. It also
+   caught one thing by hand that no drill would have: the printer walked its
+   count array from slot 0, and slot 0 is `PLINN_OK`, so every line carried a
+   nameless `?=0` that made the printed counts not a partition of the hits. Fixed
+   and pinned from both sides. This is the class of bug in item 2's postscript —
+   a correct pure module is not enough if a call site goes unchecked — so the
+   split is the deliverable and the counts are what make the next one a number.
 
 Nothing here is a reason to restructure the port. This tree's in-process design
 buys the test suite and the unplug survival, and neither is worth trading.

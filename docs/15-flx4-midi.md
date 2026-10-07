@@ -28,9 +28,10 @@ launch with it, [13 — Raspberry Pi 4](13-raspberrypi4.md).
 Nothing is hardcoded to a device node. The controls shim walks the ALSA
 sequencer's client and port lists with `SNDRV_SEQ_IOCTL_QUERY_NEXT_CLIENT` /
 `SNDRV_SEQ_IOCTL_QUERY_NEXT_PORT`, matches the port name against
-`RB_MIDI_IN_MATCH` (a case-insensitive substring, default `FLX4`), requires the
-port's capabilities to include `CAP_READ | SUBS_READ`, excludes its own client,
-and subscribes. It retries in a loop, because the shim starts before the
+`RB_MIDI_IN_MATCH` (a case-insensitive substring; empty — the shipped default —
+means the FLX4's own hint from the controller table, `controllers.c`), requires
+the port's capabilities to include `CAP_READ | SUBS_READ`, excludes its own
+client, and subscribes. It retries in a loop, because the shim starts before the
 controller is necessarily enumerated — plugging the FLX4 in late has to work.
 
 Output (LED notes and meter CCs) goes through a **second local port** subscribed
@@ -67,7 +68,69 @@ aplay -L | grep -i flx4       # the PCM name RB_AUDIO_DEV must match
 ```
 
 If the card id is not `DDJFLX4`, change `RB_AUDIO_DEV` in `rb.conf` rather than
-the shim. If the port name does not contain `FLX4`, change `RB_MIDI_IN_MATCH`.
+the shim — and note that an empty `RB_AUDIO_DEV`, which is what ships, already
+means "the card of whichever controller `MIDI_MAP` selects", read from that
+surface's row in `controllers.c`. Same for `RB_MIDI_IN_MATCH`: empty means the
+row's hint, so a surface that reports a differently-spelled name is corrected in
+one place, the table, rather than in `rb.conf` and the shim separately.
+`controllers_cli match flx4` prints what the shim will look for.
+
+### The keepalive, and the SysEx route it needed
+
+The FLX4's row in the controller table carries a 12-byte vendor SysEx —
+
+```
+F0 00 40 05 00 00 04 05 00 50 02 F7
+```
+
+— sent every **200 ms** while the surface is attached, and that claim is **not
+this port's measurement**. It is the sibling public port's
+(`../rx3-flx4`, `controller-bridge.py`), which records that the FLX4 "only
+reports controls (and keeps its audio path alive) while the host polls it every
+200 ms", sourced in turn from Mixxx's reverse-engineering of the device.
+
+What this port measures is only that the message *can now be sent at all*, which
+it could not before: the panel output carries Note On, Note Off and CC, and
+`out_write()` drops everything else, so a SysEx had no route to a surface on the
+**sequencer** — the FLX4's route. `midi_sysex_out()` adds one
+(`SNDRV_SEQ_EVENT_SYSEX` with `SNDRV_SEQ_EVENT_LENGTH_VARIABLE` and the payload
+inline immediately after the event header, which is the shape the sequencer ABI
+wants; the `VARUSR` length form is direct-dispatch only and is for bulk
+transfers, and a wrong pointer there is a kernel-side dereference). On the
+rawmidi route it is a plain `write()`.
+
+**First run, 2026-10-06 — it goes out, and nothing observable changes.** Shipped
+with the table (`knobshim.so c41d5e92`) and restarted; the shim logged
+
+```
+knobshim2: keepalive: 'DDJ-FLX4' 12 byte(s) every 200 ms to 'DDJ-FLX4 MIDI 1'
+```
+
+— the row's hint resolved against the *live* port name rather than a constant,
+so the route is named and not assumed — and then 320 sends in the first 70 s,
+which is the 200 ms period and not merely a first send. With it going out, the
+operator's reading of the unit was *"ok playing correctly"*, the same verdict
+they gave the build **without** it an hour earlier.
+
+**That narrows the question rather than closing it, and the shape of the claim
+says why:** "keeps its audio path alive" is a statement about a **long idle**, so
+a few minutes of active use is the case least likely to exhibit it. What the run
+does settle is the other half — the message is not required for LEDs, meters,
+faders, pads or the touch band, all of which behave identically with it.
+
+So the knob keeps its default of on. Twelve bytes every 200 ms is not worth
+optimising away, the sibling documents the device expecting it, and the only real
+price is that `RB_KNOB_VERBOSE=1` turns the per-send line into 5 log lines a
+second (~9.5 MB/day, well under the `RB_VERBOSE` hazard). The one experiment still
+worth running, if it is ever wanted, is a soak: controller attached, nothing
+playing, left alone long enough for an idle timeout, then check whether audio
+still comes out.
+
+The row's other message is `init`, sent once. The FLX4 has none (`NULL`); the
+JP21's is its absolute-control query, and it goes out from
+`led_query_absolute()`, not at startup — a startup sender would put that query on
+whatever route happened to be up, which with an FLX4 attached and `MIDI_MAP=jp21`
+is the FLX4's own port.
 
 ## The map
 
@@ -1252,6 +1315,7 @@ is still open or has been answered (with S5.1, the `aseqdump` capture).
 | 11 | The **units of the jog's `l` field** (the 16-bit `pos` in the `OP_ROTATE` message). The map fills it with raw platter counts, so the measured 720 counts/revolution now goes into a field rbp may *compare* rather than difference — and the map inherited 128 from the JP21. `RB_JOG_SCALE` cannot express that conversion: it scales `vpos` but cancels out of the speed, and it is clamped to ≥ 1, so it can only make the units larger. | if the platter misbehaves in a way the speed cannot explain (a deck that jumps when touched), log `JOG_VERBOSE=1`'s `pos=` against a known turn and compare it with what rbp does |
 | 12 | ~~**The note number the SHIFT + browse push actually sends**~~ | **Answered 2026-09-30, and the derivation was right.** `grep -c 'note=66 vel=127' /tmp/flx4.dump` is **12**, and each of the six presses falls strictly inside a SHIFT-held window (note 63 down/up at 2864.364/2865.404, 2865.940/2866.692, 2949.356/2951.236, 3419.741/3421.060) — and `note=65`, the unshifted push, appears nowhere, so the shifted note replaces the base note. See [the section above](#the-shift--browse-push-and-the-two-questions-it-is-two-questions-about). **The same one-press procedure settled the shifted LOAD notes 104/122 the same day, and the dump caught both at the panel's own velocity** — `NOTEON ch=6 note=104 vel=127` at 8.749 s (released 8.949) and `NOTEON ch=6 note=122 vel=127` at 23.433 s (released 23.572), in a file whose velocity histogram holds only 0 and 127, so no injected event is in it. The operator's presses also brought up both screens, which is the corroboration and not the proof |
 | 13 | **The FX SELECT pair's note numbers**, 99 and its SHIFT twin 100 — the same kind of question as row 12, on the control that now steps the effect switch both ways. Both come from the vendor list; the SHIFT leg is the weaker of the two, because a wrong number there does not break the button the operator has been pressing, it just leaves the backward direction dead. | press FX SELECT three or four times and once with SHIFT held, then `grep -E 'ch=4 note=(99\|100) vel=127' /tmp/flx4.dump`. If the SHIFT press sends something else, the fix is one line in `map_flx4.c`'s `N_FX_SELECT_SHIFT` and one line in the fixture (`test_flx4.c` and `tests/midi_flx4.dump` name each other's numbers). |
+| 14 | **Whether the FLX4 needs a keepalive for a LONG IDLE** — the 200 ms vendor SysEx is the sibling port's finding, not this port's. **Partly answered 2026-10-06:** it is deployed and going out at the measured 200 ms period, and a run with it sending played identically to the build without it, so it is not needed for LEDs, meters, faders, pads or touch. What is still untested is the half the claim is actually about — an audio path surviving a long idle, which a few minutes of use cannot show ([above](#the-keepalive-and-the-sysex-route-it-needed)). | A soak: controller attached, nothing playing, left alone past whatever idle timeout the device has, then check whether audio still comes out. The shim logs the first send, and every send under `RB_KNOB_VERBOSE=1`. **Read the log before any reboot — `/tmp` is tmpfs.** The knob defaults on: 12 bytes every 200 ms is not worth trading for an unmeasured failure mode |
 
 ## Testing without the hardware
 

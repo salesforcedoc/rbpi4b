@@ -83,6 +83,7 @@
 #include "mirror_policy.h"
 #include "master_policy.h"
 #include "pace_policy.h"
+#include "controllers.h"   /* the selected controller's card id */
 
 /* Enforce GLIBC_2.4 versioning for libdl on glibc 2.13 */
 __asm__(".symver dlsym, dlsym@GLIBC_2.4");
@@ -281,14 +282,50 @@ static const char *master_dev_name(void)
     return g_opened_dev[0] ? g_opened_dev : g_cfg.dev;
 }
 
-/* AUDIO_DEV's default. The card id must match what /proc/asound/cards reports;
- * see docs/13-raspberrypi4.md for how to check it.
+/* AUDIO_DEV's default: the ALSA card of whichever controller MIDI_MAP selects,
+ * read out of the controller table (controllers.c). The card id must match what
+ * /proc/asound/cards reports; see docs/13-raspberrypi4.md for how to check it.
  *
  * hw: rather than plughw:, see the header: a plug device answers for its own
  * logical channel space (10000 on this unit) instead of the card's 4, so the map's
- * hardware channel indices cannot be resolved through one. rb.conf sets the same
- * string; this is the fallback for when the variable is unset entirely. */
-#define AUDIO_DEV_DEFAULT "hw:CARD=DDJFLX4,DEV=0"
+ * hardware channel indices cannot be resolved through one.
+ *
+ * THIS USED TO BE A LITERAL, and the literal is the reason the table exists. One
+ * physical device was named by "DDJFLX4" here, by "FLX4" in the port-name hint
+ * midi_io.c matched on, by "2b73:0045" in the docs and by "flx4" in rb.conf's
+ * MIDI_MAP -- four spellings in four files that never referenced each other, so
+ * selecting another surface left the audio pointed at this one in silence. The
+ * card now comes from the same row the hint does.
+ *
+ * MIDI_MAP is the selection, and it is the same variable the control shim reads:
+ * both shims are in one process, so the environment cannot be read differently by
+ * the two of them. A selection that names a MAP with no row (kbd, none) falls
+ * back to the default controller, which is today's behaviour and the only
+ * sensible one -- the audio card is a property of the wiring, not of the map.
+ *
+ * rb.conf's AUDIO_DEV stays as the operator's override, and docs/15 tells them to
+ * change the device there; doctor.sh compares the two so a drifted rb.conf is a
+ * reported line rather than a silent one. */
+static const char *audio_dev_default(void)
+{
+    static char buf[64];
+    const struct controller *c =
+        controllers_find(env_str("MIDI_MAP", CONTROLLERS_DEFAULT_ID));
+    const char *card;
+
+    if (!c || !c->card_id)
+        c = controllers_default();
+    card = c->card_id;
+
+    /* `card` cannot be NULL in a build that passes its tests --
+     * test_controllers.c pins that the default controller's card id is
+     * "DDJFLX4" -- and it is not guarded here because there is nothing better to
+     * fall back to. A NULL would format as "(null)", giving a device string no
+     * card can match: an open that fails, logged with the device that failed, and
+     * never a different card opened by accident. */
+    snprintf(buf, sizeof buf, "hw:CARD=%s,DEV=0", card);
+    return buf;
+}
 
 /* ---- the HDMI mirror: defaults and tunables ------------------------------- */
 
@@ -940,13 +977,18 @@ static void parse_card_id(const char *dev)
 static void load_config(void)
 {
     const char *s;
+    const char *dflt = audio_dev_default();
     long mute_ms, fade_ms;
 
-    s = env_str("AUDIO_DEV", AUDIO_DEV_DEFAULT);
+    /* `dflt` is a function now rather than a macro, so it is captured once: the
+     * selection it reads cannot change under us, but calling it twice in the two
+     * branches below would build the string twice and the log line would then
+     * name a different buffer than the one that was chosen. */
+    s = env_str("AUDIO_DEV", dflt);
     if (strlen(s) >= sizeof g_cfg.dev) {
         alog("audioshim: AUDIO_DEV is longer than %u bytes; using the default "
-             "%s\n", (unsigned)sizeof g_cfg.dev - 1, AUDIO_DEV_DEFAULT);
-        s = AUDIO_DEV_DEFAULT;
+             "%s\n", (unsigned)sizeof g_cfg.dev - 1, dflt);
+        s = dflt;
     }
     strcpy(g_cfg.dev, s);
     parse_card_id(g_cfg.dev);

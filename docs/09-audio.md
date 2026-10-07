@@ -41,10 +41,18 @@ code:
 ## Choosing the device: `AUDIO_DEV`
 
 ```
-RB_AUDIO_DEV=hw:CARD=DDJFLX4,DEV=0
+RB_AUDIO_DEV=                 # empty -> hw:CARD=<the selected controller's card>,DEV=0
 ```
 
-`hw:`, **not** `plughw:` — and this is a measurement, not a preference. The reason
+The card is **not** written down in `rb.conf` any more. An empty value means the
+ALSA card of whichever controller `MIDI_MAP` selects, read from that surface's
+row in `controllers.c` (`DDJFLX4` for the FLX4), so a bench that switches surface
+switches its audio card with it — it used to be independent, and selecting `jp21`
+left audio pointed at an FLX4. Setting it here still wins, which is how a card
+the table does not name is used; `doctor.sh` reports when the two disagree.
+
+That resolved value is `hw:CARD=DDJFLX4,DEV=0`, and it is `hw:`, **not**
+`plughw:` — and this is a measurement, not a preference. The reason
 is the section after next: `AUDIO_MAP` names *hardware* channel indices, so the
 shim has to learn the card's real channel count, and a `plughw` device cannot tell
 it. The plug layer's whole job is to make the logical channel count arbitrary, and

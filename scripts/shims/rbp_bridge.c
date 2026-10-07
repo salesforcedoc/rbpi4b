@@ -42,6 +42,7 @@
 #include "rbp_abi.h"
 #include "rbp_key.h"
 #include "rbp_bridge.h"
+#include "plinn_scan.h"
 
 /* The key path -- is_rbp_process(), get_key_manager() and send_rx_key*() -- is
  * in rbp_key.c, because fbshim needs it too (the on-screen QUANTIZE tap) and
@@ -167,10 +168,20 @@ static void *g_plinn[2];              /* ui::PlayerInnards per deck */
  * vtable @0x4d1480. */
 #define PVTABLE_PLAYERINNARDS 0x004d1960UL
 
+/* The decision -- is this vtable match really a deck's innards, and which deck --
+ * is in plinn_scan.c, and the arithmetic a failure reports is in the same module.
+ * Not here, for the reason that module's header gives: this file is linked into
+ * no test, so a rule that lives here is verified by a drill on the Pi or not at
+ * all, and the rule that lives here is the one that shipped with an off-by-one
+ * (2026-10-01). The vtable word itself stays this side of the boundary, so the
+ * scan's read pattern is unchanged: still one word per 4-byte address, with the
+ * three field reads taken only on a match. */
 static void scan_plinn(void)
 {
      FILE *f;
      char line[256];
+     char tally[256];
+     struct plinn_tally t;
      static unsigned long long last;
      unsigned long long now;
      if (g_plinn[0] && g_plinn[1])
@@ -187,6 +198,7 @@ static void scan_plinn(void)
      if (now - last < 1000)
           return;
      last = now;
+     memset(&t, 0, sizeof t);
      f = fopen("/proc/self/maps", "r");
      if (!f)
           return;
@@ -199,43 +211,50 @@ static void scan_plinn(void)
                continue;
           if (e <= s || (e - s) > (512UL << 20))
                continue;
+          t.regions++;
           for (unsigned long a = (s + 3) & ~3UL; a + 0x90 <= e; a += 4) {
-               unsigned char chan, mode;
-               unsigned int eng;
+               struct plinn_cand c;
+               enum plinn_refuse why;
                int d;
+               t.words++;
                if (*(volatile unsigned int *)a != PVTABLE_PLAYERINNARDS)
                     continue;
-               chan = *(volatile unsigned char *)(a + PLAYERINNARDS_CHAN_OFF);
+               t.hits++;
+               c.chan = *(volatile unsigned char *)(a + PLAYERINNARDS_CHAN_OFF);
                /* +0x74 discriminates the struct but is NOT the pad mode the UI
                 * displays: measured 2026-09-30 to stay 0 through all four pad-mode
                 * keycodes while rbp's grid verifiably switched.  Logged by its
                 * offset, not by a name it has not earned. */
-               mode = *(volatile unsigned char *)(a + PLAYERINNARDS_MODE_OFF);
-               eng = *(volatile unsigned int *)(a + 0x30);
+               c.mode = *(volatile unsigned char *)(a + PLAYERINNARDS_MODE_OFF);
+               c.eng = *(volatile unsigned int *)(a + PLAYERINNARDS_ENGINE_OFF);
                /* The channel byte is 1-based -- deck 1 is 1, deck 2 is 2 -- and
-                * it matches the ui::Player's own channel byte at the same
-                * offset.  This test used to read (chan != 2 && chan != 3) with
-                * `d = chan - 2`, and the cost of that is measured (2026-10-01):
-                * deck 1's innards carries 1, so it was rejected outright, deck
-                * 2's carries 2 and was filed as deck 1, and g_plinn[1] stayed
-                * NULL for the life of the process.  The log said so plainly --
-                * `deck1=0xcbaaa780 deck2=(nil)` -- where 0xcbaaa780 is
-                * `[player[1]+0x138]`, deck 2's innards.  Every write through
-                * plinn() therefore landed on the wrong deck. */
-               if ((chan != 1 && chan != 2) || mode > 3 || eng < 0x80000000u)
+                * the rule that reads it is in plinn_scan.c, with the 2026-10-01
+                * off-by-one it shipped with written down beside it. */
+               d = plinn_classify(&c, &why);
+               if (d < 0) {
+                    t.refused[why]++;
                     continue;
-               d = chan - 1;
+               }
+               t.accepted[d]++;
                if (!g_plinn[d]) {
                     g_plinn[d] = (void *)a;
                     klog("knobshim2: PlayerInnards deck%d @%p (+0x74=%d)\n",
-                         d + 1, (void *)a, mode);
+                         d + 1, (void *)a, c.mode);
                }
           }
      }
      fclose(f);
-     if (!g_plinn[0] || !g_plinn[1])
-          klog("knobshim2: PlayerInnards scan: deck1=%p deck2=%p\n",
-               g_plinn[0], g_plinn[1]);
+     if (!g_plinn[0] || !g_plinn[1]) {
+          /* Pointers AND counts, in that order, because they answer different
+           * questions: the pointers say what is still missing, the counts say
+           * which test refused it. The line this replaces printed only the
+           * pointers, so a scan that matched nothing and a scan that refused
+           * everything read exactly alike -- and the 2026-10-01 off-by-one was
+           * one of those, visible only as a deck that never appeared. */
+          klog("knobshim2: PlayerInnards scan: deck1=%p deck2=%p; %s\n",
+               g_plinn[0], g_plinn[1],
+               plinn_tally_line(tally, sizeof tally, &t));
+     }
 }
 
 void *plinn(int deck)

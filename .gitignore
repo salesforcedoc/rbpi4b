@@ -65,5 +65,6 @@ Thumbs.db
 /scripts/shims/pcmprobe
 /scripts/shims/seqinject2
 /scripts/shims/udplog
+/scripts/shims/controllers_cli
 /scripts/device/timeout
 __pycache__/

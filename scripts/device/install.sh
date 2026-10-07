@@ -308,7 +308,7 @@ say "deploy-root runtime artifacts (these override the copies inside the chroot)
 # explicit `if`, not `[ -f ... ] && found=1`: under `set -e` a bare `&&` list whose
 # test fails is a failing command, and would end the install.)
 _found=0
-for a in fbshim.so knobshim.so audioshim.so crashcatch.so ccexit; do
+for a in fbshim.so knobshim.so audioshim.so crashcatch.so ccexit controllers_cli; do
   if [ -f "$SHIM_SRC/$a" ]; then _found=1; fi
 done
 if [ -f "$DFB_SRC/libdirectfb_fbdev.so" ]; then _found=1; fi
@@ -323,6 +323,11 @@ else
   install_artifact audioshim.so "$SHIM_SRC/audioshim.so"
   install_artifact crashcatch.so "$SHIM_SRC/crashcatch.so"
   install_artifact ccexit       "$SHIM_SRC/ccexit"
+  # The controller table, asked from a shell. Nothing rbp loads needs it -- it is
+  # here because doctor.sh reads every surface name out of this one program
+  # rather than keeping a copy, and a diagnostic that cannot do that is the drift
+  # the table exists to remove (scripts/shims/controllers_cli.c).
+  install_artifact controllers_cli "$SHIM_SRC/controllers_cli"
   install_artifact libdirectfb_fbdev-rot16.so "$DFB_SRC/libdirectfb_fbdev.so"
 fi
 

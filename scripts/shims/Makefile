@@ -39,7 +39,7 @@ $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a:
 SHARED  := knobshim.so audioshim.so fbshim.so crashcatch.so
 
 # Static ARM helpers (have no soft-float runtime dependency)
-STATIC  := seqinject2 udplog
+STATIC  := seqinject2 udplog controllers_cli
 
 # Retained as reference only, NOT built by `all`: superseded by the shims above
 # and, on the Pi, by the pointer path in fbshim.so.
@@ -126,11 +126,21 @@ rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 #                the duty cycle are testable; see test_led_table.
 #   rbp_vu.o     panel meters, from rbp's own meter bitmasks
 #   midi_io.o    the sequencer (in) and the surface's LED/meter port (out)
+#   controllers.o one row per control surface: the map it selects, how it is
+#                found (port-name hint, card id, USB id) and the SysEx it wants.
+#                Pure, so the anti-drift claim is a host test; see test_controllers.
 #   shimutil.o   the log, the clock, and the environment contract
 #
 # The split exists so that the part of this shim that is rbp (rbp_bridge) can be
 # read and re-derived on its own, and so the part that is a particular controller
 # (the maps, map_*.c) can be swapped without touching either.
+#
+# controllers.o is the one object here that BOTH shims link: audioshim.c takes its
+# default ALSA card from the same row midi_io.c takes its port-name hint from, and
+# the whole point of the table is that those two cannot disagree. It is compiled
+# by the -fvisibility=hidden pattern rule below like the rest -- nothing needs to
+# resolve it across a library boundary, because each library links its own copy
+# the same way rbp_key.o already does.
 #
 # Every object in the list above except shmstate.o is compiled
 # -fvisibility=hidden. An LD_PRELOAD library's global symbols enter the
@@ -141,11 +151,11 @@ rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 # reads out of the global scope. (rbp_key.o is the third object outside this
 # list; it is hidden too, and says why in its own rule above.)
 CTRL_OBJS  := ctrlshim.o ctrl_map.o map_flx4.o map_jp21.o map_kbd.o evdev_io.o \
-              mididump.o rbp_bridge.o rbp_led.o led_table.o rbp_vu.o midi_io.o \
-              shimutil.o
+              mididump.o rbp_bridge.o rbp_led.o led_table.o plinn_scan.o \
+              rbp_vu.o midi_io.o controllers.o shimutil.o
 CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \
               midi_io.h shimutil.h ctrl_map.h mididump.h evdev_io.h syscalls.h \
-              shmstate.h
+              shmstate.h plinn_scan.h controllers.h
 
 knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o fader_state.o $(CTRL_HDRS) \
              $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
@@ -179,13 +189,23 @@ $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 # rbp_vu.c's log10() and rbp_led.c. A host libm here would stamp GLIBC_2.29+
 # references and the shim would refuse to load in the glibc-2.13 chroot.
 audioshim.so: audioshim.o s24pack.o mirror_policy.o master_policy.o \
-              pace_policy.o
+              pace_policy.o controllers.o
 	$(CC) $(CFLAGS) -shared -o $@ audioshim.o s24pack.o mirror_policy.o \
-	    master_policy.o pace_policy.o $(RX3LIB)/libdl.so.2 -lm -lc $(LDFLAGS)
+	    master_policy.o pace_policy.o controllers.o $(RX3LIB)/libdl.so.2 -lm -lc \
+	    $(LDFLAGS)
 
 audioshim.o: audioshim.c shmstate.h envutil.h s24pack.h mirror_policy.h \
-             master_policy.h pace_policy.h
+             master_policy.h pace_policy.h controllers.h
 s24pack.o: s24pack.c s24pack.h
+
+# controllers.o is shared with knobshim.so, and audioshim.o now includes its
+# header: the default ALSA card and the FLX4's port-name hint are two fields of
+# ONE row, which is the drift this table removes. It is on audioshim.o's deps as
+# well as in CTRL_HDRS (which the pattern rule already uses), because a table
+# change that no object depends on is a rebuild that silently does not happen.
+# There is deliberately no rule of its own here: a per-object rule would replace
+# the pattern rule's -fvisibility=hidden and give the two shims two differently
+# built copies of the same table.
 
 # mirror_policy.o is the HDMI mirror's decisions (which candidates a device list
 # yields, what a writei() return means, when a down device may be retried),
@@ -396,6 +416,17 @@ seqinject2: seqinject2.c
 udplog: udplog.c
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -static -o $@ $<
 
+# controllers_cli is the controller table asked from a shell -- the half of the
+# sibling's controllers.py that is not imported. It links the PRODUCTION
+# controllers.c, so `doctor.sh` and `install.sh` read the same rows the shims use
+# instead of keeping a copy in shell, where nothing would check it. Static and in
+# STATIC because it is a diagnostic that must run on the unit whatever state the
+# deploy root's shared libraries are in -- the moment it is wanted is the moment
+# something else is wrong. Installed by install.sh beside the other artifacts.
+controllers_cli: controllers_cli.c controllers.c controllers.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -static -o $@ \
+	    controllers_cli.c controllers.c
+
 # pcmprobe is a diagnostic, not a shim: NOT built by `all` and never shipped. It
 # links the chroot's libasound — the same copy the audio shim dlopens — because
 # the question it answers is "which integer is S24_3LE, and what does this card
@@ -466,7 +497,8 @@ pcmprobe: ../../tools/pcmprobe.c
 # and the rectangle -- see that file's header.
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
          test_evdev test_cursor_dev test_menu test_side test_window test_keyboard \
-         test_menu_dev test_util test_wave test_prompt test_led_table
+         test_menu_dev test_util test_wave test_prompt test_led_table \
+         test_plinn_scan test_controllers
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -580,6 +612,31 @@ test_wave: test_wave.c wave_zone.c wave_zone.h rbp_abi.h
 test_led_table: test_led_table.c led_table.c led_table.h rbp_abi.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_led_table.c led_table.c
+
+# test_plinn_scan links the PRODUCTION plinn_scan.c, for the same reason
+# test_led_table links led_table.c: the object scan in rbp_bridge.c is linked into
+# no test, so the rule that decides which vtable match is a deck's innards -- and
+# the counts a failed scan reports -- would otherwise only ever be exercised on a
+# unit. It is the rule that shipped with an off-by-one on 2026-10-01, so the exact
+# deck-1 case is the first thing pinned here. Note the shorter list of inputs than
+# test_led_table's: this module reads no address of rbp's, so it does not need
+# rbp_abi.h, and the day it wants to is the day the split has gone wrong.
+test_plinn_scan: test_plinn_scan.c plinn_scan.c plinn_scan.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_plinn_scan.c plinn_scan.c
+
+# test_controllers links the PRODUCTION controllers.c, for the same reason the
+# two above do. The table is the anti-drift artifact: one physical device used to
+# be named by the map, the port-name hint, the ALSA card id and a USB id in four
+# files that never referenced each other, so the tests pin them TOGETHER and pin
+# what is deliberately NOT known (the JP21's three NULLs) as tightly as what is.
+# It reads no address of rbp's, so no rbp_abi.h on the line -- the day it wants
+# one is the day this module has stopped being pure. It is also the source for
+# controllers_cli.c below, which doctor.sh and install.sh read instead of keeping
+# their own copy of the list.
+test_controllers: test_controllers.c controllers.c controllers.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_controllers.c controllers.c
 
 # test_prompt links the PRODUCTION prompt_zone.c and prompt_paint.c, and menu_paint.c
 # with them because the box's palette comes from menu_pixel() -- one table, so the

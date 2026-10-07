@@ -520,6 +520,193 @@ else
 	fi
 fi
 
+# --- 9. the controller table ------------------------------------------------
+
+hdr 9 "controller"
+
+# The table (scripts/shims/controllers.c) is the one place a control surface's
+# map, its sequencer port-name hint, its ALSA card id and its USB id are written
+# down together. Every value below is read out of it through controllers_cli,
+# which links the PRODUCTION controllers.c -- so this script keeps no copy of any
+# surface's name. A copy here would be in shell, where nothing checks it, and it
+# would be the fourth place one device is named, which is the drift the table
+# exists to remove.
+#
+# What is checked is AGREEMENT, not correctness: the table is the source of
+# truth, so the only question left is whether what is configured on this unit
+# still points at the surface the table says is selected. A disagreement is a
+# warn and not a fail, because a bench deliberately wired to a different surface
+# is legitimate -- it is the SILENT version of it that costs an afternoon.
+CLI="$RB_DEPLOY_ROOT/controllers_cli"
+
+if [ ! -x "$CLI" ]; then
+	warn "no controller table CLI at $CLI"
+	note "nothing rbp loads is missing -- this is a diagnostic. Without it the"
+	note "one place the surface's names are written down cannot be read here."
+	fix "make -C scripts/shims controllers_cli && scp scripts/shims/controllers_cli root@<unit>:$RB_DEPLOY_ROOT/"
+else
+	# `detect` matches the USB ids in sysfs against the table's rows. It is NOT
+	# how the shim finds its surface -- the shim matches the ALSA sequencer PORT
+	# NAME -- so what this answers is "what is plugged in", which is the other
+	# half of the comparison below. Its exit status is a three-way contract and
+	# collapsing it would report "no controller" on a machine whose /sys simply
+	# could not be read: 0 matched, 1 read and nothing matched, 2 not read.
+	att_id=""
+	attached=$("$CLI" detect 2>/dev/null)
+	case $? in
+	0)
+		att_id=$(printf '%s\n' "$attached" | head -1 | cut -d' ' -f1)
+		ok "attached: $(printf '%s' "$attached" | tr '\n' ' ')"
+		;;
+	2)
+		warn "$CLI detect could not read /sys/bus/usb/devices"
+		note "nothing below can compare the selection against a device."
+		;;
+	*)
+		note "no controller attached (no row's USB id is on this machine)"
+		note "normal on a bench with nothing plugged in, and on a unit whose"
+		note "surface is the keyboard: MIDI_MAP=kbd needs no device."
+		;;
+	esac
+
+	# `ref` is the row the settings below are compared against: the row MIDI_MAP
+	# names when it names one, and otherwise the attached controller's -- because
+	# kbd and none are MAPS, not controllers, and under either the shim still
+	# looks for the default surface by name.
+	sel="${RB_MIDI_MAP:-}"
+	ref="$sel"
+	if [ -n "$sel" ] &&
+	   ! "$CLI" names 2>/dev/null | awk '{print $1}' | grep -Fxq "$sel"; then
+		ref=""
+	fi
+	[ -n "$ref" ] || ref="$att_id"
+
+	if [ -z "$sel" ]; then
+		ok "MIDI_MAP is empty: the table's default row selects the surface"
+	elif [ "$ref" = "$sel" ]; then
+		ok "MIDI_MAP=$sel is a row in this table"
+	else
+		note "MIDI_MAP=$sel names no controller row (kbd and none are maps, by design)"
+	fi
+
+	if [ -n "$att_id" ] && [ -n "$ref" ]; then
+		if [ "$ref" = "$att_id" ]; then
+			ok "the attached controller '$att_id' is the one the settings below are read against"
+		else
+			warn "MIDI_MAP selects '$ref', but '$att_id' is the controller attached"
+			note "legitimate on a bench, and a fault on a unit that should play:"
+			note "the shim waits for a surface that is not here, and the log says"
+			note "which name it is waiting for."
+		fi
+	fi
+
+	# The two values the table supplies, asked for once. An empty answer means
+	# the table records none for that row, which is not a failure to report --
+	# the JP21 row's hint and card id are recorded as UNKNOWN rather than
+	# guessed, and that is the honest state of this port's knowledge.
+	hint=""
+	card=""
+	if [ -n "$ref" ]; then
+		hint=$("$CLI" match "$ref" 2>/dev/null) || hint=""
+		card=$("$CLI" card-id "$ref" 2>/dev/null) || card=""
+	fi
+
+	# The port-name hint. The shim uses it as a case-insensitive SUBSTRING of the
+	# sequencer's port name; empty means "the row's own hint", which is the
+	# shipped default and the thing that keeps detection and the mapping in step.
+	case "${RB_MIDI_IN_MATCH:-}" in
+	"")
+		if [ -n "$hint" ]; then
+			ok "MIDI_IN_MATCH is empty -> the table's hint for '$ref' is '$hint'"
+		elif [ -n "$ref" ]; then
+			note "MIDI_IN_MATCH is empty and the table records no hint for '$ref'"
+			note "nothing is matched by name, so the rawmidi route takes over."
+		else
+			note "MIDI_IN_MATCH is empty: the selected row's hint is used (nothing"
+			note "is attached here to name it against)."
+		fi
+		;;
+	*)
+		if [ -z "$ref" ]; then
+			note "MIDI_IN_MATCH=${RB_MIDI_IN_MATCH} (nothing attached to compare it against)"
+		elif [ -z "$hint" ]; then
+			note "the table records no port hint for '$ref', so MIDI_IN_MATCH="
+			note "${RB_MIDI_IN_MATCH} is an override this unit has to answer for."
+		elif [ "$RB_MIDI_IN_MATCH" = "$hint" ]; then
+			ok "MIDI_IN_MATCH=${RB_MIDI_IN_MATCH} is the table's hint for '$ref'"
+		else
+			warn "MIDI_IN_MATCH=${RB_MIDI_IN_MATCH}, but the table's hint for '$ref' is '$hint'"
+			note "the shim looks for the port name set here, so a surface that is"
+			note "never found is this line rather than the device."
+		fi
+		;;
+	esac
+
+	# The audio card. rb.conf used to write this down on its own, with nothing
+	# tying it to the surface selected above -- so a bench that switched surface
+	# left audio pointed at the old card, silently. Empty now means the table's.
+	dev_card=""
+	if [ -n "${RB_AUDIO_DEV:-}" ]; then
+		dev_card=$(printf '%s\n' "$RB_AUDIO_DEV" |
+			sed -n 's/.*CARD=\([^,]*\).*/\1/p')
+	fi
+	case "${RB_AUDIO_DEV:-}" in
+	"")
+		if [ -n "$card" ]; then
+			ok "AUDIO_DEV is empty -> the table's card for '$ref' is hw:CARD=$card,DEV=0"
+		elif [ -n "$ref" ]; then
+			note "AUDIO_DEV is empty and the table records no card id for '$ref'"
+			note "the default row's card is used instead, so set AUDIO_DEV by hand"
+			note "on a bench whose surface the table cannot name a card for."
+		else
+			note "AUDIO_DEV is empty: the selected row's card is used (nothing is"
+			note "attached here to name it against)."
+		fi
+		;;
+	*)
+		if [ -z "$dev_card" ]; then
+			note "AUDIO_DEV=$RB_AUDIO_DEV names its card by index, so the table's"
+			note "card id cannot be compared with it."
+		elif [ -z "$ref" ]; then
+			note "AUDIO_DEV=$RB_AUDIO_DEV (nothing attached to compare it against)"
+		elif [ -z "$card" ]; then
+			note "the table records no card id for '$ref', so AUDIO_DEV=$RB_AUDIO_DEV"
+			note "is an override this unit has to answer for."
+		elif [ "$dev_card" = "$card" ]; then
+			ok "AUDIO_DEV's card '$card' is the table's card for '$ref'"
+		else
+			warn "AUDIO_DEV names card '$dev_card'; the table's card for '$ref' is '$card'"
+			note "expected on a bench wired to a card the table does not name; on a"
+			note "unit that plays, one of the two is stale."
+		fi
+		;;
+	esac
+
+	# CTRL_KEEPALIVE is the one setting here that is not a de-duplication: it
+	# gates the vendor SysEx the surface's row carries (see rb.conf). All that can
+	# be checked from here is that rb.conf can REACH it -- start-rb.sh exports
+	# every name in its SHIM_VARS list and nothing else, so a knob missing from
+	# that list is read by nobody and says nothing at all (docs/08-controls.md).
+	case "${RB_CTRL_KEEPALIVE:-1}" in
+	0) note "CTRL_KEEPALIVE=0: no keepalive is sent to the surface" ;;
+	*) ok "CTRL_KEEPALIVE=${RB_CTRL_KEEPALIVE:-1}: the selected surface's keepalive is sent" ;;
+	esac
+	if [ -f "$RB_DEPLOY_ROOT/start-rb.sh" ]; then
+		# The list is the quoted block between the SHIM_VARS=" line and the first
+		# line that is exactly a quote (start-rb.sh:183-199). -w so a name inside
+		# a longer one cannot pass for it.
+		if sed -n '/^SHIM_VARS="/,/^"/p' "$RB_DEPLOY_ROOT/start-rb.sh" 2>/dev/null |
+		   grep -qw 'CTRL_KEEPALIVE'; then
+			ok "CTRL_KEEPALIVE is in start-rb.sh's SHIM_VARS list"
+		else
+			warn "CTRL_KEEPALIVE is not in $RB_DEPLOY_ROOT/start-rb.sh's SHIM_VARS"
+			note "start-rb.sh exports the names in that list and no others, so the"
+			note "value in rb.conf would be read by nobody. Re-deploy the pair."
+			fix "scp scripts/device/start-rb.sh root@<unit>:$RB_DEPLOY_ROOT/"
+		fi
+	fi
+fi
+
 # --- summary ----------------------------------------------------------------
 
 echo

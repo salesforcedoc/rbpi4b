@@ -27,7 +27,8 @@ small set of modules built into `knobshim.so`:
 | `rbp_led.c` / `.h` | the LED mirror: rbp's LedStat table and engine state → panel notes, blink, the LED logging |
 | `led_table.c` / `.h` | the **pure** half of the mirror: the settled-table merge (the torn-read filter), the (id, channel) lookup, and the blink phase. No address of rbp's appears in it, so it is tested without a Pi (`test_led_table`). |
 | `rbp_vu.c` / `.h` | the meter bit maths and the segment rescale |
-| `midi_io.c` / `.h` | the sequencer in, and the surface's LED/meter port out |
+| `midi_io.c` / `.h` | the sequencer in, and the surface's LED/meter port out (Note On/Off, CC, and one whole SysEx) |
+| `controllers.c` / `.h` | **the controller table**: one row per surface — its map, port-name hint, card id, USB id, init and keepalive SysEx. Pure: no I/O, no globals, no clock, so `test_controllers` links it and runs it on the host. `controllers_cli.c` is the same table with a `main()` for shell callers |
 | `shimutil.c` / `.h` | `klog()`, the clock, and the environment helpers |
 | `shmstate.c` / `.h` | the globals the audio shim reads, and the contract that guards them |
 | `map_flx4.c` | the DDJ-FLX4's tables — written and fixture-tested, tables **unverified** until a dump from the unit, see [15](15-flx4-midi.md) |
@@ -98,6 +99,33 @@ variable was wrong — with two selections the bad value alone no longer says.
 keyboard only", which is what operators wrote before the second selection existed,
 and `EVDEV_MAP=none` is how to ask for a controller with no keyboard at all. The
 previous target's map is one word away (`MIDI_MAP=jp21`).
+
+### One table per controller
+
+A surface's four names are written down **once**, in `controllers.c`: the
+`MIDI_MAP` value that selects its map, the ALSA sequencer port-name substring it
+is detected by, its ALSA card id, and its USB id. `rb.conf` ships all four
+*empty*, and empty means "the table's row for the selected controller" — so
+selecting `jp21` moves the map, the port hint and the audio card together. They
+did not move together before: `RB_MIDI_IN_MATCH` said `FLX4` and `RB_AUDIO_DEV`
+named `DDJFLX4` while `RB_MIDI_MAP` chose the surface, in three files that never
+referenced each other, and the audio card had nothing to do with the surface at
+all. Setting any of the four in `rb.conf` still wins, and is how a device the
+table does not name is used; `doctor.sh` reports when a setting and the table
+disagree.
+
+`controllers_cli` is that table asked from a shell — `detect` (what is *plugged
+in*, by USB id; the shim itself matches the sequencer port name, not USB),
+`names`, `usbids`, `card-id <id>`, `match <id>` — and it is what `doctor.sh` and
+`install.sh` read, so no shell script keeps its own copy of a surface's name.
+`kbd` and `none` are **maps**, not controllers: they have no device behind them
+and are deliberately not rows.
+
+The table also carries two messages rather than names, because a message belongs
+beside the surface it is for: an **init** SysEx sent once (the JP21's
+absolute-control query, and `NULL` for the FLX4) and a repeating **keepalive**
+(the FLX4's 12-byte vendor SysEx every 200 ms — see `CTRL_KEEPALIVE` below and
+[15](15-flx4-midi.md)).
 
 ## The keyboard map (`RB_EVDEV_MAP=kbd`, or `RB_MIDI_MAP=kbd` alone)
 
@@ -281,7 +309,9 @@ claim to trust ([16](16-input-and-hotplug.md)).
 Input is never hardcoded to a device node. The shim walks the ALSA sequencer's
 client and port lists with `SNDRV_SEQ_IOCTL_QUERY_NEXT_CLIENT` /
 `SNDRV_SEQ_IOCTL_QUERY_NEXT_PORT`, matches the port name against
-`RB_MIDI_IN_MATCH` (a case-insensitive substring, default `FLX4`), requires the
+`RB_MIDI_IN_MATCH` (a case-insensitive substring; empty — the shipped default —
+means the selected controller's own hint from the table, which is `FLX4` for the
+FLX4), requires the
 port's capabilities to include `CAP_READ | SUBS_READ`, excludes its own client,
 and subscribes — **in a retry loop**, because the shim starts before the
 controller is necessarily enumerated and plugging it in late has to work. A
@@ -407,6 +437,7 @@ The flags:
 | `VU_TEST=1` / `VU_DEBUG=1` | meter sweep / raw hooked bitmask logging |
 | `BEATLOOP=1` | enable the experimental beat-loop knob (below) |
 | `KBD_DEV=/dev/input/eventN` | the keyboard map's reader reads this one node instead of scanning (a path, not a flag: empty discovers; with it set the mouse is not read) |
+| `CTRL_KEEPALIVE=0` | stop sending the attached surface's keepalive SysEx. It ships `1`, and it is the only thing in this port that sends one — the FLX4's row carries a 12-byte vendor message every 200 ms ([15](15-flx4-midi.md)). Set it to `0` to run the control, and read the log rather than the glass: the send is logged |
 
 `RB_VERBOSE=1` sets the verbose family together: `RB_KNOB_VERBOSE`,
 `RB_JOG_VERBOSE`, `RB_TEMPO_VERBOSE` and `RB_LED_VERBOSE` each default to it in
