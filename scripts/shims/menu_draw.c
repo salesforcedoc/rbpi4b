@@ -123,6 +123,10 @@
 #include "side_paint.h"        /* ...and the image it is drawn with */
 #include "prompt_zone.h"       /* the USB STOP chooser: its box, and whether it is up */
 #include "prompt_paint.h"      /* ...and the image it is drawn with */
+#include "fx_zone.h"           /* the Beat FX picker: its box, and whether it is up */
+#include "fx_paint.h"          /* ...and the image it is drawn with */
+#include "fxpad_zone.h"        /* the momentary X/Y pad: whether it is holding a finger */
+#include "fxpad_paint.h"       /* ...and the HUD it draws over rbp's BPM cell */
 #include "rbp_vu.h"            /* g_fader[]: the value the drawer's handle follows */
 #include "drmband.h"           /* the overlay plane, when this machine has one */
 #include "fbdev.h"
@@ -313,16 +317,27 @@ struct menu_map {
      * lifetime (cleared when the box closes, so a later open tries again); on that
      * route the box goes onto the page and keeps working, at the band's fallback cost.
      *
-     * `prompt_painted_cell`, `prompt_painted_armed` and `prompt_painted_live` are the
-     * state the PUBLISHED image holds -- the cell under the finger, the device cell the
-     * operator has armed, and rbp's two device-liveness bits packed one per bit. Three
-     * real values and not a counter: the plane is single-buffered, so a gate fed
-     * anything that alternates by itself would repaint every tick and blink
+     * `prompt_painted_cell`, `prompt_painted_flash` and `prompt_painted_live` are the
+     * state the PUBLISHED image holds -- the cell under the finger, the cell whose
+     * hold is blinking on its lit half, and rbp's two device-liveness bits packed one
+     * per bit. Three real values and not a counter: the plane is single-buffered, so a
+     * gate fed anything that alternates by itself would repaint every tick and blink
      * (menu_window_repaint()'s rule). The liveness belongs in the gate because a device
      * appearing or going away is a change to the picture and nothing else would notice
-     * it -- and the arming belongs in it for the same reason with a twist: arming a
-     * device moves the box nowhere, so it is the one change that would otherwise leave
-     * the published image stale while the state behind it had moved.
+     * it. AND THE FLASH BELONGS IN IT for the newest reason of the three: a running
+     * hold lights its button for half of every PR_HOLD_FLASH_MS, and with the phase out
+     * of the key the box would keep republishing the image it built when the finger
+     * went down -- the button would light once and then sit there for three seconds
+     * looking exactly like a tap that had been swallowed.
+     *
+     * SO DO THE TWO DEVICE NAMES, for the identical reason one step further out: a
+     * button reads the name on the stick (prompt_zone.h), and a stick pulled while its
+     * box is up removes the name file a moment before rbp stops reporting the media. The
+     * window between those two is short and both events would repaint -- but the gate
+     * has to see the thing that changed rather than rely on a second thing changing too
+     * ([[a-dead-driver-flashes-the-chrome]] is the same trap). The key is the state's own
+     * label array, so it is the string the button reads and not a second opinion about
+     * it, and it is 72 bytes to compare.
      *
      * `prompt_valid` is "there is a real box in prompt_img[0]". It is what the show
      * waits on: a fresh dumb buffer holds nothing anyone can read, so the box must be
@@ -339,8 +354,67 @@ struct menu_map {
     int    prompt_buf_bpp;
     int    prompt_pending;       /* the destination still needs the front copied in */
     int    prompt_painted_cell;  /* the cell the published image is highlighted for */
-    int    prompt_painted_armed; /* ...the device cell it is armed on... */
+    int    prompt_painted_flash; /* ...the cell it is lit on for the hold's blink... */
     int    prompt_painted_live;  /* ...and the liveness bits it was drawn with */
+    char   prompt_painted_name[PROMPT_DEVICES][PR_LABEL_MAX + 1];
+                                 /* ...and the two device names it was drawn with */
+
+    /* THE BEAT FX PICKER'S PLANE -- a FIFTH drm_band, the prompt's arrangement at the
+     * picker's own size, and for the same reason: fx_paint.h's contract is that the
+     * view's picture rect IS the box, so the plane is FX_W x FX_H logical px scaled to
+     * the page and the box's own coordinates are the buffer's.
+     *
+     * IT IS ITS OWN SLOT AND NOT THE PROMPT'S, reversed on evidence 2026-10-06 (the plan
+     * of record records the reversal). The fear was that a fifth plane would be refused,
+     * and the unit's own /sys/kernel/debug/dri/1/state lists plane[0] through plane[29]+
+     * with five already held by this shim. Sharing the prompt's slot instead would make
+     * the two boxes mutually exclusive by construction, and getting THAT wrong shows one
+     * box's pixels in the other's buffer -- a far worse failure than a refused plane,
+     * which costs nothing because the page route below carries it.
+     *
+     * The two cannot be raised at once in any case: the funnel's first refusal in
+     * pointsrc.c keeps a second box from opening under either one.
+     *
+     * `fxlist_painted_row` is the one piece of state the published image holds -- the row
+     * under the finger, 0 for none. It is a real value and not a counter for the reason
+     * menu_window_repaint() gives: the plane is single-buffered, so a gate fed anything
+     * that alternates by itself would repaint every tick and blink. There is nothing else
+     * in it: fx_zone.h records why no row is marked as the current effect. */
+    struct drm_band fxlist;
+    int  fxlist_ok;              /* the picker's plane is set up and mapped */
+    int  fxlist_on;              /* ...and it is on the glass right now */
+    int  fxlist_fail;            /* this machine refused a picker-sized plane */
+    int  fxlist_valid;           /* a built picker exists in fxlist_img[0] */
+    void  *fxlist_img[2];        /* [front, back]; NULL when none could be had */
+    size_t fxlist_img_bytes;     /* one image, bytes */
+    int    fxlist_buf_w;         /* the image's geometry, cached at allocation ... */
+    int    fxlist_buf_h;
+    int    fxlist_buf_bpp;
+    int    fxlist_pending;       /* the destination still needs the front copied in */
+    int    fxlist_painted_row;   /* the row the published image is highlighted for */
+
+    /* THE MOMENTARY PAD'S PLANE -- a SIXTH drm_band, the cell's own size, and the only
+     * one in this file that is up for as long as a FINGER is down rather than for as long
+     * as a box is open. That is the whole of its difference from the five above, and it
+     * costs it the machinery they all share: there is no image pair and no publish gate
+     * here, because the picture is a function of rbp's OWN pixels (which change under a
+     * running deck) and of a finger (which changes between ticks) -- so "has it changed"
+     * is always yes, and the tick copies and annotates every time it is up. menu_paint.h's
+     * no-save-under argument applies twice over: the numbers underneath are the BPM.
+     *
+     * IT IS THE ONE PLANE THAT MUST NEVER OUTLIVE ITS GESTURE. A stale band is a strip of
+     * our drawing over rbp's UI; a stale PAD would be an opaque rectangle sitting on the
+     * operator's BPM readout with a frozen dot on it -- so the tick's very first act is to
+     * take it off the glass whenever no finger is on the cell (menu_fxpad_plane_sync()),
+     * before any route is decided. It is hidden and not torn down between gestures, which
+     * is that function's own comment.
+     *
+     * `fxpad_fail` is the same once-only latch the picker's and the chooser's carry: a
+     * machine that refuses this plane must not be asked again on every tick. */
+    struct drm_band fxp;
+    int  fxp_ok;                 /* the pad's plane is set up and mapped */
+    int  fxp_on;                 /* ...and it is on the glass right now */
+    int  fxp_fail;               /* this machine refused a cell-sized plane */
 
     /* The page, and the picture rect inside it, kept only so that a plane which
      * will not go up can be abandoned mid-session: the view goes back to these
@@ -1214,7 +1288,7 @@ static void menu_prompt_build(void)
 {
     struct menu_view pv;
     struct prompt_state S;
-    int cell, armed, live;
+    int cell, flash, live;
     void *t;
     long t0;
 
@@ -1225,14 +1299,18 @@ static void menu_prompt_build(void)
 
     pointsrc_usb_state(&S);
     cell  = prompt_pressed();
-    armed = prompt_selected();
+    flash = prompt_hold_flash() ? prompt_hold_cell() : 0;
     live = (S.live[0] ? 1 : 0) | (S.live[1] ? 2 : 0);
-    /* THREE THINGS MAKE THE PICTURE, so three things are in the key. The arming is one
-     * of them and it is the one that is easy to forget: a tap on a device button takes
-     * the box nowhere, so if it were not here the box would keep publishing the
-     * pre-arming image and OK would light up one tick late -- or not at all. */
+    /* FOUR THINGS MAKE THE PICTURE, so four things are in the key. The flash is one
+     * of them and it is the one that is easy to forget: a hold moves the box nowhere and
+     * changes no other value, so if the phase were not here the box would go on
+     * publishing the image it built when the finger went down and the button would
+     * simply light once ([[a-dead-driver-flashes-the-chrome]] is the same trap: a gate
+     * that cannot see the thing that changed). The names are the fourth and they are in
+     * the key for exactly that reason (the field's own note above). */
     if (g.prompt_valid && g.prompt_painted_cell == cell &&
-        g.prompt_painted_armed == armed && g.prompt_painted_live == live)
+        g.prompt_painted_flash == flash && g.prompt_painted_live == live &&
+        !memcmp(g.prompt_painted_name, S.label, sizeof g.prompt_painted_name))
         return;                      /* the published image is already this one */
 
     menu_prompt_buf_view(&pv, g.prompt_img[1]);
@@ -1240,20 +1318,24 @@ static void menu_prompt_build(void)
         return;
 
     t0 = menu_now_us();
-    prompt_paint(&pv, &S, cell, armed);
+    prompt_paint(&pv, &S, cell, flash);
     if (g.verbose)
-        pointsrc_log("prompt: build %ld us: cell %d, armed %d, usb 1 %s, usb 2 %s",
-                     menu_now_us() - t0, cell, armed,
+        pointsrc_log("prompt: build %ld us: cell %d, flash %d, usb 1 %s '%s',"
+                     " usb 2 %s '%s'",
+                     menu_now_us() - t0, cell, flash,
                      S.live[0] ? "ready" : "absent",
-                     S.live[1] ? "ready" : "absent");
+                     prompt_cell_text(&S, PR_CELL_USB1),
+                     S.live[1] ? "ready" : "absent",
+                     prompt_cell_text(&S, PR_CELL_USB2));
 
     pthread_mutex_lock(&g_lock);
     t = g.prompt_img[0];
     g.prompt_img[0] = g.prompt_img[1];
     g.prompt_img[1] = t;
     g.prompt_painted_cell  = cell;
-    g.prompt_painted_armed = armed;
+    g.prompt_painted_flash = flash;
     g.prompt_painted_live  = live;
+    memcpy(g.prompt_painted_name, S.label, sizeof g.prompt_painted_name);
     g.prompt_valid = 1;
     g.prompt_pending = 1;
     pthread_mutex_unlock(&g_lock);
@@ -1322,22 +1404,24 @@ static void menu_prompt_repaint(void)
 {
     struct menu_view pv;
     struct prompt_state S;
-    int cell, armed, live;
+    int cell, flash, live;
 
     pointsrc_usb_state(&S);
     cell  = prompt_pressed();
-    armed = prompt_selected();
+    flash = prompt_hold_flash() ? prompt_hold_cell() : 0;
     live = (S.live[0] ? 1 : 0) | (S.live[1] ? 2 : 0);
     if (g.prompt_valid && g.prompt_painted_cell == cell &&
-        g.prompt_painted_armed == armed && g.prompt_painted_live == live)
+        g.prompt_painted_flash == flash && g.prompt_painted_live == live &&
+        !memcmp(g.prompt_painted_name, S.label, sizeof g.prompt_painted_name))
         return;
     menu_prompt_view(&pv);
     if (prompt_paint_ok(&pv))
-        prompt_paint(&pv, &S, cell, armed);
+        prompt_paint(&pv, &S, cell, flash);
     g.prompt_valid = 1;
     g.prompt_painted_cell  = cell;
-    g.prompt_painted_armed = armed;
+    g.prompt_painted_flash = flash;
     g.prompt_painted_live  = live;
+    memcpy(g.prompt_painted_name, S.label, sizeof g.prompt_painted_name);
 }
 
 /* Everything the box does per tick. One entry point for both routes, so the tick
@@ -1366,7 +1450,8 @@ static void menu_prompt_live(void)
         pointsrc_usb_state(&S);
         menu_prompt_view(&pv);
         if (prompt_paint_ok(&pv))
-            prompt_paint(&pv, &S, prompt_pressed(), prompt_selected());
+            prompt_paint(&pv, &S, prompt_pressed(),
+                         prompt_hold_flash() ? prompt_hold_cell() : 0);
         g.prompt_valid = 1;
         return;
     }
@@ -1415,6 +1500,432 @@ static void menu_prompt_plane_sync(void)
     }
 
     menu_prompt_live();
+}
+
+/* ---------------- THE BEAT FX PICKER'S PLANE -----------------------------
+ *
+ * The fifth holder of a drm_band and, like the chooser's, not a handover at all. Its
+ * argument is fx_zone.h's and is not repeated: the box is the answer to the operator's
+ * *"when i touch the beat fx have a popup menu with all the fx available so i can
+ * select"*, and everything below is the same publish-a-finished-image rule the band,
+ * the drawers and the chooser keep, at the box's own size.
+ *
+ * IT IS THE CHOOSER'S CODE WITH ONE FIELD, which is the whole difference between the
+ * two boxes: the picker has a row under a finger and nothing else -- no liveness, no
+ * hold -- so where the chooser keys its published image on a three-value tuple this
+ * one keys on a single int. Written out rather than shared because the shared version
+ * would be a function taking a pointer to a slot in `struct g` and a callback for
+ * "what is the picture now", and that indirection would cost more than the ~120
+ * duplicated lines here do -- the same judgement prompt_paint.c records about the
+ * pixel accessor. */
+
+static int menu_fxlist_pw(void)
+{
+    return fxlist_paint_w(g.view.dw);
+}
+
+static int menu_fxlist_ph(void)
+{
+    return fxlist_paint_h(g.view.dh);
+}
+
+/* WHERE THE BOX GOES, and it is fx_zone.h's business and not this file's: the picker is
+ * drawn in rbp's BEAT FX plate's own rectangle, straight over the panel, so its place is
+ * that rectangle and nothing is derived here. It is NOT centred, which is what these two
+ * functions did before the operator saw the first build and asked for it to sit on the
+ * panel ("the same dimensions of the beatfx box ... you don't need a title menu"). The logical->page
+ * scale is the drawers' (menu_side_pw() does the same for SZ_W), with fx_zone.h's
+ * FX_X0/FX_Y0 as the logical origin -- the same origin fxlist_paint() subtracts before
+ * scaling, so the picture and the plane cannot land one pixel apart. */
+static int menu_fxlist_bx(void)
+{
+    return g.fb_bx + (FX_X0 * g.view.dw) / MZ_LOGICAL_W;
+}
+
+static int menu_fxlist_by(void)
+{
+    return g.fb_by + (FX_Y0 * g.view.dh) / MZ_LOGICAL_H;
+}
+
+static void menu_fxlist_view(struct menu_view *pv)
+{
+    memset(pv, 0, sizeof *pv);
+    if (g.fxlist_ok) {
+        pv->pix   = g.fxlist.pix;
+        pv->pitch = g.fxlist.pitch;
+        pv->fb_w  = g.fxlist.w;
+        pv->fb_h  = g.fxlist.h;
+        pv->bpp   = g.fxlist.bpp;
+        pv->dw    = g.fxlist.w;
+        pv->dh    = g.fxlist.h;
+        return;
+    }
+    pv->dw  = (unsigned)menu_fxlist_pw();
+    pv->dh  = (unsigned)menu_fxlist_ph();
+    pv->pix = (unsigned char *)g.fb_pix
+              + ((size_t)menu_fxlist_by() * (size_t)g.fb_pitch
+                 + (size_t)menu_fxlist_bx()) * (size_t)(g.view.bpp / 8);
+    pv->pitch = g.fb_pitch;
+    pv->fb_w  = pv->dw;
+    pv->fb_h  = pv->dh;
+    pv->bpp   = g.view.bpp;
+}
+
+/* Over the picker's SCRATCH image, for the off-lock build -- menu_prompt_buf_view()'s
+ * function verbatim and for its reason: menu_frame_tick mutates g.fxlist.pix and
+ * g.view under g_lock, so reading either from the builder would be the race that
+ * function exists to avoid. fb_w/fb_h are load-bearing: fxlist_paint_ok() rejects a
+ * view whose rectangle does not fit inside its framebuffer, and it rejects it SILENTLY. */
+static void menu_fxlist_buf_view(struct menu_view *pv, void *buf)
+{
+    memset(pv, 0, sizeof *pv);
+    pv->pix   = buf;
+    pv->pitch = g.fxlist_buf_w;
+    pv->fb_w  = g.fxlist_buf_w;
+    pv->fb_h  = g.fxlist_buf_h;
+    pv->bpp   = g.fxlist_buf_bpp;
+    pv->dw    = g.fxlist_buf_w;
+    pv->dh    = g.fxlist_buf_h;
+}
+
+/* Build the picker OFF THE LOCK and publish it by swapping the two pointers under it.
+ * ONE VALUE MAKES THE PICTURE -- the row under the finger -- so the gate is that one
+ * comparison, and it is a transition gate rather than a per-tick one, which is what
+ * keeps the plane from blinking. */
+static void menu_fxlist_build(void)
+{
+    struct menu_view pv;
+    int row;
+    void *t;
+    long t0;
+
+    if (!g.fxlist_img[0])
+        return;                      /* no cache: the tick paints direct, as it shipped */
+    if (!fxlist_is_open())
+        return;
+
+    row = fxlist_pressed();
+    if (g.fxlist_valid && g.fxlist_painted_row == row)
+        return;                      /* the published image is already this one */
+
+    menu_fxlist_buf_view(&pv, g.fxlist_img[1]);
+    if (!fxlist_paint_ok(&pv))
+        return;
+
+    t0 = menu_now_us();
+    fxlist_paint(&pv, row);
+    if (g.verbose)
+        pointsrc_log("fxlist: build %ld us: row %d", menu_now_us() - t0, row);
+
+    pthread_mutex_lock(&g_lock);
+    t = g.fxlist_img[0];
+    g.fxlist_img[0] = g.fxlist_img[1];
+    g.fxlist_img[1] = t;
+    g.fxlist_painted_row = row;
+    g.fxlist_valid = 1;
+    g.fxlist_pending = 1;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Put the published picker on whatever is carrying it. The caller holds g_lock.
+ * menu_prompt_publish()'s two routes and its two reasons: a plane copies only when
+ * there is something new, and the page copies EVERY tick because rbp repaints the
+ * middle of the performance screen 57 times a second and there is no witness for a
+ * region this size. */
+static void menu_fxlist_publish(void)
+{
+    const unsigned char *src;
+    int bpp = g.fxlist_buf_bpp / 8;
+
+    if (!g.fxlist_valid)
+        return;                      /* no finished picker exists yet */
+    src = g.fxlist_img[0];
+    if (!src)
+        return;
+
+    if (g.fxlist_ok) {
+        int y;
+        long t0;
+
+        if (!g.fxlist_pending)
+            return;
+        t0 = menu_now_us();
+        if (g.fxlist.pitch == g.fxlist_buf_w) {
+            memcpy(g.fxlist.pix, src, g.fxlist_img_bytes);
+        } else {
+            for (y = 0; y < g.fxlist_buf_h; y++)
+                memcpy((unsigned char *)g.fxlist.pix
+                           + (size_t)y * (size_t)g.fxlist.pitch * (size_t)bpp,
+                       src + (size_t)y * (size_t)g.fxlist_buf_w * (size_t)bpp,
+                       (size_t)g.fxlist_buf_w * (size_t)bpp);
+        }
+        g.fxlist_pending = 0;
+        if (g.verbose)
+            pointsrc_log("fxlist: blit %ld us", menu_now_us() - t0);
+        return;
+    }
+
+    /* Page route. Always, and per row: the page's stride is not the box's. */
+    {
+        int y;
+        unsigned char *dst = (unsigned char *)g.fb_pix
+            + ((size_t)menu_fxlist_by() * (size_t)g.fb_pitch
+               + (size_t)menu_fxlist_bx()) * (size_t)(g.view.bpp / 8);
+
+        for (y = 0; y < g.fxlist_buf_h; y++)
+            memcpy(dst + (size_t)y * (size_t)g.fb_pitch * (size_t)bpp,
+                   src + (size_t)y * (size_t)g.fxlist_buf_w * (size_t)bpp,
+                   (size_t)g.fxlist_buf_w * (size_t)bpp);
+    }
+}
+
+/* The no-cache fallback: paint the picker straight into its destination. Reached only on
+ * a unit with no room for another image pair. */
+static void menu_fxlist_repaint(void)
+{
+    struct menu_view pv;
+    int row = fxlist_pressed();
+
+    if (g.fxlist_valid && g.fxlist_painted_row == row)
+        return;
+    menu_fxlist_view(&pv);
+    if (fxlist_paint_ok(&pv))
+        fxlist_paint(&pv, row);
+    g.fxlist_valid = 1;
+    g.fxlist_painted_row = row;
+}
+
+/* Everything the picker does per tick. One entry point for both routes, so the tick
+ * cannot take one and forget the other. */
+static void menu_fxlist_live(void)
+{
+    if (!fxlist_is_open())
+        return;
+
+    /* The buffered route: the image was built off the lock by menu_fxlist_build() and
+     * this only COPIES it. The show waits for fxlist_valid, so a fresh plane is never
+     * seen holding the uninitialised buffer it was created with. */
+    if (g.fxlist_img[0]) {
+        menu_fxlist_publish();
+        if (g.fxlist_valid && g.fxlist_ok && !g.fxlist_on &&
+            drm_band_show(&g.fxlist, menu_fxlist_bx(), menu_fxlist_by()) == 0)
+            g.fxlist_on = 1;
+        return;
+    }
+
+    if (!g.fxlist_ok) {
+        struct menu_view pv;
+
+        menu_fxlist_view(&pv);
+        if (fxlist_paint_ok(&pv))
+            fxlist_paint(&pv, fxlist_pressed());
+        g.fxlist_valid = 1;
+        return;
+    }
+    menu_fxlist_repaint();
+}
+
+/* Bring the picker's plane into line with the picker. Called under g_lock from the tick,
+ * after the chooser's sync, and the same once-only `fxlist_fail` latch keeps a machine
+ * that refuses the plane off the tick period. */
+static void menu_fxlist_plane_sync(void)
+{
+    if (!fxlist_is_open()) {
+        if (g.fxlist_ok) {
+            drm_band_teardown(&g.fxlist);
+            g.fxlist_ok = g.fxlist_on = 0;
+            pointsrc_log("fxlist: the picker closed -- its plane is released");
+        }
+        /* Cleared unconditionally, inside and outside the branch above: a closed
+         * picker's image is stale whether or not it ever had a plane, and leaving the
+         * tuple live across a close would show the previous picker for a tick. */
+        g.fxlist_valid   = 0;
+        g.fxlist_pending = 0;
+        g.fxlist_fail    = 0;
+        return;
+    }
+
+    if (!g.fxlist_ok && !g.fxlist_fail) {
+        if (drm_band_setup(&g.fxlist, menu_fxlist_pw(), menu_fxlist_ph(),
+                           g.view.bpp) != 0) {
+            g.fxlist_fail = 1;
+            pointsrc_log("fxlist: no plane for the picker -- it goes on the page");
+        } else {
+            g.fxlist_ok = 1;
+            g.fxlist_on = 0;
+            /* A fresh dumb buffer holds nothing anyone can read, so the image has to be
+             * COPIED in before the picker is shown -- what fxlist_pending says, and
+             * fxlist_valid, which the show waits on, is what says there is a real
+             * picker to copy. */
+            g.fxlist_pending = 1;
+        }
+    }
+
+    menu_fxlist_live();
+}
+
+/* ---------------- THE MOMENTARY PAD'S PLANE -------------------------------
+ *
+ * The sixth holder of a drm_band and, uniquely, NOT a handover and not a box: it is up
+ * for exactly as long as a finger is on rbp's BPM detail cell, and its whole job is to
+ * put a frame and a dot over pixels that are still rbp's. fxpad_paint.h has the argument
+ * for why that means COPYING rbp's own cell in every tick rather than drawing over it.
+ *
+ * WHAT IT DOES NOT HAVE, AND WHY. No image pair, no publish gate, no `painted_*` tuple:
+ * the five boxes above all key their image on a handful of values that only change when
+ * the operator does something, and each of them has a comment about how a gate fed
+ * something that alternates by itself would repaint every tick and blink. That reasoning
+ * INVERTS here. The picture is a function of rbp's pixels (which move under a playing
+ * track -- the BPM readout is live) and of the finger (which moves every report), so it
+ * is genuinely different every tick while it is up, and painting it every tick is not a
+ * gate that failed -- it is the only honest answer. The cost is the cell: 160x137 at the
+ * page's scale, ~44 KB of copy a tick, which is nothing against rbp repainting the whole
+ * screen 57 times a second underneath it.
+ *
+ * THE ONE THING IT INHERITS IS THE MUTUAL EXCLUSION. The pad cannot be engaged while any
+ * box, drawer or window is up -- pointsrc.c's press gate asks every one of them before
+ * it lets a finger take the cell -- so this plane and theirs are never up together, and
+ * the tick below does not have to arbitrate between them. */
+
+static int menu_fxp_pw(void)
+{
+    return fxpad_paint_w(g.view.dw);
+}
+
+static int menu_fxp_ph(void)
+{
+    return fxpad_paint_h(g.view.dh);
+}
+
+/* WHERE IT GOES, and fxpad_zone.h's FXPAD_* are rbp's OWN cell coordinates -- the copy
+ * lands exactly on the black square rbp drew, which is the whole point of measuring them
+ * rather than deriving them. The origin is subtracted before scaling, as fxlist_paint()
+ * does with FX_X0, so the picture and the plane cannot land a pixel apart. */
+static int menu_fxp_bx(void)
+{
+    return g.fb_bx + (FXPAD_X0 * g.view.dw) / MZ_LOGICAL_W;
+}
+
+static int menu_fxp_by(void)
+{
+    return g.fb_by + (FXPAD_Y0 * g.view.dh) / MZ_LOGICAL_H;
+}
+
+/* rbp's OWN PIXELS for the cell -- the copy's source, and the reason this box is not
+ * like the other five. It is the page: the live framebuffer rbp is painting, addressed at
+ * the same screen rectangle the plane will cover, so the HUD is drawn over what rbp has
+ * just put there rather than over a snapshot from some earlier tick. Its origin is the
+ * cell's top-left and its size the plane's, which is what makes fxpad_paint()'s copy a
+ * straight point-for-point move. */
+static void menu_fxp_page_view(struct menu_view *sv)
+{
+    memset(sv, 0, sizeof *sv);
+    sv->pix   = (unsigned char *)g.fb_pix
+                + ((size_t)menu_fxp_by() * (size_t)g.fb_pitch
+                   + (size_t)menu_fxp_bx()) * (size_t)(g.view.bpp / 8);
+    sv->pitch = g.fb_pitch;
+    sv->dw    = menu_fxp_pw();
+    sv->dh    = menu_fxp_ph();
+    sv->fb_w  = sv->dw;
+    sv->fb_h  = sv->dh;
+    sv->bpp   = g.view.bpp;
+}
+
+/* Where the pad's HUD is drawn into: its plane's buffer, or -- on a machine that refused
+ * one -- the page itself, in which case there is nothing to copy (the destination IS
+ * rbp's pixels) and menu_fxpad_live() passes a NULL source. This is MENU_PLANE=0's route
+ * and a refused sixth plane's fallback, and it shimmers exactly as the band's does there:
+ * rbp's next frame erases the two marks and this redraws them. */
+static void menu_fxp_view(struct menu_view *sv)
+{
+    memset(sv, 0, sizeof *sv);
+    if (g.fxp_ok) {
+        sv->pix   = g.fxp.pix;
+        sv->pitch = g.fxp.pitch;
+        sv->fb_w  = g.fxp.w;
+        sv->fb_h  = g.fxp.h;
+        sv->bpp   = g.fxp.bpp;
+        sv->dw    = g.fxp.w;
+        sv->dh    = g.fxp.h;
+        return;
+    }
+    menu_fxp_page_view(sv);
+}
+
+/* Everything the pad does per tick. One entry point for both routes, so the tick cannot
+ * take one and forget the other -- menu_fxlist_live()'s shape. */
+static void menu_fxpad_live(void)
+{
+    struct menu_view dv, pv;
+    int mx = 0, my = 0;
+    int mark = fxpad_mark(&mx, &my);
+    long t0;
+
+    menu_fxp_view(&dv);
+    if (!fxpad_paint_ok(&dv))
+        return;
+
+    t0 = menu_now_us();
+    if (g.fxp_ok) {
+        menu_fxp_page_view(&pv);
+        fxpad_paint(&dv, &pv, mark, mx, my);
+    } else {
+        /* No plane: the destination is the page and the marks go straight onto rbp's
+         * pixels, so there is nothing to copy and the source is deliberately NULL. */
+        fxpad_paint(&dv, NULL, mark, mx, my);
+    }
+    if (g.verbose)
+        pointsrc_log("fxpad: hud %ld us: mark %d at %d,%d", menu_now_us() - t0, mark, mx, my);
+
+    /* Shown, not shown once, for drm_band_show()'s own reason: it is idempotent while it
+     * is already up in the same place, so a tick may call it every frame, and the first
+     * tick that has a real image is the first that shows it -- a fresh dumb buffer holds
+     * nothing anyone can read. */
+    if (!g.fxp_on && drm_band_show(&g.fxp, menu_fxp_bx(), menu_fxp_by()) == 0)
+        g.fxp_on = 1;
+}
+
+/* Bring the pad's plane into line with the pad. Called under g_lock from the tick, and
+ * FIRST there, before any route is decided -- which is the one thing this box does
+ * differently from the five above. Their argument for going last is that each gives its
+ * predecessor the chance to release what it holds; this one has the opposite obligation,
+ * because it is the only plane whose right to be on the glass depends on a finger that
+ * can be gone by the time the tick runs. A pad left up would be an opaque rectangle over
+ * the operator's own readout, so it is released before anything else can return early.
+ *
+ * SHOWN AND HIDDEN PER GESTURE, SET UP ONCE. The five above tear their plane down when
+ * their box closes, and the reason they can is that a box is up for a deliberate session:
+ * the setup and the teardown are paid once for a minute of use. The pad's lifetime is a
+ * TAP -- engage, drag, release, unwound inside a second -- and it is used dozens of times
+ * in a set, so paying create_dumb/AddFB/set_plane and their reverse on every finger would
+ * be paying the expensive half of this on the part the operator will feel. What actually
+ * takes the rectangle off the glass is drm_band_hide() (one ioctl), so that is what the
+ * idle tick does: the buffer stays mapped and hidden, and the next gesture paints it
+ * before showing it, which is what keeps a stale frame off the glass.
+ *
+ * The one thing NOT given up is the refusal latch: a machine that cannot have this plane
+ * says so once and goes on the page, as the picker's does. */
+static void menu_fxpad_plane_sync(void)
+{
+    if (!fxpad_busy()) {
+        if (g.fxp_on) {
+            drm_band_hide(&g.fxp);
+            g.fxp_on = 0;
+        }
+        return;
+    }
+
+    if (!g.fxp_ok && !g.fxp_fail) {
+        if (drm_band_setup(&g.fxp, menu_fxp_pw(), menu_fxp_ph(), g.view.bpp) != 0) {
+            g.fxp_fail = 1;
+            pointsrc_log("fxpad: no plane for the pad -- its HUD goes on the page");
+        } else {
+            g.fxp_ok = 1;
+            g.fxp_on = 0;
+        }
+    }
+
+    menu_fxpad_live();
 }
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1590,6 +2101,44 @@ static int menu_build(int pressed)
         } else {
             g.prompt_img[0] = a;
             g.prompt_img[1] = b;
+        }
+    }
+
+    /* THE PICKER'S IMAGE, on exactly the chooser's terms: its own pair, its own
+     * once-only log, and independent of this function's return value for the same
+     * reason. 340 x 535 at the page's own scale is ~364 KB an image, so the pair is
+     * ~728 KB -- the largest of the four caches, and still the smallest thing here: a
+     * machine that cannot spare it takes menu_fxlist_repaint()'s direct-paint route and
+     * the picker still works. */
+    if (!g.fxlist_img[0]) {
+        static int fxlist_alloc_logged;
+        size_t fn = (size_t)fxlist_paint_w(g.view.dw)
+                    * (size_t)fxlist_paint_h(g.view.dh)
+                    * (size_t)(g.view.bpp / 8);
+        void *a, *b;
+
+        g.fxlist_buf_w     = fxlist_paint_w(g.view.dw);
+        g.fxlist_buf_h     = fxlist_paint_h(g.view.dh);
+        g.fxlist_buf_bpp   = g.view.bpp;
+        g.fxlist_img_bytes = fn;
+
+        if (g.fxlist_img[1]) {
+            free(g.fxlist_img[1]);   /* half a pair from a failed attempt */
+            g.fxlist_img[1] = NULL;
+        }
+        a = malloc(fn);
+        b = malloc(fn);
+        if (!a || !b) {
+            free(a);
+            free(b);
+            if (!fxlist_alloc_logged) {
+                fxlist_alloc_logged = 1;
+                pointsrc_log("fxlist: no %zu-byte picker image (%s); the picker paints"
+                             " straight onto its plane", fn * 2, strerror(errno));
+            }
+        } else {
+            g.fxlist_img[0] = a;
+            g.fxlist_img[1] = b;
         }
     }
 
@@ -1962,7 +2511,19 @@ void menu_frame_tick(void)
     if (pthread_mutex_trylock(&g_lock) != 0)
         return;
 
-    /* The window first, and it DECIDES THE ROUTE: while it is open it owns the
+    /* THE PAD'S PLANE FIRST, before any route is decided, and it is the only one here
+     * that goes first. The five boxes below each give their predecessor the chance to
+     * release what it holds before returning early; this one cannot, because what it
+     * holds is a rectangle sitting on the operator's own BPM readout and its right to be
+     * there expires with a FINGER, not with a box. If the sync were reached only on the
+     * path that no drawer is out, a finger that lifted while a drawer was open -- which
+     * the pad's own gate makes unlikely but which nothing in this file can forbid --
+     * would leave the dot frozen over the panel until something else
+     * happened. Here, one call releases it on the first tick after the finger goes,
+     * whatever else the tick is about to do. An idle pad costs this one comparison. */
+    menu_fxpad_plane_sync();
+
+    /* The window next, and it DECIDES THE ROUTE: while it is open it owns the
      * process's one plane, so the band's whole path below -- present, witness,
      * blit -- is not reached at all. What is reached is the page fallback, which is
      * what lets a swipe-down still draw a (flickering) panel outside the window's
@@ -2013,6 +2574,27 @@ void menu_frame_tick(void)
          * rather than merely wrong. `painted_open` is deliberately NOT cleared: the band's
          * own state is the band's business, and a band that is somehow still open resumes
          * cleanly when the box goes. */
+        if (g.band_on) {
+            drm_band_hide(&g.band);
+            g.band_on = 0;
+        }
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
+
+    /* Then the picker, the fifth and last holder, and the same shape a fourth time. It
+     * is raised from rbp's own BEAT FX panel rather than from the band, so the band is
+     * not necessarily shut when it opens -- hence the hide below, which the chooser's
+     * block above also needs and for the same reason: the picker is centred and opaque
+     * and the band is at the top edge and opaque, so both on the glass at once would
+     * show one through the other.
+     *
+     * THE CHOOSER AND THE PICKER CANNOT BOTH BE UP: pointsrc.c closes the picker on the
+     * keycode path that raises the chooser, and the funnel's ladder asks the chooser
+     * before the picker so the chooser's own feed swallows a tap that would raise the
+     * picker. So this is reached only with the chooser shut. */
+    menu_fxlist_plane_sync();
+    if (fxlist_is_open()) {
         if (g.band_on) {
             drm_band_hide(&g.band);
             g.band_on = 0;
@@ -2152,6 +2734,12 @@ static void *menu_thread(void *arg)
          * safely, and because the touch thread must stay the one that OWNS the gesture
          * -- the box is the only surface in this shim with two writers otherwise. */
         menu_prompt_build();
+        /* Then the picker, on the same terms and in the same place. It has no rbp read
+         * behind it -- the ONE value that makes its picture is the row under the finger
+         * -- but it is built here for the same reason the chooser is: the tick publishes
+         * what this iteration just made, and a build left to the tick would be a build
+         * on the lock the tick is holding. A shut picker returns immediately. */
+        menu_fxlist_build();
         menu_frame_tick();
         usleep((useconds_t)period_us);
     }

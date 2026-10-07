@@ -219,7 +219,7 @@ say "unmounting everything under $DEPLOY"
 _mounts_under | while IFS= read -r m; do
     [ -n "$m" ] || continue
     case "$m" in
-        */media/usb1/sda1)
+        */media/usb1/sda1|*/media/usb2/sda1)
             say "  unmounting $m (your USB media -- the stick is released, not written to)" ;;
         */rbx3-run/dev)
             say "  unmounting $m (the host's /dev, bound into the chroot)" ;;

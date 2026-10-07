@@ -42,12 +42,20 @@ int pointsrc_cursor(int *logical_x, int *logical_y, int *down);
  * in one file, in the order things happened. */
 void pointsrc_log(const char *fmt, ...);
 
-/* What rbp currently says about the two USB devices, for the USB STOP chooser.
- * `S->live[i]` is "device i+1 has media present and ready" (rbp's own test,
- * `[UsbStorageManager+0x88] == 2`); both are left 0 when rbp cannot be read, which
- * the painter and the gesture both treat as a refusal rather than as an absence
- * of information. Returns 1 if rbp was walked, 0 if not -- the return is for the
- * log, not for the caller's decision.
+/* What rbp currently says about the two USB devices -- and what the host says they are
+ * called -- for the USB STOP chooser. `S->live[i]` is "device i+1 has media present and
+ * ready" (rbp's own test, `[UsbStorageManager+0x88] == 2`); both are left 0 when rbp
+ * cannot be read, which the painter and the gesture both treat as a refusal rather than
+ * as an absence of information. Returns 1 if rbp was walked, 0 if not -- the return is
+ * for the log, not for the caller's decision.
+ *
+ * `S->label[i]` is that device's button text, composed by prompt_state_name() from
+ * `/tmp/udev_usbN.label` -- the file usb-watch.sh writes with the stick's own volume
+ * label, the same one rbp's SOURCE screen shows. THE TWO HALVES DO NOT SHARE A GUARD:
+ * the names are read first and are filled in full even when rbp could not be walked, so
+ * a caller that gets 0 still gets buttons that name the devices they are refusing. An
+ * absent, empty or whitespace-only file leaves the cell EMPTY, which is "this device has
+ * no name of its own and the button keeps its number", and the shipped "HOLD USB 1".
  *
  * A read-only snapshot, like pointsrc_cursor(): it touches nothing of rbp's. Safe
  * from the drawer/chooser builder thread as well as from this one, which is why it

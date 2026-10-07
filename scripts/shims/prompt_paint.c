@@ -1,23 +1,25 @@
 /*
- * prompt_paint.c -- the USB STOP chooser's image: title, rule, four outlined buttons.
+ * prompt_paint.c -- the USB STOP chooser's image: title, rule, two outlined buttons.
  *
  * NO FRAME ROUND THE BOX, at the operator's ask of 2026-10-06, who had just had the
  * swipe-down band restyled the same way: "the drop down doesn't need the white border
  * around the endire thing, it only needs a thin white border around each button with
  * some padding in between and a black background. model it this way for the USB stop
- * menu as well". So the box is a black bed with a title, a rule and four buttons that
- * each wear their own one-pixel outline -- which the rows already did (pp_cell()), in
- * their own ink colour; what went was only the PR_BORDER frame that used to enclose
+ * menu as well". So the box is a black bed with a title, a rule and two buttons that
+ * each wear their own one-pixel outline -- which the buttons already did (pp_cell()),
+ * in their own ink colour; what went was only the PR_BORDER frame that used to enclose
  * the lot. PR_BORDER itself stays, as the box's margin: it is what keeps the title and
  * the buttons off the bed's edge and it is what keeps the hit test and the ink the same
  * pixels (prompt_zone.h's diagram is now the same picture with the outer rule struck
  * out).
  *
- * FOUR BUTTONS IN TWO ROWS, the same day and the same operator -- "usb 1 button next to
- * usb 2 button on one line with ok cancel at the bottom". The layout and the gesture
- * changed together, so read prompt_zone.h's header before changing either: the two
- * device buttons ARM and OK answers, which is what the `selected` argument here is for.
- * Nothing in this file decides any of that; it only draws whatever cells it is told.
+ * TWO BUTTONS IN ONE ROW, since 2026-10-07: the second line (OK and CANCEL) is gone
+ * with the two-tap gesture it answered, and with it the `selected` argument this file
+ * used to carry. What replaces it is the FLASH -- a hold in progress draws its button
+ * PRESSED for half a period and its normal live face for the other half, so the
+ * operator can see the three seconds running. Read prompt_zone.h's header before
+ * changing either the layout or the gesture. Nothing in this file decides any of that;
+ * it only draws whatever cells it is told, in whichever of the three faces it is told.
  *
  * See prompt_paint.h for the contract and side_paint.c for the family this belongs
  * to. The ~10 duplicated lines below (the pixel accessor, the fill, the frame, the
@@ -169,10 +171,8 @@ static void pp_text(const struct menu_view *v, int pen_fx, int line_fy,
     if (!s)
         return;
     for (; *s; s++) {
-        const struct menu_glyph *g = menu_font_glyph((unsigned char)*s);
-
         pp_glyph(v, pen_fx, line_fy, (unsigned char)*s, base, ink, cx0, cx1);
-        pen_fx += g->adv;
+        pen_fx += menu_font_adv((unsigned char)*s, (unsigned char)s[1]);
     }
 }
 
@@ -194,18 +194,20 @@ static void pp_text_center(const struct menu_view *v, int lx0, int ly0, int lx1,
 /* --- the pieces ------------------------------------------------------------- */
 
 /* One button: face, frame and centred label, over the cell's own inclusive logical
- * rect. `pressed` is the finger, `armed` is the operator's choice and `live` is rbp's
- * answer about that cell. Pressed and armed are allowed to be true together -- they
- * paint the same pair -- and both beat `live`, deliberately: a finger on a dead cell
- * has to see that it landed somewhere (prompt_paint.h), and an armed cell is by
- * construction a live one (prompt_zone.c's cell_act refuses to arm a dead device). */
-static void pp_cell(const struct menu_view *v, int cell, int live, int pressed,
-                    int armed)
+ * rect. `pressed` is the finger (or the lit half of a hold's flash, which is the same
+ * pair of pixels -- prompt_zone.c hands both to it as one cell) and `live` is rbp's
+ * answer about that cell. Pressed beats `live`, deliberately: a finger on a dim cell
+ * has to see that it landed somewhere (prompt_paint.h), and the cell whose hold is
+ * running is by construction a live one (prompt_zone.c refuses to start a hold on a
+ * device rbp reports gone). */
+static void pp_cell(const struct menu_view *v, const struct prompt_state *S, int cell,
+                    int live, int pressed)
 {
+    char text[PR_LABEL_MAX + 1];
     int fx0, fy0, fx1, fy1;
     unsigned int face, ink;
 
-    if (pressed || armed) {
+    if (pressed) {
         face = menu_pixel(v->bpp, MENU_BTN_PRESSED);
         ink  = menu_pixel(v->bpp, MENU_LABEL_PRESSED);
     } else if (!live) {
@@ -220,12 +222,21 @@ static void pp_cell(const struct menu_view *v, int cell, int live, int pressed,
             PR_CELL_X1(cell) + 1, PR_CELL_Y1(cell) + 1, &fx0, &fy0, &fx1, &fy1);
     pp_fill(v, fx0, fy0, fx1, fy1, face);
     pp_frame(v, fx0, fy0, fx1, fy1, ink);
+
+    /* THE LABEL IS CUT TO THE CELL, HERE, and this is the one place a name the operator
+     * chose meets a rectangle this file owns. The budget is the cell's own inner width
+     * less PR_LABEL_MARGIN on each side -- the same arithmetic prompt_paint_ok() below
+     * refuses a view for, asked of the string that is actually going to be drawn rather
+     * than of the cell's default. Nothing is drawn when it comes back empty, which at
+     * an accepted size cannot happen: the refusal has already promised room for the
+     * default label, which is ten characters. */
+    prompt_text_clip(prompt_cell_text(S, cell), (fx1 - fx0) - 2 * PR_LABEL_MARGIN,
+                     text, (int)sizeof text);
     pp_text_center(v, PR_CELL_X0(cell), PR_CELL_Y0(cell),
-                   PR_CELL_X1(cell) + 1, PR_CELL_Y1(cell) + 1,
-                   prompt_cell_label(cell), face, ink);
+                   PR_CELL_X1(cell) + 1, PR_CELL_Y1(cell) + 1, text, face, ink);
 }
 
-/* Does every button hold its own label whole, at this view's scale? The band's
+/* Does every button hold its CELL'S OWN LABEL whole, at this view's scale? The band's
  * menu_labels_fit() asked the same question the day the labels grew, and for the same
  * reason: a button is now half a row wide, so a page small enough scales the box down
  * until a label would be clipped by the frame it is drawn inside -- and a clipped
@@ -236,11 +247,20 @@ static int pp_labels_fit(const struct menu_view *v)
 {
     int c;
 
+    /* THE DEFAULT, NOT THE DEVICE'S NAME, and the difference is the operator's own
+     * sentence on the glass: a button reads "HOLD RBOX USB" where the cell's own label
+     * is "HOLD USB 1". A name is up to five characters longer than that and a long one
+     * is cut to fit (pp_cell()), so measuring the name here would refuse a view the box
+     * can perfectly well draw -- and it would refuse it as a BLANK BOX, since a failed
+     * prompt_paint_ok() paints nothing at all. What this refusal means is "this cell is
+     * too narrow for a button to be legible on", and the label every cell is guaranteed
+     * to have is the honest yardstick for that. PR_LABEL_MARGIN carries why the margin
+     * is two and not the frame's one. */
     for (c = 1; c <= PROMPT_CELLS; c++) {
         int x0 = pp_fx(v, PR_CELL_X0(c));
         int x1 = pp_fx(v, PR_CELL_X1(c) + 1) - 1;
 
-        if (x1 - x0 + 1 < 2 + menu_text_width(prompt_cell_label(c)))
+        if (x1 - x0 + 1 < 2 * PR_LABEL_MARGIN + menu_text_width(prompt_cell_label(c)))
             return 0;
     }
     return 1;
@@ -269,16 +289,18 @@ int prompt_paint_ok(const struct menu_view *v)
     if (v->dw < 1 || v->dh < 1 || v->pitch < v->dw)
         return 0;
     /* Every row has to host the font's line box after scaling, or the labels collide
-     * with the frames around them, and every button has to hold its own label whole.
-     * Both are properties of the SIZE and not of the state, which is why they are asked
-     * once by the caller rather than per pixel here. */
+     * with the frames around them, and every button has to hold its CELL'S OWN LABEL
+     * whole. AND BOTH ARE STILL PROPERTIES OF THE SIZE AND NOT OF THE STATE, which is
+     * why they are asked once by the caller rather than per pixel here -- the device's
+     * own name is clipped to the cell inside prompt_paint() instead of being allowed to
+     * refuse the view (pp_labels_fit() says why). */
     if ((PR_ROW_H * v->dh) / PR_H < MENU_FONT_LINE + 2)
         return 0;
     return pp_labels_fit(v);
 }
 
 void prompt_paint(const struct menu_view *v, const struct prompt_state *S,
-                  int pressed_cell, int selected_cell)
+                  int pressed_cell, int flash_cell)
 {
     unsigned int fill, rule, ink;
     int c;
@@ -287,8 +309,8 @@ void prompt_paint(const struct menu_view *v, const struct prompt_state *S,
         return;
     if (pressed_cell < 0 || pressed_cell > PROMPT_CELLS)
         pressed_cell = 0;
-    if (selected_cell < 0 || selected_cell > PROMPT_CELLS)
-        selected_cell = 0;
+    if (flash_cell < 0 || flash_cell > PROMPT_CELLS)
+        flash_cell = 0;
 
     fill = menu_pixel(v->bpp, MENU_FILL);
     rule = menu_pixel(v->bpp, MENU_DIV);
@@ -316,6 +338,12 @@ void prompt_paint(const struct menu_view *v, const struct prompt_state *S,
         pp_fill(v, rx0, ry0, rx1, ry1, rule);
     }
 
+    /* THE TWO CELLS, and the second argument is the same face as the first: a cell is
+     * drawn pressed when the finger is on it OR when it is the lit half of the hold's
+     * flash, and prompt_zone.c is careful never to report the same cell as both
+     * (prompt_pressed() answers 0 for the cell whose hold is running), so the blink has
+     * somewhere to blink to. */
     for (c = 1; c <= PROMPT_CELLS; c++)
-        pp_cell(v, c, prompt_cell_live(S, c), c == pressed_cell, c == selected_cell);
+        pp_cell(v, S, c, prompt_cell_live(S, c),
+                c == pressed_cell || c == flash_cell);
 }

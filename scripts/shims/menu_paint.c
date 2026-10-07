@@ -103,6 +103,12 @@ unsigned int menu_pixel(int bpp, int cls)
      * MENU_BTN and LABEL_OFF moves most of the way to it. */
     case MENU_BTN_OFF:       return MENU_TRIP(bpp, 28, 30, 36);
     case MENU_LABEL_OFF:     return MENU_TRIP(bpp, 118, 122, 130);
+    /* SAMPLED OFF RBP'S OWN BEAT FX PANEL, 2026-10-06, from a /dev/fb0 capture of the
+     * live performance screen: the plate is (32,32,32) across 15 543 of its pixels, and
+     * the CH SELECT value box -- the one thing on that panel rbp fills to mean
+     * "selected" -- is (0,125,222) across 5 703. menu_paint.h says why they are here. */
+    case MENU_FX_PLATE:      return MENU_TRIP(bpp, 32, 32, 32);
+    case MENU_FX_SEL:        return MENU_TRIP(bpp, 0, 125, 222);
     default:                 return 0;
     }
 }
@@ -346,10 +352,11 @@ static int menu_label_cov(const struct menu_layout *L, int i, int fx, int fy)
         return 0;
     for (k = 0; k < L->ln[i]; k++) {
         const struct menu_glyph *g = menu_font_glyph((unsigned char)s[k]);
+        int adv = menu_font_adv((unsigned char)s[k], (unsigned char)s[k + 1]);
 
-        if (dx < (int)g->adv)
+        if (dx < adv)
             return menu_font_cov(g, dx - g->left, dy - g->top);
-        dx -= g->adv;
+        dx -= adv;
     }
     return 0;
 }

@@ -116,9 +116,16 @@ static volatile int sync_hold_fired[2];  /* MASTER already sent for this hold */
  * -> BrowseUiIf::InputKey(UKEY_USB1=3) -> UiKey_Usb1 -> ChangeBrowseDevice(3)
  * -> DEV_SEL R232c messages -> browse list population).  The RX3 engine
  * deliberately IGNORES the browse-encoder push in the Source menu (mode 12),
- * and the Prime GO has no USB1 button, so pushing the browse knob (note 6) or
- * pressing FWD (note 4) while the Source menu is shown is remapped to key
- * 0x0209 so the drive can actually be opened. */
+ * and this rig's panel has no USB1 source button, so pushing the browse knob
+ * (note 6) or pressing FWD (note 4) while the Source menu is shown is remapped
+ * to key 0x0209 so the drive can actually be opened.
+ *
+ * SLOT 1 ONLY, deliberately. The port now feeds rbp's second slot too
+ * (usb-watch.sh), but 0x0209 is the USB1 key -- UiKey_Usb1 @0x11a3cc -- and
+ * there is no MEASURED keycode for opening USB2 (rbp's UiKey_Usb2 @0x11a2c0
+ * exists, but nothing here has watched it move rbp's browse device). Guessing
+ * one is the mistake this port has made before, so a lone slot-2 stick is opened
+ * with rbp's own SOURCE screen and its device selector instead. */
 static int source_menu_with_usb1(void)
 {
      if (*(volatile uint32_t *)0x326f8b8 != 12)   /* browseMode != 12 */

@@ -149,10 +149,8 @@ static void sp_text(const struct menu_view *v, int pen_fx, int line_fy,
     if (!s)
         return;
     for (; *s; s++) {
-        const struct menu_glyph *g = menu_font_glyph((unsigned char)*s);
-
         sp_glyph(v, pen_fx, line_fy, (unsigned char)*s, base, ink, cx0, cx1);
-        pen_fx += g->adv;
+        pen_fx += menu_font_adv((unsigned char)*s, (unsigned char)s[1]);
     }
 }
 

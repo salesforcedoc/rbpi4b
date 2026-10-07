@@ -132,9 +132,11 @@ static int log_has(const char *s)
 /* What rbp would say about the two USB devices. The real one walks rbp's memory
  * (pointsrc.c's pointsrc_usb_state()); here it is a pair the scenario sets, which is
  * the whole point of the box being pure -- the dead row and the live row can be driven
- * without a player, a panel or a USB stick. Default: both live, so a scenario that does
- * not care gets the ordinary box. */
-static struct prompt_state usb_fake = { { 1, 1 } };
+ * without a player, a panel or a USB stick. Default: both live, and NEITHER NAMED -- the
+ * designated initializer is here so the labels, which are what usb-watch.sh would have
+ * written to /tmp/udev_usbN.label, stay empty and the buttons keep their numbers
+ * (prompt_zone.h). A scenario that wants a named button fills label[] itself. */
+static struct prompt_state usb_fake = { .live = { 1, 1 } };
 
 int pointsrc_usb_state(struct prompt_state *S)
 {
@@ -585,10 +587,10 @@ void __wrap_side_paint(const struct menu_view *v, int side, int pressed_hit,
 }
 
 void __wrap_prompt_paint(const struct menu_view *v, const struct prompt_state *S,
-                         int pressed_cell, int selected_cell)
+                         int pressed_cell, int flash_cell)
 {
     prompt_paints++;
-    __real_prompt_paint(v, S, pressed_cell, selected_cell);
+    __real_prompt_paint(v, S, pressed_cell, flash_cell);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1469,8 +1471,20 @@ static void scenario_drawer_routes(void)
  * test in this file can see either way.
  *
  * The liveness is `usb_fake`, the stub above: it is the whole reason the box's
- * picture can be driven on a host with no rbp, and it is what makes the "a dead row
+ * picture can be driven on a host with no rbp, and it is what makes the "a dead button
  * is a different picture" claim testable at all.
+ *
+ * THE GESTURE ITSELF IS NOT TESTED HERE, and since 2026-10-07 that is worth saying out
+ * loud. The box is two buttons held for three seconds (prompt_zone.h), and the whole of
+ * that -- the hold, the flash phase, the threshold, the release that sends nothing -- is
+ * pinned by test_prompt.c against the production prompt_zone.c with a clock the test owns.
+ * What is pinned HERE is the DRAW thread's half: that the picture the module's state asks
+ * for is the picture on the plane, that the repaint gate notices a device appearing or
+ * going away and a button lighting up, and that the box's plane is taken off the glass and
+ * given back at the right moments. Nothing in this file calls prompt_tick() -- the tick
+ * lives in pointsrc.c's read loop, which is the input half and is not linked here -- so no
+ * hold can COMPLETE in this scenario, which is what makes the "let go early" leg below a
+ * real test of the early-release rule rather than of a clock nobody moved.
  * ------------------------------------------------------------------------- */
 
 static int box_pw(void) { return prompt_paint_w(FB_W); }
@@ -1499,7 +1513,7 @@ static int box_page_y0(void) { return (FB_H - box_ph()) / 2; }
  * hold whatever the band or a drawer left there, which is not this surface's business
  * and must not be asserted on. Where "nothing else was written" IS a real claim it is
  * made against the page, by BOX_PAGE_IS below, on a page that is clobbered first. */
-static int box_plane_is(const struct prompt_state *S, int cell, int armed,
+static int box_plane_is(const struct prompt_state *S, int cell, int flash,
                         const char *what, int line)
 {
     static unsigned short want[PLANE_BUF_W * PLANE_BUF_H];
@@ -1518,7 +1532,7 @@ static int box_plane_is(const struct prompt_state *S, int cell, int armed,
     sv.bpp   = FB_BPP;
     sv.dw    = pw;
     sv.dh    = ph;
-    __real_prompt_paint(&sv, S, cell, armed);
+    __real_prompt_paint(&sv, S, cell, flash);
 
     for (y = 0; y < ph; y++) {
         if (memcmp(got + (size_t)y * plane_pitch_px,
@@ -1531,8 +1545,8 @@ static int box_plane_is(const struct prompt_state *S, int cell, int armed,
         return 1;
     failures++;
     printf("FAIL %s:%d: %s: the plane is not the chooser's box"
-           " (%d of %d rows wrong; cell=%d armed=%d usb1=%d usb2=%d)\n",
-           __FILE__, line, what, bad, ph, cell, armed, S->live[0], S->live[1]);
+           " (%d of %d rows wrong; cell=%d flash=%d usb1=%d usb2=%d)\n",
+           __FILE__, line, what, bad, ph, cell, flash, S->live[0], S->live[1]);
     return 0;
 }
 
@@ -1545,7 +1559,7 @@ static int box_plane_is(const struct prompt_state *S, int cell, int armed,
  * its own arithmetic, and an off-by-one would leave a column of sentinel inside the
  * box or a column of box beside it, neither of which a comparison of the box alone
  * could see. */
-static int box_page_is(const struct prompt_state *S, int cell, int armed,
+static int box_page_is(const struct prompt_state *S, int cell, int flash,
                        const char *what, int line)
 {
     static unsigned short want[FB_PITCH * FB_H];
@@ -1567,7 +1581,7 @@ static int box_page_is(const struct prompt_state *S, int cell, int armed,
     sv.bpp   = FB_BPP;
     sv.dw    = pw;
     sv.dh    = ph;
-    __real_prompt_paint(&sv, S, cell, armed);
+    __real_prompt_paint(&sv, S, cell, flash);
 
     memset(want, 0, sizeof want);
     for (y = 0; y < FB_H; y++)
@@ -1609,8 +1623,8 @@ static void box_open(void)
 
 static void scenario_prompt(void)
 {
-    struct prompt_state live2 = { { 1, 1 } };
-    struct prompt_state usb1only = { { 1, 0 } };
+    struct prompt_state live2 = { .live = { 1, 1 } };
+    struct prompt_state usb1only = { .live = { 1, 0 } };
     int x0, y0;
 
     /* The routes above left the left drawer shut and the band's plane back in its
@@ -1659,44 +1673,61 @@ static void scenario_prompt(void)
     CHECK(setup_n[SURF_PROMPT] == 1, "a steady tick re-set-up the box's plane (%d)",
           setup_n[SURF_PROMPT]);
 
-    /* --- 4. the finger, and the dismissal ----------------------------------- */
+    /* --- 4. the finger, the hold let go early, and the way out -------------- */
     /* The highlight is driven through the module's own gesture and not by poking the
      * row: prompt_feed() is what pointsrc.c's funnel calls, so what the plane holds is
-     * what the operator's finger would have made. */
+     * what the operator's finger would have made.
+     *
+     * THE PRESS IS STAMPED, because a press on a live button now starts the three-second
+     * hold and the module has to know WHEN. Nothing in this file calls prompt_tick() --
+     * the tick lives in pointsrc.c's read loop, which is the input half and is not linked
+     * here -- so the hold cannot complete in this scenario, which is exactly what makes
+     * "let go early" testable at all: the release below must send nothing because 1000 ms
+     * is short of the operator's three seconds, and not because this file's clock never
+     * moved. */
     {
         int act = PR_ACT_NONE;
 
-        prompt_feed(&live2, 1, box_cell_x(PR_CELL_USB1), box_cell_y(PR_CELL_USB1), &act);
+        prompt_feed(&live2, 1, box_cell_x(PR_CELL_USB1), box_cell_y(PR_CELL_USB1),
+                    0, &act);
         run_tick();
         CHECK(prompt_paints == 2, "the box did not repaint for a finger on USB 1 (%d)",
               prompt_paints);
-        BOX_PLANE_IS(&live2, PR_CELL_USB1, 0, "the box with USB 1 under the finger");
+        /* THE LIT BUTTON IS THE FINGER'S CELL, and it arrives through the flash and not
+         * through prompt_pressed(): the cell whose hold is running reports 0 as the
+         * finger's own cell precisely so that the blink has somewhere to blink to
+         * (prompt_zone.h). What that means HERE is that the picture is the pressed one,
+         * which is the same pair of pixels either way -- the plane cannot tell them
+         * apart, and neither can the operator, which is the point. */
+        BOX_PLANE_IS(&live2, 0, PR_CELL_USB1, "the box with USB 1 held");
 
-        /* THE RELEASE ARMS, AND THE BOX STAYS UP. This is the one release in the module
-         * that does not dismiss, and it is the whole of what the two-tap gesture rests
-         * on -- so it is pinned here as a change of picture and not as a close. */
-        prompt_feed(&live2, 0, box_cell_x(PR_CELL_USB1), box_cell_y(PR_CELL_USB1), &act);
+        /* LET GO EARLY: nothing is sent, and the box STAYS UP. This is the operator's own
+         * "if they release it before three seconds don't eject it", and it is the one
+         * release in the module that leaves the box standing -- so it is pinned here as a
+         * change of picture back to idle and not as a close. */
+        prompt_feed(&live2, 0, box_cell_x(PR_CELL_USB1), box_cell_y(PR_CELL_USB1),
+                    1000, &act);
         run_tick();
-        CHECK(prompt_is_open(), "arming a device closed the box");
-        CHECK(act == PR_ACT_NONE, "arming a device answered %d", act);
+        CHECK(prompt_is_open(), "letting go early closed the box");
+        CHECK(act == PR_ACT_NONE, "letting go early answered %d", act);
         CHECK(teardown_n[SURF_PROMPT] == 0,
-              "the box's plane was released on an arming (%d)", teardown_n[SURF_PROMPT]);
-        CHECK(prompt_paints == 3, "the arming did not repaint the box (%d)",
+              "the box's plane was released on a hold let go early (%d)",
+              teardown_n[SURF_PROMPT]);
+        CHECK(prompt_paints == 3, "letting go early did not repaint the box (%d)",
               prompt_paints);
-        BOX_PLANE_IS(&live2, 0, PR_CELL_USB1, "the box with USB 1 armed");
+        BOX_PLANE_IS(&live2, 0, 0, "the box after a hold let go early");
 
-        /* ...and OK, the second tap, which is the one that sends. */
-        prompt_feed(&live2, 1, box_cell_x(PR_CELL_OK), box_cell_y(PR_CELL_OK), &act);
+        /* ...and the way out, which is now a tap anywhere that is not a button: the press
+         * begins off every cell, so its release dismisses and answers nothing. There is no
+         * CANCEL and no OK any more (prompt_zone.h). */
+        prompt_feed(&live2, 1, 10, 10, 0, &act);
+        prompt_feed(&live2, 0, 10, 10, 1000, &act);
         run_tick();
-        CHECK(prompt_paints == 4, "the box did not repaint for a finger on OK (%d)",
-              prompt_paints);
-        prompt_feed(&live2, 0, box_cell_x(PR_CELL_OK), box_cell_y(PR_CELL_OK), &act);
-        run_tick();
-        CHECK(act == PR_ACT_USB1, "OK answered %d, not USB 1", act);
-        CHECK(!prompt_is_open(), "the release did not put the box away");
+        CHECK(act == PR_ACT_NONE, "a tap outside answered %d", act);
+        CHECK(!prompt_is_open(), "a tap outside did not put the box away");
         CHECK(teardown_n[SURF_PROMPT] == 1, "the box's plane was not released (%d)",
               teardown_n[SURF_PROMPT]);
-        CHECK(prompt_paints == 4, "the close repainted the box (%d)", prompt_paints);
+        CHECK(prompt_paints == 3, "the close repainted the box (%d)", prompt_paints);
     }
 
     /* --- 5. rbp's answer is part of the picture, so it is part of the gate --- */
@@ -1705,7 +1736,7 @@ static void scenario_prompt(void)
     run_tick();
     CHECK(setup_n[SURF_PROMPT] == 2, "the second open did not get a plane (%d)",
           setup_n[SURF_PROMPT]);
-    CHECK(prompt_paints == 5, "the box did not build with USB 2 absent (%d)",
+    CHECK(prompt_paints == 4, "the box did not build with USB 2 absent (%d)",
           prompt_paints);
     BOX_PLANE_IS(&usb1only, 0, 0, "the box with USB 2 absent");
     /* ...and the dim row really is a different picture, which is the only reason the
@@ -1726,7 +1757,7 @@ static void scenario_prompt(void)
     /* A device GOING AWAY is the same kind of change in the other direction. */
     usb_fake = live2;
     run_tick();
-    CHECK(prompt_paints == 6, "USB 2 coming back did not rebuild the box (%d)",
+    CHECK(prompt_paints == 5, "USB 2 coming back did not rebuild the box (%d)",
           prompt_paints);
     BOX_PLANE_IS(&live2, 0, 0, "the box with USB 2 back");
     prompt_close();
@@ -1749,7 +1780,7 @@ static void scenario_prompt(void)
     run_tick();
     CHECK(setup_n[SURF_PROMPT] == 3, "the narrow box plane was set up %d times",
           setup_n[SURF_PROMPT]);
-    CHECK(prompt_paints == 7, "the box did not repaint for the narrow plane (%d)",
+    CHECK(prompt_paints == 6, "the box did not repaint for the narrow plane (%d)",
           prompt_paints);
     BOX_PLANE_IS(&live2, 0, 0, "the box down the pitch-matching memcpy path");
     prompt_close();

@@ -112,7 +112,16 @@ enum {
      * prompt_paint.c is the only caller -- a row whose device rbp reports absent
      * (prompt_zone.h) -- and menu_paint.c's own classifier can never return one. */
     MENU_BTN_OFF,       /* a button that cannot be pressed */
-    MENU_LABEL_OFF      /* ...and its label */
+    MENU_LABEL_OFF,     /* ...and its label */
+    /* THE TWO COLOURS THE BEAT FX PICKER BORROWS FROM RBP HIMSELF. The picker is rbp's
+     * own BEAT FX plate mirrored to the left of the decks (fx_zone.h), and the operator
+     * asked for it to "look visually similar (size, color, font)" -- so these are two
+     * pixels SAMPLED OFF THE LIVE PANEL on 2026-10-06 rather than chosen, and they live
+     * here for the reason the OFF pair does: the palette is in one place or it is not a
+     * palette. Its black cell and its white ink need no class of their own -- MENU_FILL
+     * is (0,0,0) exactly, and MENU_LABEL is a hair off white. */
+    MENU_FX_PLATE,      /* rbp's BEAT FX plate (32,32,32): the picker's bed */
+    MENU_FX_SEL         /* the colour rbp fills a SELECTED box with (0,125,222) */
 };
 
 /* Everything the painter needs to know about the framebuffer, measured by the

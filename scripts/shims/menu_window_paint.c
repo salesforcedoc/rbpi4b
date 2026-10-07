@@ -208,10 +208,8 @@ static void wp_text(const struct menu_view *v, int pen_x, int line_top,
     if (!s)
         return;
     for (; *s; s++) {
-        const struct menu_glyph *g = menu_font_glyph((unsigned char)*s);
-
         wp_glyph(v, pen_x, line_top, (unsigned char)*s, base, ink, cx0, cx1);
-        pen_x += g->adv;
+        pen_x += menu_font_adv((unsigned char)*s, (unsigned char)s[1]);
     }
 }
 

@@ -457,6 +457,143 @@ static const signed char bfx_type_to_pos[15] = {
      -1, 5, 9, 10, 6, 1, 0, 3, 12, 7, 8, 13, 11, 2, 4
 };
 
+/* ---- the Beat FX's own VALUES, for the momentary X/Y pad (fxpad_zone.c) ---
+ * Everything above is about reaching rbp's effect SELECTOR; this block is the
+ * effect itself -- which is what the BPM detail cell's momentary pad has to read
+ * before it moves anything, and put back after the finger leaves.
+ *
+ * Disassembled off extracted/XDJRX3/pdj/rbp on 2026-10-07 and then READ LIVE
+ * through /proc/16934/mem, with two of the numbers checked against the screen's
+ * own text (which is the check that makes the rest of the chase trustworthy):
+ *
+ *   DjEngineIF::getBeatEffectLevelDepth @0x89904 -> ME_SINGLETON
+ *     -> MixerEngine   (a plain .bss word: ME_SINGLETON above)
+ *       +0x58 -> BeatEffectManager
+ *         +0x00  int   select channel       read 5       (screen: MASTER)
+ *         +0x08  ptr   the CURRENT BeatEffect*
+ *           +0x20  float level / depth      read 0.409, later 0.5044
+ *           +0x24  long  time, msec         read 480     (screen: "480 msec")
+ *           +0x28  long  time max           4000
+ *           +0x2c  long  time min           1
+ *           +0x3c  byte  effect ON/OFF      read 0, later 1  (isBeatEffectOn)
+ *           +0x44  long  beat button rung   read 5       (screen: "1 BEAT")
+ *           +0x48  long  beat button max    9
+ *           +0x4c  long  beat button min    0
+ *
+ * Every accessor behind those is a two-instruction load -- `ldr r0,[pc]` then
+ * `ldr r0,[r0]` -- so this is a plain pointer chase with NO call into rbp, the
+ * same shape and the same risk as pointsrc.c's fx_ch_read(). The two interior
+ * pointers must be NULL-checked by the walker: a half-built or torn-down engine
+ * answers a null, not a fault. A NULL read is also the ONLY honest answer when
+ * any link is missing -- a guessed state would make the pad restore to a
+ * position rbp never had. (Every field above is live and the unit is mid-set:
+ * the two readings above differ, which is exactly why nothing here is a
+ * constant.)
+ *
+ * WHAT THE WIRE DOES TO THEM -- measured on the unit 2026-10-07 through the
+ * shim's own sequencer port (seqinject2), which runs map_flx4.c's real handlers,
+ * so the last hop is byte-identical to what the pad sends. Read back out of
+ * /proc/<rbp>/mem after each send:
+ *
+ *   K_DEPTH 0x448f OP_VALUE, v, v/1023.0f    cc 100 -> +0x20 = 0.7879 (=806/1023)
+ *                                            cc  20 -> +0x20 = 0.1574 (=161/1023)
+ *     -> ABSOLUTE and exact. One send lands the level; one send restores it.
+ *        The 7-bit CC is scaled to 10 bits first, so the round trip through the
+ *        FLX4's knob is 7-bit and the pad's own is 10-bit -- the pad is FINER.
+ *
+ *   K_BEATNEXT 0x4491 OP_PRESS, +1           rung 5 -> 6 -> 7
+ *   K_BEATPREV 0x4490 OP_PRESS, -1           rung 7 -> 6
+ *     -> the direction is MEASURED, not inferred from the arrow's name, and the
+ *        rung moves exactly one per press. OP_PRESS is required: asEventCode
+ *        gates both keys on (op & 0xf) == 0.
+ *
+ *   K_BFX 0x448d PRESS then RELEASE         toggles +0x3c
+ *     -> NOT re-measured here: it is the audible one and it is already proven
+ *        by the operator's own hand. +0x3c read 1 throughout the run above, so
+ *        on this unit the effect was ENGAGED while those levels moved.
+ *
+ * rbp REPAINTS THE CELL ITSELF while all of this happens: at 125.0 BPM the same
+ * cell went "480 msec / 1 BEAT" -> "960 / 2 BEAT" -> "1920 / 4 BEAT", tracking
+ * +0x24 and +0x44 exactly. So +0x24 is rbp's OWN recomputation and not a second
+ * copy of the rung: the panel is a live readout of this struct, which is why the
+ * pad's HUD (fxpad_paint) must copy rbp's pixels and annotate them rather than
+ * cover them.
+ *
+ * THE BEAT LADDER IS NOT UNIFORMLY SPACED (the rungs halve and double), so
+ * +0x44 is a POSITION and not a value: 5 reads "1 BEAT", 6 "2 BEAT", 7 "4 BEAT",
+ * and a caller that wants four beats has to climb there one K_BEATNEXT/
+ * K_BEATPREV at a time on rbp's own answer. The full-scale of the level is the
+ * same 0..1023 the FLX4's own DEPTH knob is scaled to -- see map_flx4.c's
+ * cc_to_10bit and K_DEPTH's wire form (a float of that number over 1023).
+ *
+ * ---- AND ONE FIELD THAT CANNOT BE READ ALONE: +0x3c LIES ON A SWITCHED-OFF
+ * EFFECT. +0x50 is rbp's own effect type -- `MixerEngine::getBeatEffectType`
+ * @0x57284 tail-calls `BeatEffectManager::getBeatEffectType` @0x89acc, which is
+ * `ldr r0,[r0,#80]`, i.e. 0x50; `setBeatEffectType` @0x89ac4 is `str r1,[r0,#80]`
+ * and writes NOTHING ELSE -- and TYPE 0 IS THE OFF STATE (it is the one entry of
+ * the 14-position SW_BFX_TYPE table that maps to no position). `+0x08` is then the
+ * manager's `BeatEffectOff`, held in its own slot at +0x0c (its siblings, the 14
+ * real types, sit at +0x14..+0x48 and `switchNextBeatEffect` @0x8a07c picks between
+ * them off a 15-entry jump table). That class is almost entirely compiled out:
+ *
+ *     BeatEffectOff::changeEffectStatusToOn  @0x8b0b8   bx lr
+ *     BeatEffectOff::changeEffectStatusToOff @0x8b0b4   bx lr
+ *     BeatEffectOff::changeLevelDepthValue   @0x8b0ac   bx lr
+ *     BeatEffectOff::changeTimeValue         @0x8b0b0   bx lr
+ *
+ * -- so nothing maintains ITS +0x3c, and on a switched-off effect it reads 1, which
+ * is also why rbp's own `setBeatEffectOnOff` @0x89940 (`ldrb r3,[r0,#60]; cmp r3,r1;
+ * popeq`) sees "already on" and returns without doing anything.
+ * Measured on the unit 2026-10-07 with a read-only /proc/<rbp>/mem walk:
+ *
+ *     type(+0x50)  +0x3c   object vt[9] (+0x24)        the object IS
+ *        0           0     0x00097b50                  BeatEffectPingPong -- and OFF
+ *        0           1     0x0008b0b8  bx lr          BeatEffectOff
+ *        4           1     0x000b79d8                  a real effect, on
+ *       10           1     0x0009368c                  a real effect, on
+ *        2           1     0x000913c8                  a real effect, on
+ *
+ * -- and the two type-0 rows SAY DIFFERENT THINGS, which is the whole trap and the
+ * reason "type 0 <=> BeatEffectOff" would be a false claim. The first row is a
+ * freshly started rbp that has never had its Beat FX touched: type is 0 because the
+ * word is still zero, +0x08 is whatever the constructor left there (a real
+ * PingPong), and its own class maintains the flag, so it reads 0 and is right. The
+ * `bx lr` rows appear as soon as the manager is driven -- MEASURED: moving the
+ * effect selector ONE POSITION while the effect is off left +0x50 at 0 AND swapped
+ * +0x08 to the BeatEffectOff, flipping +0x3c from 0 to 1 on an effect that was not
+ * running. (That is the operator's own repro: see the row below it, and
+ * fxpad_zone.c's `test_flag_lies_on_a_switched_off_effect`.)
+ *
+ * So the rule is a CONJUNCTION and not an equivalence: **+0x3c is only meaningful
+ * when +0x50 is non-zero, and +0x50 == 0 is the honest "the effect is off" whether
+ * the object beside it is the Off class or a stale one.** Pressing rbp's own ON/OFF
+ * button re-points +0x08 at the selected type's real object, where +0x3c IS
+ * maintained -- which is why "turn it on/off" is the operator's workaround, and why
+ * the pad, reading the Off object's +0x3c by itself, believed a dead effect was live
+ * and sent no toggle at all. */
+#define BEM_IN_MIXER        0x58   /* MixerEngine*        -> BeatEffectManager* */
+#define BEM_OFF_SELECT_CH   0x00   /* BeatEffectManager*  -> the select channel  */
+#define BEM_OFF_EFFECT      0x08   /* BeatEffectManager*  -> the current BeatEffect* */
+#define BEM_OFF_TYPE        0x50   /* BeatEffectManager*  -> the active effect type */
+#define BE_OFF_DEPTH        0x20   /* BeatEffect* -> float level / depth (0..1)  */
+#define BE_OFF_TIME         0x24   /* BeatEffect* -> long  time, msec            */
+#define BE_OFF_ON           0x3c   /* BeatEffect* -> byte  effect ON/OFF         */
+#define BE_OFF_BEAT         0x44   /* BeatEffect* -> long  beat button (rung)    */
+#define BE_OFF_BEAT_MAX     0x48
+#define BE_OFF_BEAT_MIN     0x4c
+
+/* djengine::EnBeatEffectType's first member, and the one the SW_BFX_TYPE switch
+ * cannot reach (the 14 positions map onto types 1..14 -- see the table above).
+ * It is the Off STATE: rbp keeps a `BeatEffectOff` in the manager's +0x0c slot for
+ * it, and BEM_OFF_TYPE reading it is the only honest "off" there is. Which object
+ * +0x08 happens to be holding is beside the point -- see the conjunction above. */
+#define BFX_TYPE_OFF        0
+
+/* The level's full scale, which is rbp's 10-bit convention and not ours: K_DEPTH
+ * carries `v` as an int and `v / 1023.0f` as its float, exactly as the FLX4's
+ * DEPTH knob does. fxpad_zone.h names the same number for the pad's own axis. */
+#define BFX_DEPTH_FULL      1023
+
 /* ---- Beat-loop knob -------------------------------------------------------
  * The RX3 has no beat-loop knob: it triggers loops from its pads in the AUTO
  * pad mode.  rbp does have the machinery though:

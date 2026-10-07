@@ -866,7 +866,32 @@ Three of these need their reason stated rather than just their value:
 `flx4_startup()` also deliberately does **not** force the Beat FX target to
 MASTER, which `map_jp21.c` does, because there the assign knob is a position
 encoder with no state of its own. Here the lever has state, and forcing it would
-fight the operator. `TODO: unverified` — what rbp's default target is.
+fight the operator. The default target question above is now **measured: deck 1**
+(two cold starts, 2026-09-30).
+
+#### The same two keycodes, raised by a finger
+
+**Since 2026-10-06 the unit's own BEAT FX panel supplies both controls to touch**,
+so neither needs the controller to be plugged in — see
+[07-touch.md](07-touch.md#the-beat-fx-panels-two-controls-fx_zonec-fx_paintc). The
+shim's ladder sends **exactly the two calls in the table above**, from a tap on
+rbp's own drawing rather than from a note:
+
+| on the glass | the call |
+|---|---|
+| the CH SELECT value box | `send_rx_key(0x448c K_BFXCH, OP_VALUE, CH_GLOBAL, want)` — `want` cycles 0 → 1 → **5**, read from rbp's own `BeatEffectManager+0x00` first so the tap and the lever can never disagree |
+| a row of the fourteen-row picker | `send_rx_key(0x448b K_BFXTYPE, OP_VALUE, CH_GLOBAL, pos)`, `pos` 0..13 — the row's **switch position**, the same value FX SELECT's forward step lands on |
+
+So the two paths share one wire form and one meaning, and they cannot drift: a
+change to what `map_flx4.c` sends for either control is a change to what the panel
+sends. `POINT_FX_TOUCH=0` gives the panel back to rbp and leaves the controller as
+the only source.
+
+**One thing the panel does that `map_flx4.c` cannot**: it reads rbp's current target
+before stepping it (the pointer chase in 07-touch.md), where the map's own cursor
+lives in the shim. The map's seeding is still its own business — this changes
+nothing about it — but the panel deliberately does not repeat it, because a second
+cursor would be a second opinion.
 
 ### What `flx4_startup()` does tell rbp
 

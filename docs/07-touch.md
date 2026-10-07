@@ -475,12 +475,18 @@ rehearsal.
 (2026-10-05). One tap on the far right of the band used to unmount the operator's stick
 outright, and the stick is production media whose FAT already carries pre-existing damage
 ([10](10-usb.md)). The fix is not to make the button safer — it is to make it ask first.
-The seventh column now raises a **box**: title `USB STOP`, then a 2×2 grid —
-`USB 1 | USB 2` on the top line, `OK | CANCEL` on the bottom — and the eject is a
-second, aimed tap: a tap on a device **arms** it, then a tap on `OK` sends the eject
-for the armed device. The second layout is the operator's, verbatim: *"usb stop should
-be have usb 1 button next to usb 2 button on one line with ok cancel at the bottom"*
-(2026-10-06).
+The seventh column now raises a **box**: title `USB STOP`, then **one line of two
+buttons**, `HOLD USB 1 | HOLD USB 2` — or, since 2026-10-07, `HOLD <the stick's own volume
+label>` on each, which is the same string rbp's SOURCE row shows in its DEVICE NAME column
+([10](10-usb.md)). The gesture the first layout carried — two taps,
+the first arming a device and `OK` sending it — was replaced the next day by the
+operator's own ask, quoted in full in `prompt_zone.h`: *"for the USB stop pop up just have
+two buttons USB1 (hold) or USB2 (hold), lit if it is active and when you press down have
+the button flash and if still held after 3 seconds have it ejected. if they release it
+before three seconds don't eject it."* So `OK` and `CANCEL` are gone, `PR_ACT_CANCEL` with
+them, and what reaches an eject is a **three-second hold** on a lit button. The box is one
+gesture rather than two steps, and what makes it safe is that nobody holds a button for
+three seconds by accident.
 
 **The rows are rbp's own two devices, not a list the shim made up.** rbp holds
 `ui::UsbStorageManager` — **one instance per channel** — and its `onKey` @`0x3259f4`
@@ -493,43 +499,65 @@ walk: it reads `[mgr+0x84]` for the channel and `[mgr+0x88] == 2` for "media pre
 ready", and it returns both devices **absent** when rbp cannot be read at all — a
 refusal, not an assumption of absence.
 
-**A dead row is drawn dead, and says nothing.** On this port `usb-watch.sh` feeds only
-`/media/usb1/sda1`, so USB 2 never has media and rbp always answers
-`usb 2 absent` (measured: `pointsrc: menu 'USB STOP' -> the USB STOP chooser
-(usb 1 ready, usb 2 absent)`). That row is painted in `MENU_BTN_OFF`/`MENU_LABEL_OFF` and
-answers `PR_ACT_NONE`: the tap **closes the box and sends nothing**. That is deliberate —
-a refusal the operator can see, rather than a button that silently does nothing. The
-liveness is re-read on **every report**, not cached when the box opened, because a stop
-the operator starts somewhere else is exactly the change the box should show. Host
-coverage for that is `test_menu_dev.c`'s liveness leg: it flips the fake state, proves
-with a `memcmp` that the rebuilt picture actually differs, and flips it back.
+**A dead button is drawn dead, and says nothing.** A button whose device rbp reports absent
+is painted in `MENU_BTN_OFF`/`MENU_LABEL_OFF`, **cannot start a hold**, and — unlike
+the old dead row — does **not** close the box either: the operator who pressed the dim one
+probably wanted the other, and the box staying up is what lets them have it. The refusal is
+deliberate, and it is a refusal the operator can see rather than a button that silently does
+nothing. Since 2026-10-07 both buttons are live whenever both slots are filled:
+`usb-watch.sh` feeds `/media/usb1/sda1` **and** `/media/usb2/sda1`, so rbp answers for both
+and the log reads `pointsrc: menu 'USB STOP' -> the USB STOP chooser (usb 1 ready 'HOLD
+PHASIM_USB2', usb 2 ready 'HOLD RBOX USB')` — the labels in it are the ones the buttons
+will read, word for word, so a drill's log says which stick each button offered without a
+screenshot of the glass. Before that it fed one path only and USB 2 answered `usb 2 absent`
+(measured 2026-10-05) — which is what the button still does when that slot is empty, because the
+liveness is rbp's answer and not a guess. The liveness is re-read on **every report** and
+again at the fire, so a device that goes away under a running hold takes the hold with it;
+host coverage for that is `test_menu_dev.c`'s liveness leg (it flips the fake state, proves
+with a `memcmp` that the rebuilt picture actually differs, and flips it back) and
+`test_prompt.c`'s vanished-device leg.
 
-**THE GESTURE IS TWO TAPS, AND THE FIRST ONE ARMS RATHER THAN EJECTS.** A tap on a
-live device cell sets the arming and the box **stays up**; `OK` then sends the eject for
-that device and closes. `CANCEL` closes and sends nothing, and it is live from the
-moment the box opens — which is the whole reason for the second line: the answer is a
-separate, deliberate act from the choice, so a mis-tap on the band's far right can no
-longer reach an eject in one more tap. **Nothing is armed when the box opens**, and `OK`
-is drawn dead until a live device has been armed (`PR_CELL_OK`'s liveness is
-`armed && prompt_cell_live(armed)`), so `OK` tapped under a fresh box is the same
-refusal a dead device is: the box closes and sends nothing. Re-arming replaces the
-first choice, and the arming is cleared with the box — by `CANCEL`, by a timeout, by
-any close — so no arming survives into a box the operator did not make. The armed cell
-wears the pressed pair (`MENU_BTN_PRESSED`/`MENU_LABEL_PRESSED`) while the finger is
-**gone**, which is the one place this shim uses that ink for a state rather than an
-edge; the operator's eye on it is what says whether the arming reads as "selected".
-Measured: `pointsrc: usb stop chooser -> usb 1 armed (ok stops it)`.
+**THE GESTURE IS ONE THREE-SECOND HOLD, AND THE THREE SECONDS ARE THE CLOCK'S AND NOT THE
+CALLER'S.** A press on a **live** button stamps the instant and starts the hold; the button
+**flashes** — the pressed pair for `PR_HOLD_FLASH_MS` (250 ms, rbp's own house half-period,
+so six full blinks fit inside one hold) and its normal live face for the next — so the
+operator can see the three seconds running. At `PR_HOLD_MS` (3000) the eject goes out on
+**the device's own channel** and the box **stays up**. A release before that sends nothing
+at all and leaves the box standing, which is the operator's *"if they release it before
+three seconds don't eject it"*. Leaving the button cancels the hold and it does **not**
+resume on a return: a hold is one continuous press or it is nothing, because a hold that
+could be left and rejoined is one step from an eject the operator did not watch themselves
+make. The module has no clock of its own ([32-bit long wrap](13-raspberrypi4.md)), so
+`prompt_tick()` is handed `now_ms` on every slice of `pointsrc.c`'s read-loop wait and is
+the only thing that advances the flash or fires the hold — a hold by definition produces no
+further pointer reports, so nothing else would wake the loop. The three seconds are also
+pinned on the **release** path, so a release arriving at 3001 ms with no tick in between
+still ejects.
+
+**The box stays up under the finger that made the hold**, and the reason is the one rule
+this shim keeps everywhere: a press the box swallowed has been withheld from rbp for its
+whole life, and rbp is going to be given its release
+([declined press](15-flx4-midi.md)). So the fire **disowns** the press — anchor, highlight
+and hold all cleared, box still up — and the release then arrives with nothing anchored to
+it and takes the ordinary "began off every button" path, which closes the box and sends
+nothing.
 
 **The rest is rbp's rule, not a new one.** While the box is up it owns every report
-unconditionally — it is asked **first** in `pointsrc.c`'s ladder, before the waveform
-swipe and before the menu — so a finger that dismisses the box cannot also press whatever
-the performance screen has underneath it. A tap on a cell takes it; a tap anywhere else is
-swallowed and closes it; a stray release with no press behind it is taken but does not
-close. It **times out on its own after `PR_TIMEOUT_MS` (10 s)**, and refuses to expire
-while a finger is still down, so it can never hand rbp a release with no press behind it.
-Measured: `pointsrc: usb stop chooser timed out after 10000 ms`.
+unconditionally — it is asked **first** in `pointsrc.c`'s ladder, before the waveform swipe
+and before the menu — so a finger that dismisses the box cannot also press whatever the
+performance screen has underneath it. A stray release with no press behind it is taken but
+does not close. The way out without stopping anything is a **tap anywhere that is not a
+button** — the title, the rule, the margin, the gap between the two buttons, the glass
+outside the box entirely — which is the "tap outside to dismiss" rule the box already had
+for a press that missed, so it needed no new mechanism when `CANCEL` went away. Behind it,
+the box still **times out on its own after `PR_TIMEOUT_MS` (10 s)**, and it refuses to
+expire while a finger is down, so it can never hand rbp a release with no press behind it.
+A hold that completes beats the timeout: three seconds of a finger is a decision, and
+starting it late in the box's ten does not unmake it. Measured:
+`pointsrc: usb stop chooser timed out after 10000 ms` and
+`pointsrc: usb stop chooser -> usb 1 held 3020 ms (hold is 3000 ms) -> eject (channel 1)`.
 
-**Where it is drawn.** The box is 560×199 logical px, centred, on its **own DRM overlay
+**Where it is drawn.** The box is 560×127 logical px, centred, on its **own DRM overlay
 plane** — the fourth `drm_band_setup()` on this rig, which is legal because `drmband.c`
 holds the fd and DRM master once and refcounts them. It is built off-lock into a scratch
 image and published by swapping two pointers, the same publish-a-finished-image rule the
@@ -540,47 +568,100 @@ and keeps working.
 
 **The box was restyled to match the bar the same day the bar was (2026-10-06)** — *"model
 it this way for the USB stop menu as well"*. Its outer `PR_BORDER`-thick frame is gone,
-so the box is the black `MENU_FILL` bed with a title, a rule and its cells; each cell
+so the box is the black `MENU_FILL` bed with a title, a rule and its buttons; each button
 already wore its own one-pixel outline in its own ink colour (`pp_cell()`), which is what
 remains. `PR_BORDER` itself did not move: it was always doing two jobs, and the one that
-stays is the margin that keeps the title and the cells off the box's edge.
+stays is the margin that keeps the title and the buttons off the box's edge.
 
-**The grid moved every number in this section, and the derivation is what survived.**
-The three full-width rows became two rows of two, so `PR_H` went 271 → **199**
-(`2*PR_BORDER + PR_TITLE_H + 1 + 2*PR_PAD + 2*PR_ROW_H + PR_ROW_GAP`, exactly),
-`PR_RULE_Y` 307 → 343, and a cell is **265 px** wide — `PR_COL_GAP` (8) comes out of the
-inner span, so the two columns are `PR_CELL_X0(1)..PR_CELL_X1(1)` = logical 371..635 and
-644..908, and the gap between them is a **hit test miss** like the gaps between the two
-rows. The cell's own geometry is derived in `prompt_zone.h` — `PR_CELL_ROW`/`PR_CELL_COL`
-out of the row-major cell number — so the four cells (1 `USB 1`, 2 `USB 2`, 3 `OK`,
-4 `CANCEL`) tile the same two rows rather than each carrying its own rectangle.
-`work/poke.py` re-derives all of it and is the check that the drill is aiming at the same
-pixels the module draws: box logical x 360..919 / y 300..498, rule 343, cell width 265,
-rows at 352 and 424 — which is what a row census of the rendered picture reads back.
+**The second line went with the gesture, and every number in this section moved with it.**
+The 2×2 grid (`USB 1 | USB 2` over `OK | CANCEL`) became one row of two, so `PR_H` went
+199 → **127**, exactly `2*PR_BORDER + PR_TITLE_H + 1 + 2*PR_PAD + PR_ROW_H` — the row is the
+box's only line, and `PR_ROW_GAP` survives with nothing able to reach it because it is
+`PR_ROW_TOP()`'s stride and a third device would need it. The box is logical x 360..919 /
+y 336..462, the rule is `PR_RULE_Y` **379**, and the row sits at `PR_ROW_TOP(0)` = **388**,
+64 px tall. A button is still **265 px** wide: `PR_COL_GAP` (8) comes out of the inner span,
+so the two are 371..635 and 644..908 and the gap between them is a **hit test miss**, like
+the title and the margin. The cell's own geometry is derived in `prompt_zone.h` —
+`PR_CELL_ROW`/`PR_CELL_COL` out of the row-major cell number — so the two buttons tile the
+block rather than each carrying its own rectangle, and the leftover pixel a 538-wide block
+would leave over is dropped rather than handed to one column (the test asserts the leftover
+is 0, which is what makes the two interchangeable). `work/poke.py` re-derives all of it and
+is the check that the drill is aiming at the same pixels the module draws.
 
-**One width refusal came with it.** The cells are half as wide as the rows were
-(265 px against 538), so a page scaled far enough down could clip a label inside its own
-frame. `prompt_paint_ok()` now refuses a view whose narrowest cell cannot hold its own
-label whole (`pp_labels_fit()`, alongside the existing line-height refusal), and
-`test_prompt.c` pins both refusals independently — a view at 560×81 is accepted and the
-same view at 40 px wide is refused, which is what proves the two are separate gates and
-not one.
+**The labels say `HOLD USB 1`, not `USB 1 (HOLD)`,** and that is the font's doing: the 19 px
+Decker atlas has no parentheses, and re-baking the settled face for two punctuation glyphs
+would change every label in the shim ([the band](13-raspberrypi4.md)). The gesture has to be
+on the button — the operator has to know a hold is wanted before they make one — and at
+**99 px** of advance ("HOLD USB 1"; ink 94 px, and "HOLD USB 2" is 97) it has 164 px of the
+265 px button to spare. `test_prompt.c` walks every character of both against the atlas,
+because a character the font lacks ships as a **gap** rather than as a failure.
+
+**And a button names its own stick when the host gave us one.** `pointsrc_usb_state()`
+fills `S->label[i]` from `/tmp/udev_usbN.label` — the file `usb-watch.sh` writes with
+`blkid`'s answer, the same one the SOURCE row uses ([10](10-usb.md)) — and
+`prompt_zone.c` composes `"HOLD " + <label>` over it. An absent, empty or
+whitespace-only file leaves the cell empty and the shipped `HOLD USB n` stands, so a unit
+whose watcher writes no labels is unaffected. **The refusal and the clip are two
+different questions and are asked of two different strings:** `pp_labels_fit()` measures
+the cell's **default** label, because a name is the operator's to choose and a
+state-dependent refusal would take the whole box off the glass the moment someone
+formatted a stick with a long name; the name itself is cut to the cell at paint time
+(`prompt_text_clip()`, budget = the cell's inner width less `PR_LABEL_MARGIN` a side).
+Both use that one constant, which is 2 and not the frame's 1 because the thinned Decker
+bake inks up to a pixel past its own advances. `test_prompt.c` pins the composition, the
+per-device isolation, the `?` remap and the `PR_LABEL_MAX` cap, and then paints a
+maximum-length name and proves **no pixel of it lands on the button's frame** — the frame
+is drawn before the label, so an over-generous budget would ship as a name painted over
+its own border and nothing else here would call that a failure.
+
+**Two width refusals came with the grid, and the second one is why the labels' length
+matters.** A button is half the row wide, so a page scaled far enough down can reach a
+scale where the font's line box still fits but a label no longer does.
+`prompt_paint_ok()` refuses both (`pp_labels_fit()` beside the line-height refusal), and
+`test_prompt.c` pins them independently — a view at 560×81 is accepted and the same view at
+40 px wide is refused, which is what proves they are two gates and not one. The longer
+labels raised the per-button floor from `2 + 69` = 71 px to `2 * PR_LABEL_MARGIN + 99` =
+**103 px**, so a page narrow enough that a button falls under 103 px now draws **no box at
+all** where the old `CANCEL`-sized one still drew.
 
 **The picture, captured from the publisher's own plane buffer.** `work/boxshot2.py` reads
 the plane by framebuffer id from **outside** rbp — the obvious route, `/proc/pid/mem` at
 the address the shim logs, does **not** work and the failure is worth knowing: vc4's dumb
 buffers are `PFNMAP`-style mappings and `get_user_pages()` refuses them, so the read gives
-`EIO` at a perfectly live address, for the band's plane as much as the box's. The capture
-is 560×199 of RGB565 and shows the title, `USB 1` bright, `USB 2` visibly dimmed and
-`CANCEL` bright — which is the one thing the host tests cannot say, because they compare
-against a reference they draw themselves. The **arming** is the second picture and the
-more interesting one: `work/poke.py <dev> usbstop chooser:usb1` arms and leaves the box
-up, and the capture then reads `USB 1` in the pressed pair with `OK` now **bright** —
-which is the visible form of the rule that `OK` is dead until a device is armed. Both
-states are also rendered off the production painters by the scratch `render.c` and read
-back by row census, because the latch lives in `prompt_zone.c` and the armed picture
-therefore has to be reached *through the gesture*; passing an arming in as an argument
-draws a box whose `OK` is still dead, which is exactly the bug the census would hide.
+`EIO` at a perfectly live address, for the band's plane as much as the box's. **Measured
+on the unit 2026-10-07, on the hold build** (`fbshim.so` md5 `656fcc2f…`, which is the
+build *before* the buttons learned the sticks' names — it reads the shipped `HOLD USB n`):
+the box took
+`plane 138 fb 725 560x127 16 bpp pitch 560 px`, and the captured frame is a black bed
+with `USB STOP` at the top, the rule under it, and **both** buttons carrying their own
+one-pixel outline with `HOLD USB 1` and `HOLD USB 2` legible inside them — because both
+slots were filled, which is the same log's `usb 1 ready, usb 2 ready`. A button whose
+device rbp does not report draws in the dim pair instead, and that is the face the
+2026-10-05 capture showed when only slot 1 was fed. The **held** state is the second
+picture and the more interesting one: `work/poke.py <dev> usbstop chooser:usb1` holds USB 1
+and leaves the box up, and the capture then reads `HOLD USB 1` in the pressed pair —
+which is the visible form of the flash. **That hold has deliberately not been run on the
+unit**: `poke.py` refuses a dwell of `PR_HOLD_MS` or more, and anything shorter is still a
+press on a live eject control, so the flash and the dim face are pinned at the desk
+(`test_prompt.c`, `test_menu_dev.c`) and it is the operator's own press that will show
+them on the glass.
+
+**The name build is deployed but not yet captured.** `fbshim.so` md5 `06eadca1…` went to
+`/opt/rblive4/fbshim.so` and the chroot's `/usr/lib/fbshim.so` on 2026-10-07, with the
+`656fcc2f…` build kept beside each as `.prev`, and `rblive4.service` restarted onto it
+(rbp back up, both `ld-linux.so.3` processes, and the shim's own log reporting
+`device name … <- 'PHASIM_USB2'` and `<- 'RBOX USB'` into rbp's records). What is verified
+is that the box **composes and fits** the unit's real labels, read back through the
+production `prompt_zone.c`/`prompt_paint.c` at the unit's own
+`/proc/<rbp>/root/tmp/udev_usbN.label` bytes; what is **not** yet verified is the picture,
+because the box has to be raised to have one and raising it is a gesture on the glass.
+
+**And a picture is only ever reached through the gesture.** Both the held picture and the
+dim one are produced in `test_menu_dev.c` and `test_prompt.c` by feeding `prompt_feed()`
+the reports the operator's finger would have made, never by passing a highlight in as an
+argument: the highlight is `prompt_zone.c`'s, and a test that drew its own would be
+asserting against itself. The same is true of the flash — it belongs to a running hold, so
+the only way to a lit button in a test is to start one.
 
 **`POINT_USBSTOP_PROMPT=0` puts the immediate eject back** for bench work, and it is a
 keycode test rather than a column test (mirroring `menu_key_needs_repeat()`): whatever
@@ -819,8 +900,8 @@ two points agree with. Host suite green at the same binary: `test_menu` 6,572 ch
 **That run's warning is historical, and it is kept because it is why the chooser exists.**
 The build it was taken on (`78c2d742…`) ejected the operator's stick on one tap, so a drill
 had to stay 100 px clear of its own column. On the live build the same press **raises the
-USB STOP chooser** and ejects nothing — the eject is a second, aimed tap *inside the box* —
-which is what makes the seventh column safe to inject at, and is why the note above is
+USB STOP chooser** and ejects nothing — the eject takes a three-second hold *inside the box*
+— which is what makes the seventh column safe to inject at, and is why the note above is
 left standing rather than deleted: it is the measurement that made the case for the box.
 See *The seventh column raises a chooser* above.
 
@@ -1837,10 +1918,10 @@ this gate.
 on the USB STOP cell still *ejected* — the note above said so in as many words ("a press
 there **stops the operator's media**"), because it did. Since the chooser landed
 (2026-10-05) the same press is harmless by itself: it raises the box and nothing is
-unmounted until a second tap lands on `USB 1`. The gate is **unchanged and still
-required** — the drawer must not take a press aimed at a band column, whether or not
-that column's first act is destructive — and the reason is simply better now than it was
-when it was written.
+unmounted until a three-second hold completes on a lit button, which arrived 2026-10-07.
+The gate is **unchanged and still required** — the drawer must not take a press aimed at a
+band column, whether or not that column's first act is destructive — and the reason is
+simply better now than it was when it was written.
 
 ### The gesture: what opens a drawer, and what closes one
 
@@ -2472,7 +2553,10 @@ step is crossed exactly at a multiple, in both directions.
 
 **The rect is `x 200..1080, y 60..480`**, measured off a live `/dev/fb0` capture of the
 performance screen at 1280×800: the top bar is y 8..41, the DECK 1/2 panels x 10..183,
-BEAT FX x 1090..1269 (rbp binds *touch* to that one and it stays his), the wave canvas
+BEAT FX x 1090..1269 (the wave gesture must not reach into it — and *"rbp binds touch to
+that one and it stays his"* was the belief here until 2026-10-06, when the two BEAT FX
+controls the shim now supplies were measured and **rbp binds nothing to either**; the
+section below has the diff), the wave canvas
 y 47..490, the HOT CUE label row y 499..509 and the two pad rows y 518..567. The top edge is
 y 60 and not 47 for a second reason: the shim's swipe-down band takes rows 0..55 and **opens**
 on any press inside them, so a rect that reached into that strip could open the band out from
@@ -2519,6 +2603,873 @@ keep apart from the zoom, but a press that is not vertical-dominant is still rbp
 that turns out to do something unwanted in the operator's hands the cure is to swallow the
 press at the down edge — which is the pinch's design, and would need the rect to be right for
 every screen rbp can be showing.
+
+## The BEAT FX panel's three controls (`fx_zone.c`, `fx_paint.c`)
+
+> *"when i touch the ch select in performance view let it toggle from ch 1 -> ch 2 ->
+> master, when i touch the beat fx have a popup menu with all the fx available so i can
+> select"* — 2026-10-06
+>
+> *"here's a tweak, when i press the beat fx label have the menu popup but if i press the
+> actual label of the beat fx (eg delay) enable the beat fx and disable if i press it
+> again"* — 2026-10-07
+
+Three touch interactions on **rbp's own BEAT FX panel** in the performance view, and the
+operator chose rbp's own drawing over shim-owned cells every time: a finger lands on the
+label that is already there. The third is the 2026-10-07 tweak, which re-homes the picker
+onto the grey `BEAT FX` header bar and gives the black effect-name cell a **power toggle**
+of its own:
+
+| gesture | what it does | fires on |
+|---|---|---|
+| the grey **`BEAT FX` header bar** | raises the 14-row picker | the **release** |
+| the black **effect-name cell** (`DELAY`) | **powers the Beat FX on/off** | the **press** |
+| the filled **CH SELECT value box** | cycles the target | the **release** |
+
+**They were dead to touch because rbp has no control for any of them.** Its `ui::touch_panel`
+family contains `BeatFxAndXPad`, `BeatFxMode_BeatFx`, `BeatFxMode_Status`,
+`BeatFxSelectItem1..4`, `BeatFxSelectTrash` and `Shortcut_EffectQuantize_On/Off` — a
+panel/mode toggle, the X-PAD and the in-panel quantize — and nothing that selects the
+effect, assigns its channel or enables it. All three reach rbp only as keycodes, the ones
+the FLX4's own buttons already send, so this is a **wiring** job:
+
+| gesture | call | where it is proven |
+|---|---|---|
+| CH SELECT target | `send_rx_key(K_BFXCH 0x448c`, `OP_VALUE, CH_GLOBAL, want)`, `want` ∈ {0 deck 1, 1 deck 2, 5 MASTER} | `map_flx4.c:493` — the lever |
+| effect type | `send_rx_key(K_BFXTYPE 0x448b`, `OP_VALUE, CH_GLOBAL, pos)`, `pos` 0..13 | `map_flx4.c:520` — FX SELECT |
+| **Beat FX on/off** | `send_rx_key(K_BFX 0x448d, OP_PRESS, CH_GLOBAL, 0)` then `OP_RELEASE` | `map_flx4.c:1087` — the FX ON/OFF button |
+
+**rbp owns the toggle state, so the shim keeps none and cannot desync.** A tap on the
+effect-name cell sends exactly what the FLX4's FX ON/OFF button sends, so it is equivalent
+to pressing that button whichever the operator used last — and the log line names the
+*send*, not the resulting state, because there is no enable word to read (the type word
+`+0x50` was already measured dead, `docs/13-raspberrypi4.md` S5.6).
+
+### The three rects, and how to re-derive them
+
+Measured off rbp's own frame — the y values of the lower two from the committed capture
+`work/fb_fx2.raw` (2026-09-30), the x values corrected against the **live** frame on
+2026-10-06, and the header bar read row by row off a live `/dev/fb0` on **2026-10-07**:
+
+| what rbp draws | logical x | logical y | |
+|---|---|---|---|
+| the grey BEAT FX plate, margins included | 1090..1269 | 47..490 | the mode check |
+| **the grey `BEAT FX` header bar** | **1090..1269** | **57..85** | `FX_HIT_HEADER` — raises the picker |
+| **the black effect-name cell** (`DELAY` there) | **1100..1259** | **98..137** | `FX_HIT_NAME` — powers the Beat FX |
+| the grey `CH SELECT` label | 1090..1269 | 150..158 | |
+| **the filled CH SELECT value box** | **1100..1259** | **168..203** | `FX_HIT_CH` — steps the target |
+
+**The header bar is the FULL plate width while the two boxes below it are inset 10 px a
+side** — the 2026-10-07 sweep found (48,48,48) across x 1090..1269 at y 57..85, then the
+plate's (32,32,32) from y 86, so it is rbp's own header for the panel and not a box. That
+asymmetry is asserted in `test_geometry` rather than typed twice: `FX_HEADER_X0 ==
+FX_PANEL_X0` and `FX_HEADER_X1 == FX_PANEL_X1`.
+
+The two boxes are 160 × 40 logical px each, 30 rows of clear plate between them and above
+the header. **The hit rect is the drawn box and not the plate**: the plate's 10 px of
+margin on either side stays rbp's, because a tap there is not a tap on the control. The
+value box is independently confirmed by `docs/13-raspberrypi4.md` S5.6, where the
+`1`-vs-`MASTER` frame diff is **x 1134..1225, y 178..194** — inside it.
+
+**The swallow was measured before a line of this was written, at all three rects.** An idle
+capture diff at the two boxes, tapping each twice with the shim doing nothing, changed
+**0 px in the panel and 0 px in the pad strip**, while the positive control (the segmented
+STATUS/BEAT FX toggle) moved **7098 px** in the panel and **77921 px** in the pad strip.
+The header bar got the same treatment on 2026-10-07 with a positive control in the *same
+injection run*: a tap at its centre (logical 1179,71) changed **0 px** in the whole panel
+while the CH box, tapped in the same run, changed **726 px** (rbp's `1`→`2`). So rbp binds
+nothing to any of the three, and withholding them costs the operator nothing.
+
+### The gesture
+
+`fx_feed()` is the zone's one door and it is `prompt_zone.c`'s shape, with **one control
+firing on the press instead of the release**:
+
+| the report | what happens |
+|---|---|
+| a press inside any rect | **ours**, and `press_hit` anchors which one. On the **effect-name cell** only, the press answers `FX_ACT_POWER` here and its release then answers nothing |
+| a press anywhere else | **not ours — and it never becomes ours.** A finger that starts on the glass and slides across the panel stays rbp's from its first report to its last; clearing the anchor on a miss instead would re-open the press wherever the finger had got to, one report later |
+| move, ours | still ours, even after the finger has left the rect — a control that swallowed the press must see the release or it goes deaf (`declined-press-must-still-see-release`) |
+| release, on the SAME rect the press anchored to | `FX_ACT_CH` or `FX_ACT_PICK` fires, once; on the effect-name cell the release is swallowed and fires **nothing** (`FX_ACT_NONE`) |
+| release, elsewhere | nothing, still swallowed |
+
+The rect is taken from the **release's own coordinates**, not from the tracked one: a
+fast flick can lift at a moved position with no move report in between. `FX_ACT_CH`
+cycles the target, `FX_ACT_PICK` raises the picker.
+
+**The anchor is also what protects the toggle.** A press that begins on the header bar and
+slides down onto the effect-name cell fires **neither** control: the release is not on the
+header, and the press did not begin on the name cell. That is the drag the operator would
+never aim and the one the first draft would have fired. And a **run of downs** on the name
+cell — which is what a touch panel sends while a finger rests — is one toggle, not one per
+sample, because only the up→down edge fires.
+
+**The gate is `getBrowseMode() == BROWSE_MODE_PLAY`**, re-read on every report — rbp can
+leave the performance screen under a press that is already down, and a swallowed press on
+a screen that no longer has the panel is a control firing on nothing. Nothing of the
+shim's may be in front of it either: the right-hand drawer covers all three rects
+completely while it is out, and the band's panel is drawn across them.
+
+### `FX_ACT_CH`: the cycle reads rbp's own word
+
+`fx_ch_cycle()` steps **0 → 1 → 5 → 0** from what rbp says it is right now, and *not*
+from a cursor of the shim's own — a private cursor would desync the moment the operator
+touched the FLX4's lever, which drives the same value. The read is `pointsrc.c`'s, a
+pointer chase that fbshim *can* do (`rbp_bridge.o` is not in this shim — `Makefile:292` —
+so it is not `rbp_beatfx_type()`):
+
+```
+DjEngineIF::getBeatEffectSelectChannel @0x4d314
+  ldr r4,[pc] -> ME_SINGLETON (0x011493c0)
+  ldr r0,[r4] -> MixerEngine*
+  ldr r0,[r0,#0x58] -> BeatEffectManager*
+  ldr r0,[r0,#0x00] -> the channel     0 = deck 1, 1 = deck 2, 5 = MASTER
+```
+
+**Measured on the unit 2026-10-06** by driving the FLX4's own lever: CH1 → `0`, CH2 →
+`1`, MASTER → `5`, back to CH1 → `0`. `+0x04` (the word `setBeatEffectSelectChannel`
+writes) tracked `+0x00` exactly, so the read does **not** lag and no cursor fallback is
+needed. Both interior pointers are NULL-checked and `is_rbp_process()` is asked first, so
+a half-built or torn-down engine answers −1 and the cycle then starts at deck 1, rbp's
+measured cold-start default, and says so in the log.
+
+### `FX_ACT_PICK`: one column, fourteen rows
+
+**The box is rbp's own BEAT FX plate's rectangle, drawn over the panel** — 180 × 444
+logical px at x 1090..1269, y 47..490, the plate's own bounds (`FX_X0 == FX_PANEL_X0`
+and the other three edges likewise, asserted rather than typed). It reads as the panel
+turning into a list: the control the finger just left is behind the box, not beside it.
+The operator's ask was *"the same dimensions of the beatfx box ... you don't need a title
+menu saying beat fx either"*, and the first build instead centred a 340 × 535 box with a
+title; the restyle deleted the title, the rule and the frame and took the plate's
+rectangle.
+
+**It is raised by the header bar since 2026-10-07, not by the effect-name cell** — the
+operator's tweak moved it up one row so the cell could become a power button. Because the
+box still covers the whole plate, a tap where the header was is picker **row 0** while the
+box is up; that is the same overlap the name cell had until 2026-10-07 and the operator did
+not ask to change it. The box still dismisses on a tap outside it, and on a 10 s timeout.
+Turning the Beat FX on *from* the picker is out of scope — the toggle is its own control
+now.
+
+The height is **the exact sum of its parts** — a 6 px margin, fourteen 29 px cells and
+thirteen 2 px gaps: 2·6 + 14·29 + 13·2 = 444, asserted rather than trusted. `FX_EDGE_X`
+is 10 and not a round number of the shim's own, because it is **rbp's**: his black
+effect-name cell is inset ten pixels from the plate on either side, so a row here lands on
+exactly the same 160 px width as the cell it replaces. The rows wear rbp's own colours
+(`menu_paint.h`'s `MENU_FX_PLATE`, `MENU_FILL`, `MENU_LABEL` and `MENU_FX_SEL`), all four
+sampled off a live `/dev/fb0` capture, and **nothing draws a frame round a row** because
+rbp's cells have none.
+
+**Covering the panel costs nothing, and the reason is in `pointsrc.c`.** The picker is
+asked first in the ladder, so while it is up every report over the panel is the picker's
+and neither of the two hit rects underneath can fire. Its first nine rows and the
+right-hand drawer are the same 180 px column at the same edge, and the first nine rows
+also sit under the swipe-down band's strip; neither can be on the glass with it, because
+the FX rung refuses while any drawer or the band is open and is asked before either can
+open on a report the picker is holding. Nothing in `fx_zone.c` enforces that.
+
+**The names are MEASURED, not derived.** The FLX4's own FX SELECT note was injected
+fourteen times from a cold start with the shim logging each position as it sent it, and
+the word read off rbp's effect-name cell after every step:
+
+| pos | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| name | DELAY | ECHO | PING PONG | SPIRAL | HELIX | REVERB | FLANGER | PHASER | FILTER | TRANS | ROLL | SLIP ROLL | PITCH | VINYL BRAKE |
+
+Three independent anchors agree — `rbp_abi.h:381`'s own ABI comment says *"0=Delay,
+1=Echo"*; position 11 reads SLIP ROLL, the effect the panel was already showing; and
+position 5 reads REVERB, the type an earlier `pos → type → icon-resource` derivation had
+put at 0. That derivation scrambles, and reading rbp's display is the only thing that
+settled it. Switch-position order is the presentation because it is the order the
+operator's own FX SELECT button steps through.
+
+**There is no "current effect" highlight**, and that is a measurement. rbp's type word
+`BeatEffectManager+0x50` (`ldr r0,[r0,#0x50]`, the tail of
+`DjEngineIF::getBeatEffectType @0x4d514`) reads **0 at every switch position** while the
+panel shows SLIP ROLL, REVERB and VINYL BRAKE in turn; stepping the effect moved
+`+0x140`, `+0x11c..+0x130` and the pointer at `+0x0c` and left `+0x50` at 0. The FLX4's
+own cursor falls back for the same reason (`map_flx4.c` seeds from `rbp_beatfx_type()`
+once and the log opens drill 1 at *"type position 1"*). A light pinned to a word that is
+always 0 would sit on DELAY forever, so the box opens with nothing marked and the
+operator's own FLX4 panel remains the honest witness for which effect is live.
+
+### The picker's state machine
+
+`prompt_zone.c`'s, deliberately down to the field names, because that shape has already
+been through a drill on this unit:
+
+- **Asked first in `pointer_report()`'s ladder**, above the band, the drawers and rbp, so
+  while it is up it owns **every** report wherever it lands and a press that dismisses it
+  cannot also press what is underneath. `pointer_report_alt()` refuses while it is up too.
+- **Nothing is inherited.** It opens with no press behind it (the raising tap fired on a
+  release) and with no row armed.
+- **It fires on release**, and only when the release's own coordinates are on the row the
+  press anchored to.
+- **A miss, a slide, or a tap outside closes it and sends nothing** — an honest no-op, not
+  a silent action.
+- **It self-dismisses after 10 s** (`FX_TIMEOUT_MS`), asked from the read loop's slice the
+  way `prompt_expire()` is, and **never while a finger is down** — rbp always gets the
+  release for a press the box swallowed.
+- **It can never be up at the same time as the USB STOP chooser.** The chooser is asked
+  first in the ladder, so its own feed swallows a tap that would raise the picker; and the
+  keycode path that raises the chooser closes the picker, because a keycode is not a tap
+  and can arrive with the picker still on the glass. Both boxes are opaque.
+
+### Drawing: its own plane
+
+The picker is presented on a **fifth `drm_band`**, mirroring the chooser's
+(`menu_draw.c`'s `menu_fxlist_*`), at the box's own size. It is its own slot rather than
+the chooser's: sharing one slot would make the two boxes mutually exclusive by
+construction, and getting *that* wrong shows one box's pixels in the other's buffer —
+while a refused plane costs nothing, because the picker falls back to the page route the
+chooser already uses. The fear that motivated sharing (a fifth plane refused by vc4) is
+measured and dead: the unit's `/sys/kernel/debug/dri/1/state` lists plane[0] through
+plane[29]+, and this shim already holds five.
+
+**A COPY OF A SURFACE HAS ONE PIECE THAT CANNOT BE COPIED ALONG WITH THE REST, AND THIS
+ONE WAS MISSED: the call site.** `menu_fxlist_build()` was written, its image was
+host-tested, and **nothing ever called it** — the builder thread called
+`menu_prompt_build()` and not its sibling. The picker therefore drew **nothing at all**:
+with a plane available `g.fxlist_valid` never became 1, `menu_fxlist_live()` published an
+image that did not exist, and the plane sat set up and unwritten. Everything except the
+pixels agreed — the log printed its `menu plane: crtc 102 plane 127 fb 725 180x444` line,
+taps answered rows, the effect changed on rbp's panel. The tell is that a live plane reads
+`crtc=pixelvalve-2` and its fb id in `/sys/kernel/debug/dri/1/state` while the picker is
+open, and this one read **`fb=0 crtc=(null)`**. Fixed by the one missing line in the
+builder loop. **The compiler had been flagging it on every build** —
+`warning: 'menu_fxlist_build' defined but not used [-Wunused-function]` — and it was lost
+in a `tail` on the build's output, so the habit worth keeping is to read a build from the
+top as well as the tail.
+
+### The switch
+
+`POINT_FX_TOUCH` (default on) turns all three interactions off and gives the whole panel
+back to rbp: the zone is not fed at all, and a box left up from before is put away at
+startup and on a pointer device that goes away, beside `menu_reset()`. It is in
+`start-rb.sh`'s `SHIM_VARS`, so `rb.conf` can set it as `RB_POINT_FX_TOUCH`.
+
+### What is measured, and what is not
+
+`test_fx.c` is **632 checks**: all three rects inside rbp's plate and none touching
+another; the header bar spanning the plate's full width and the two boxes below it inset;
+the box's four edges EQUAL to the plate's, and its height the exact sum of its parts (a
+margin, fourteen cells and thirteen gaps); every row inside the box, the right size, the
+width of rbp's own effect-name cell and clear of its neighbour; the three hit rects' edges
+inclusive and one pixel outside not; a press that began elsewhere never adopted, first
+report to last; **a name-cell press answering `FX_ACT_POWER` on the PRESS and its release
+answering nothing, with a run of downs firing once**; the header and CH box still firing on
+the anchored release; a header press that slid onto the name cell firing neither; the
+picker owning every report while it is up and answering for none while it is shut; a row
+answering its own switch position; a release with no press behind it swallowed but not
+closing the box; the timeout never closing under a finger; every pixel of the image
+written, the paint idempotent at both depths, and a pressed row's difference confined to
+that row's own rect. All 632 pass on the host and the whole suite passes unchanged. (It was
+599 before the 2026-10-07 tweak, and 624 before the restyle; the checks the restyle removed
+were the title, the rule, the centring and the mirror relations.)
+
+**The two new rules are mutation-verified**, because a press-edge rule is exactly the kind
+of thing a copy of the test would not notice: mapping the header to `FX_HIT_NONE` fails
+**10** checks, and moving the effect-name cell back to firing on the release fails **6**
+(including *"the name cell's RELEASE fired a second act — a tap must fire once"*).
+
+**What a machine settled, 2026-10-06, before the operator was asked to look** — the same
+prime → press → 130 ms → release injector drill 0 used, aimed at the finished build.
+Three taps on the CH box took **rbp's own word** `0 → 1 → 5 → 0`, read through
+`/proc/<pid>/mem` at the chase above rather than off the shim's log, with the log's
+`beat fx ch select N -> …` line as the second witness; rbp's panel read `1` afterwards.
+A tap on the effect-name cell raised the box (`beat fx picker raised (14 rows)`), the
+picker took its own plane, and a tap on row 13 sent `type position 13 (VINYL BRAKE)` with
+rbp's own effect-name cell reading **VINYL BRAKE** off the framebuffer afterwards. What no
+machine settled is the comfort of the two rects under a thumb, and that is the operator's
+own verdict — the same sentence the QUANTIZE zone needed.
+
+**What the machine settled for the 2026-10-07 tweak, and how** — a true **press with no
+release at all**, because that is the only injection a release-firing build cannot pass.
+`poke.py`'s `finally:` emits an unconditional release, so this drill drove the panel node
+directly: `prime → press → sleep → read the log → release → read the log`, at raw (1770,96)
+for the header and raw (1770,159) for the name cell.
+
+```
+HEADER    press, no release   ->  (nothing)
+          ...release          ->  pointsrc: beat fx picker raised (14 rows)
+NAME CELL press, no release   ->  pointsrc: beat fx power toggle sent
+          ...release          ->  (nothing)
+```
+
+The header's silence on the press and the name cell's *speech* on it are the two halves of
+the edge rule, and the same run's later steps are the two negatives: a press that began on
+the header and slid onto the name cell fired **neither** control, and a name-cell press
+that slid off the plate fired exactly **one** toggle — on the press — with nothing on the
+lift. The picker's overlap is unchanged and deliberate: while it is up a tap where the
+header was is picker **row 0**, which is why the drill above waits out the 10 s timeout
+between the two steps. Turning the Beat FX on from the picker is out of scope; the toggle
+is its own control now.
+
+**And the operator's own verdict, 2026-10-07:** *"ok, works correctly"* — the header, the
+power toggle and its repeat-off all behave under a real finger on the glass. That is the
+last step the feature needed; nothing here is waiting on a drill.
+
+## The BPM cell as a momentary X/Y pad for the Beat FX (`fxpad_zone.c`, `fxpad_paint.c`)
+
+The operator, 2026-10-07, on the same panel:
+
+> in the beat fx window where the BPM detail is displayed allow it to be a x/y pad to
+> control the beat fx x for level and y is for how many beats, engage when pressed down
+> and allow dragging within the square to work and then when you release set it back to
+> what the beat and level was before you pressed it.
+
+Below the CH SELECT box rbp draws a black cell reading `125.0 BPM / 480 msec / 1 BEAT /
+QUANTIZE`, and binds **no touch to any of it** (measured — the swallow table below). So the
+one dead square on the panel becomes the place where the effect's two continuous values can
+be flown by hand: X is the effect's **level** (its depth), Y is **how many beats**, it is
+engaged while the finger is down, and letting go puts all of it back exactly where it was.
+
+**Three answers are decisions and not defaults**, given when the operator was asked:
+
+* **Y drives the discrete beat ladder** (`BEAT <` / `BEAT >`: halve / double), not the
+  continuous TIME knob — the cell already prints the beat count, so the ladder is the value
+  that can be read back while dragging.
+* **The press also turns the Beat FX ON**, and the release puts the on/off back too. A
+  momentary pad that changed the level of a switched-off effect would move nothing audible.
+* **The pad draws a frame and a finger dot**, because the LEVEL has no readout anywhere on
+  rbp's panel — only the beat count and the time are printed — so without a dot X is flown
+  blind.
+
+### The cell
+
+Measured off a live `/dev/fb0` capture, 2026-10-07 (the BEAT FX panel on the glass):
+
+| what rbp draws | x | y |
+|---|---|---|
+| the black BPM detail cell | **1100..1259** | **216..352** |
+
+160 × 137 logical px — the **same ten-pixel inset** from the grey plate that the effect-name
+cell and the CH SELECT box wear — and clear of all three `fx_zone.h` rects: the CH box ends
+at y 203 and this cell begins at y 216, with thirteen rows of plate between them. Row 352 is
+rbp's own `8,8,8` border, so the rectangle stops there rather than running into the plate
+below. The `QUANTIZE` word inside the cell is rbp's already-measured-dead
+`Shortcut_EffectQuantize_On/Off`.
+
+### The swallow, measured before a line of this was written
+
+The shim doing nothing, `work/tap.py` writing records straight into rbp's pipe, counting
+changed pixels **inside the panel only** — a whole-frame count is useless here, because
+rbp's deck animation moves ~46,000 px on its own, all of it outside x 1090..1269:
+
+| region | idle | tap cell | tap cell | tap toggle |
+|---|---|---|---|---|
+| BPM cell (1100..1259 / 216..352) | 0 | **0** | **0** | 0 |
+| STATUS/BEAT FX toggle | 0 | 0 | 0 | **7098** |
+| whole panel (1090..1269) | 0 | 0 | 0 | 8178 |
+
+Two taps in the cell: **0 px**, twice; the control in the same run moved **7098 px**. So
+withholding these reports costs the operator nothing.
+
+### rbp's own values, read not inferred
+
+The pad moves rbp's effect, so it has to read it first — and the read is a pointer chase
+`pointsrc.c` already performs for the CH cycle. Disassembled out of
+`extracted/XDJRX3/pdj/rbp` on 2026-10-07 and then read live through `/proc/<pid>/mem`:
+
+```
+ME_SINGLETON 0x011493c0 -> MixerEngine
+  MixerEngine +0x58       -> BeatEffectManager        <- fx_ch_read() is already here
+    BeatEffectManager +0x00  int   select channel     = 5    (screen: MASTER)
+    BeatEffectManager +0x08  ptr   BeatEffect*        <- the CURRENT effect object
+      BeatEffect +0x20  float  level / depth          = 0.409   (later read 0.5044)
+      BeatEffect +0x24  long   time, msec             = 480     (screen: "480 msec")
+      BeatEffect +0x3c  byte   effect ON/OFF          = 0       (later read 1)
+      BeatEffect +0x44  long   beat button rung        = 5       (screen: "1 BEAT")
+      BeatEffect +0x48  long   beat button max         = 9
+      BeatEffect +0x4c  long   beat button min         = 0
+```
+
+Every accessor behind those is a two-instruction load, so this is a plain chase with **no
+function call into rbp** — the same shape and the same risk as `fx_ch_read()`, with both
+interior pointers NULL-checked. The two readings differing is the point: **nothing here is a
+constant**, and the pad **refuses to engage** at all when any link of the chase is missing,
+because a pad that cannot read the old value cannot put it back.
+
+### What the wire does to them, measured on the unit
+
+Sent through the shim's own sequencer port (`seqinject2`), which runs `map_flx4.c`'s real
+handlers — whose last hop is byte-identical to the two calls the pad makes — with rbp's
+words read back out of `/proc/<pid>/mem` after each one:
+
+| what | wire form | read back |
+|---|---|---|
+| level | `K_DEPTH 0x448f`, `OP_VALUE`, `CH_GLOBAL`, `v`, `v/1023.0f` | cc 100 → `+0x20` = **0.7879** (= 806/1023); cc 20 → **0.1574** (= 161/1023) |
+| beats | `K_BEATNEXT 0x4491` / `K_BEATPREV 0x4490`, `OP_PRESS`, `d = +1 / -1` | rung **5 → 6 → 7**, and **7 → 6** |
+| on/off | `K_BFX 0x448d` PRESS then RELEASE | not re-sent in that run — it is the audible one and the operator's own hand has already proven it |
+
+Three facts worth carrying out of that run. **`K_DEPTH` is ABSOLUTE and exact** — one send
+lands the level, one send restores it, no feedback loop needed. **The ladder's directions
+are measured, not inferred from the button's name**, and one press moves exactly one rung.
+And **rbp repaints the cell itself**: at 125.0 BPM the same square went `480 msec / 1 BEAT`
+→ `960 / 2 BEAT` → `1920 / 4 BEAT`, following `+0x24` and `+0x44` — so the panel is a live
+readout of this struct, rung 5 is "1 BEAT" and the ladder doubles visibly, and `+0x24` is
+rbp's own recomputation rather than a second copy of the rung.
+
+`OP_PRESS` on the two BEAT keys is **required**: `asEventCode` gates `0x4490`/`0x4491` on
+`(op & 0xf) == 0` (`docs/08-controls.md`). Every one of the injected values was put back
+before the run ended, and the unit was re-read afterwards to confirm it: depth, rung and
+on/off all at their starting values.
+
+### The state machine
+
+* **The press point sets BOTH axes immediately**, which is what makes it an X/Y pad rather
+  than a knob. A press inside the cell engages it; a press that began **outside** is rbp's
+  for the whole of its gesture, however far it then travels across the panel. Every report
+  until the release is then **ours**, including one that has slid off the cell — a feeder
+  that swallowed the press must see the release or it goes deaf, silently.
+* **X → level**: `round((x - 1100) / 159 × 1023)`, sent whenever it differs from what was
+  last sent. `K_DEPTH` is absolute, so it needs no loop and restores in one send.
+* **Y → beats**: the top of the cell is the **most** beats. The target is a rung index, and
+  it is reached by **hill-climbing on rbp's own answer** — at most one rung per tick, in the
+  direction that closes the gap, and no second step until rbp has moved off the rung the
+  last step was taken from. That needs no knowledge of the ladder's spacing and cannot
+  overshoot or double-step when rbp applies a key a tick late.
+* **The snapshot** is taken on the first tick after the press — the only moment at which
+  rbp's `on`, `depth` and `beat` are still "what they were before the finger touched". That
+  snapshot *is* the operator's "set it back to what the beat and level was before you
+  pressed it".
+* **X, then Y, then the on/off.** The level is absolute and needs no loop at all; the ladder
+  is climbed on rbp's answer; and the on/off, which is a **toggle**, is *asked for and then
+  watched* — see below. It is the one axis whose wire form cannot be driven like a value.
+* **The restore** is driven by the same loop, with the targets set back to the snapshot, and
+  goes idle when they are home. It cannot live in the release report: there is no report
+  after a release and rbp applies keys asynchronously, so climbing on rbp's own answer is
+  the only honest way to land on the exact rung again. **Home means arrived, not asked for**
+  — the level is the one exception, and only because asking for it *is* putting it there. A
+  long drag unwinds in a few hundred ms.
+* **It gives up rather than spins**: a ladder rung that does not answer within
+  `2 × (max - min) + 4` ticks stops the beat axis for the rest of the gesture, and an on/off
+  toggle rbp never answers stops after `FXPAD_ON_TRIES` asks, `FXPAD_ON_WAIT` ticks apart.
+* **A tap between two ticks sends nothing at all** — no tick ever saw it engaged, so there
+  is nothing to undo. That is not a special case: the whole module rests on the rule that
+  the only thing worth undoing is something that was actually sent.
+
+The tick block is the fourth of its kind in `pointsrc.c` (after the drawers', the chooser's
+and the picker's) and has the same shape: while the pad is busy, read rbp, tick, send what
+comes back, wait in 20 ms slices. That is what lets the ladder converge **with the finger
+held still** and what services the restore after the finger is gone. The sends go out back
+to back with **no sleep** — a wait in this loop starves the band, the window, the drawers and
+all three boxes.
+
+### The HUD: the dot, and the frame that was taken off it
+
+`fxpad_paint.c` draws **a dot at the finger** — and, until 2026-10-07, a frame round the cell
+as well. It is the family's **first module that copies** rather than fills, and the reason is
+the measurement above: rbp repaints that cell itself and its `BPM / msec / BEAT` is the
+operator's only readback — so the HUD must be drawn **over a copy of rbp's own pixels**, never
+in place of them. A plane is RGB565, i.e. opaque, so each tick takes rbp's cell out of the
+framebuffer into plane six's buffer and then draws the mark on top. The copy is the cell and no
+more: 160 × 137 at the page's scale, ~44 KB a tick. On the page route there is nothing to copy
+— the destination *is* rbp's pixels — so `fxpad_paint()` is handed a NULL source and writes
+only the dot; **that route must never fill**, and `test_fxpad.c` pins it, because filling there
+would black out the readout the operator is reading.
+
+**The frame is gone, and the reason is worth keeping.** It was a one-pixel `MENU_BORDER`
+rectangle drawn on the cell's outermost row and column — which are rbp's own `8,8,8` border,
+chosen deliberately so that the ring replaced a line that was already there and cost the
+readout no pixel. That reasoning was sound about *space* and wrong about *time*: rbp repaints
+that border itself, so the same pixels were written by both of us at different rates and the
+ring strobed. The operator, on the glass:
+
+> you don't need to draw the white box outline, it flashes so its too distracting
+
+It is out. The cell's border is rbp's and stays rbp's, and what is left is the one mark with
+information in it — the level has no readout anywhere else on the panel. `test_fxpad.c` now
+pins the **absence**: an unmarked paint must write rbp's pixels byte for byte and add nothing
+at all, which is a stronger test than the one it replaced.
+
+The pad's plane is the **sixth `drm_band`** and the only one that goes up for a **finger**
+rather than for a box, so the tick services it **first**, before any route is decided: a pad
+left up would be an opaque rectangle with a frozen dot sitting on the operator's own BPM
+readout. It is **hidden and shown per gesture but set up once** — the five boxes tear their
+plane down when they close, which they can afford because a box is up for a deliberate
+session; the pad's lifetime is a tap, used dozens of times a set, and what actually takes the
+rectangle off the glass is `drm_band_hide()` (one ioctl). It cannot be engaged while any box,
+drawer or window is up — `pointsrc.c`'s press gate asks every one of them before a finger can
+take the cell — so this plane and theirs are never up together.
+
+### The press that did not trigger, and the loop it bought
+
+The pad's first hour on the glass produced one more report, and it is the sharper of the two:
+
+> when i change effects it doesn't seem to remember to trigger when i press until i turn it
+> on off can you fix?
+
+The pad's on/off was **one blind toggle, sent once, on the snapshot tick, and never checked**
+— the module latched what it had *asked for* and read rbp's answer never again. Every other
+axis here has a loop: the ladder climbs on rbp's own word. The on/off had none, and it is
+exactly the axis whose wire form cannot be driven like a value, because `K_BFX` is a *flip*.
+A flip rbp drops is indistinguishable, from the shim's side, from a flip it never needed — and
+the operator's workaround, cycling the effect's own power, is what "until i turn it on off"
+describes.
+
+It is now **asked for and then watched**: the pad reads rbp's answer back and asks again —
+up to `FXPAD_ON_TRIES` times, `FXPAD_ON_WAIT` ticks apart — while the answer still disagrees.
+Three things fall out of that, and only the first was the point:
+
+* A toggle rbp **drops** is re-asked, so the press is not silent for the whole gesture.
+* While the finger is down, an effect rbp switches **off underneath it** is asked for again on
+  the next tick instead of leaving the rest of the gesture dead. This is the shape the
+  operator's "when i change effects" describes, and it costs nothing when it does not happen.
+* The restore now needs rbp's answer to have **arrived**, so `beat fx pad unwound` is rbp's
+  state and not the shim's intent. Read off the unit's log before this change, that line was
+  reporting `effect on` immediately after a `-> effect off` it had not yet been applied — a
+  witness line that was wrong in a way nothing would have caught.
+
+Asking twice is safe here for a reason the level does not share: **the answer is read**, so a
+second ask is a correction of a flip rbp did not make, not a blind repeat of one it may have.
+The bound is what keeps a toggle rbp will never answer from flipping the effect under the
+operator's hand for as long as they hold the pad.
+
+**What this fix does not claim.** The log from the operator's own session shows every engage
+after their effect change reading `effect on` in the snapshot — so the pad found nothing to ask
+for. Whether that was rbp lying was, at the time, unanswerable from `+0x3c` alone: the answer is
+the only truth the shim had. **It has since been answered, and the answer is that it *was*
+lying** — see the next section.
+
+### The flag that lies, and the second word that does not (2026-10-07, later the same day)
+
+The operator's *"when i switch an effect and then press the x/y pad it doesn't engage, but it
+does after i turn the newly selected effect on/off"* turned out not to be a dropped toggle at
+all. **`BeatEffect+0x3c` reads ON on an effect that is not running**, and the pad believed it.
+
+rbp's Beat FX state is two words, both of them one `ldr` off the same `BeatEffectManager`:
+
+| word | accessor | what it says |
+|---|---|---|
+| `+0x50` | `getBeatEffectType()` @0x89acc — `ldr r0,[r0,#80]` | the effect **type**; **0 is the Off state**, the one entry of the 14-position table that maps to no position |
+| `+0x3c` | `isBeatEffectOn()` @0x89964 — `ldrb r0,[r3,#60]` | the effect's own ON/OFF flag |
+
+When the type is 0 the manager leaves a **`BeatEffectOff`** at `+0x08`, and that class has every
+control the pad drives compiled out — `changeEffectStatusToOn` @0x8b0b8, `changeEffectStatusToOff`
+@0x8b0b4, `changeLevelDepthValue` @0x8b0ac and `changeTimeValue` @0x8b0b0 are each a bare `bx lr`.
+Nothing maintains its `+0x3c`, so it sits at **1**. rbp's own `setBeatEffectOnOff` @0x89940 reads
+`ldrb r3,[r0,#60]; cmp r3,r1; popeq` — so even rbp's own ON *would* see "already on" and return,
+if it were routed at the Off object; it is not, because rbp's ON/OFF button re-points `+0x08` at
+the selected type's real object first, and *there* the flag means something. That is the
+operator's workaround, exactly.
+
+**Measured on the unit, one step at a time**, with a read-only `/proc/<rbp>/mem` walk — the
+operator's own repro, one injected `FX SELECT` press:
+
+```
+before              type(+0x50)=0  +0x3c=0  obj -> BeatEffectPingPong (a real class, and off)
+after ONE FX SELECT type(+0x50)=0  +0x3c=1  obj -> BeatEffectOff (every virtual `bx lr`)
+```
+
+So moving the effect selector **once**, while the effect is off, leaves the type at 0 *and*
+flips the flag to 1. The pad read the flag, agreed with itself, sent no `K_BFX` — and every other
+send it made, the level and the rung, was a no-op on a class that ignores both. The press did
+nothing, anywhere. That is *"it doesn't engage"*.
+
+**The fix is a conjunction, not a new send.** ON is `+0x50 != 0 && +0x3c != 0`, written once, in
+`fxpad_zone.c`'s `live_on()` and exported as `fxpad_live_on()`. Nothing about the wire changed;
+the pad simply asks for the toggle in the case it used to sit still for. `test_fxpad.c`'s
+simulated rbp **models the lie** — it answers `+0x3c` from the type when the type is Off — which
+is what makes the new test able to catch the old read; with the honest fixture it cannot.
+
+**And it is a conjunction, not an equivalence**, which is the part worth keeping. A freshly
+started rbp whose Beat FX has never been touched *also* reads type 0 — with a stale **real**
+object at `+0x08` whose own class maintains the flag, so that one reads `+0x3c = 0` and is right.
+Two type-0 states that say different things: `+0x3c` alone is meaningful in one and a lie in the
+other, and `+0x50 == 0` answers "off" correctly in both. `rbp_abi.h` carries the table.
+
+**A refusal is now named, and that is a second, separate fix.** There was no log line at all when
+the pad declined to engage, and no line naming which link of the chase failed — so *"it never
+engaged"*, *"it engaged and sent nothing"* and *"the shim was not running"* were the same silence,
+which is what kept this from being a five-minute diagnosis. The read is now
+`fx_state_read_why()`, and a press inside the cell that it refuses logs
+`beat fx pad refused at (x,y) -- <the link>`. It fires only on a press that *would* have engaged,
+so a release, a miss and a drag across the panel cost nothing.
+
+### The switch
+
+`POINT_FX_TOUCH` (default on) turns this off with the panel's other three interactions: the
+pad is not fed and is reset, beside `fx_reset()` and the rest, at startup and on a pointer
+device that goes away.
+
+### What is measured, and what is not
+
+**`test_fxpad.c` is 786 checks**: the restore exact in both directions of the ladder with the
+on/off toggled exactly twice; **the flag that lies** — an Off-typed object reporting ON must read
+OFF, and the press on it must send the toggle it never used to send, in a fixture that reproduces
+the lie; the tick quiet when nothing has changed (a held-still finger is the normal state, and a
+re-sent ON toggle would switch the effect back off); **a dropped toggle re-asked and then let go**,
+and **an effect that goes off under the finger asked for again**; **a restore that waits for the
+answer rather than for the ask** — asserted both ways, that a refused on/off is retried and
+bounded and that an answered one still costs a single send and no extra ticks; both mappings at
+their ends and across their span; the climb from both ends, against a rbp that applies each step
+a tick late, and against one that never answers at all (give up, not spin); the latch — a press
+this module swallowed stays ours until it lifts; the cell inside rbp's plate and overlapping none
+of the three `fx_zone.h` rects; and the HUD, which is about pixels: **which of rbp's survive**.
+That last section pins the copy (against a non-uniform page and a source with its own stride), the
+dot's locality and its extreme, idempotence, the page route's promise that only the dot is written
+— and the frame's **absence**, which is now a regression guard rather than a description.
+
+The conjunction is pinned by a deliberate-break run: reverting `live_on()` to `live->on != 0`
+turns `test_fxpad` red in **6 places**, one of them reading *"THE PRESS MUST ASK FOR THE EFFECT —
+this is the K_BFX that never went out (got 0 sends)"*, which is the operator's symptom in the
+test's own words.
+
+**The pad has been used on the unit, and this is what the glass said.** The operator's own
+session is in `/tmp/pointsrc.log`: 41 engagements, 3097 level sends, the ladder walked up and
+down, and — read back at the top — a restore that landed on the level and the rung it started
+from every time. That run is what produced the three reports above, the frame's removal and the
+flag finding. What is still only theirs to settle: whether the press now triggers when they
+change effects, the comfort of the two axes under a thumb, whether the press-point-sets-both-axes
+choice is the right one (the alternative, "the first move sets the value", is a one-line change
+to `fxpad_feed`), and whether a dot is enough to fly the level by. The pad's log lines — `beat fx
+pad engaged at (x,y) -- type N, effect on/off`, one per axis sent, `beat fx pad refused at (x,y)`
+when a press is declined, and `beat fx pad unwound` with the final state — are the instrument for
+reading a drill back.
+
+## The HOT CUE pad row (`hc_zone.c`)
+
+The operator, 2026-10-06:
+
+> also on the performance screen, make hotcues activatable with touch.  when i press a
+> hotcue, but only if one is registered to it.  if there is no active hotcue do nothing
+> and do not create a hotcue.
+
+rbp draws a HOT CUE grid across the bottom of each deck — four cells to a row, two rows,
+eight pads a deck, lettered A..D and E..H — and binds **no touch to any of it**, so the row
+is inert under a finger today. This section makes the sixteen cells fire their own cue.
+
+**The second sentence is the whole feature, not a nicety.** On real Pioneer gear an unlit
+HOT CUE pad *stores* a cue at the playhead. So the failure this is gated against is not a
+tap that did nothing: it is a tap that **wrote a cue onto the operator's own track**, on a
+pad they believed was empty, mid-set. Every gate below is therefore built to fail towards
+doing nothing, and `test_hc.c` names that direction in its failure messages so a future
+edit cannot quietly reverse it.
+
+### The sixteen cells
+
+Re-derived 2026-10-06 from a live `/dev/fb0` capture of the performance screen, by scanning
+the pad strip for its drawn edges; `docs/07-touch.md`'s performance-screen table above
+carries the same two rows and is the independent check (one source would only be this
+document agreeing with itself).
+
+| what rbp draws | y |
+|---|---|
+| `HOT CUE` label row | 499..509 |
+| row 1 cells (A..D) | **518..537** |
+| gap | 538..547 |
+| row 2 cells (E..H) | **548..567** |
+| `DECK` strips | 581.. |
+
+| deck | the four cells' x |
+|---|---|
+| 1 | **11..158, 168..315, 325..472, 482..629** |
+| 2 | **651..798, 808..955, 965..1112, 1122..1269** |
+
+148 px wide, a 9 px gutter between, pitch 157; 11 px of screen margin on the left and 10 on
+the right, and 21 px separating the decks (deck 1 ends at 629, deck 2 starts at 651). Pad
+numbering is rbp's own: row 1 is pads 1..4, row 2 is pads 5..8.
+
+**The 20-row height is deliberately thin.** The drawn cell is the visual promise — the rule
+`fx_zone.h` states for its two boxes — and padding these rects out to fill the gutter would
+make a tap in the 10-row gap, which is visibly neither pad, fire one of them. A touch that
+lands in the gutter, in the gap between the decks, or on the label row does nothing at all.
+
+### The gate, and the three reads
+
+`hc_may_fire(browse_mode, pad_mode, registered)` is the whole rule, and all three terms
+must hold:
+
+| term | read from | why it is there |
+|---|---|---|
+| `browse_mode == 1` | `uiBrowse`'s mode word | the pad row is only on the **performance** screen |
+| `pad_mode == 0` | `UiGetPadMode(deck)` @`0xfd3cc` | **rbp's pad keycodes mean whatever the current mode makes them mean** |
+| `registered > 0` | `isRegisteredHotCue` @`0x48b00` | the operator's rule: only a pad that already has a cue |
+
+**The mode gate is not decoration.** `K_PAD1+p` is a hot cue in HOT CUE, a 1/8 beat loop in
+AUTO BEAT LOOP and a beat jump in BEAT JUMP, so a tap on a drawn cell while the deck is in
+any other mode would send *that* mode's action. Engaging a beat loop because a finger landed
+on a pad is exactly as unwanted as creating a cue, and it is the same fix: a deck not in HOT
+CUE mode gets nothing from this module.
+
+**The registration read is a direct call, because there is nothing to chase.**
+`djengine::DjEngineIF::isRegisteredHotCue` @`0x48b00` saves `r1` and `r2` and **reloads `r0`
+from its own singleton** (`ldr r6,[pc,#152]` then `ldr r0,[r6]`, at `48b08`/`48b10`), so the
+`this` argument is dead and `NULL` is passed because nothing is ever read from it. What it
+forwards is the channel — the **0-based deck index**, which is what rbp passes — and the
+**pad number 1..8**, not an index. `rbp_bridge.c`'s `hotcue_delete()` has been making this
+same call on this same address since 2026-10-01, and that is the provenance. It was chosen
+over the two alternatives deliberately: the `LedStat` `+20` word would need the 1.5 ms
+double-read the LED mirror uses to avoid a torn read, which fbshim cannot afford on the
+input path and whose torn value lands in the dangerous direction; and the `Player+0x479`
+bitmask has comment-only provenance.
+
+**And every read answers its failure as "no".** A pad mode that cannot be walked is `-1`; a
+registration that cannot be asked, or is asked outside rbp, is `0`; a half-built engine
+answers nothing. `hc_may_fire()` refuses on all of them, which is the operator's rule
+arriving at the safe answer by construction rather than by a branch somebody has to
+remember.
+
+### The keycode arithmetic, which is the other way to write a cue
+
+`hc_pad_keycode(pad)` returns `K_PAD1 + (pad - 1)`, and it is a function rather than an
+inline expression precisely because of the off-by-one. rbp's own arithmetic is
+`pad = keycode - 0x4116`, read straight off the instruction stream of
+`ui::Player::onHotCueEvent` @`0x2f5720`:
+
+```
+2f575c: sub sl, r8, #16640   @ keycode - 0x4100
+2f5760: sub r5, sl, #23      @ keycode - 0x4117, range-tested 0..7
+2f578c: sub sl, sl, #22      @ keycode - 0x4116  =  the PAD NUMBER
+```
+
+So pad 1 is `K_PAD1` `0x4117` and pad 8 is `0x411e`. `K_BEATJUMP` `0x4116` is one below the
+range: it is a pad-*mode* key, not pad 0. **Getting this wrong by one does not produce a pad
+that does nothing — it triggers the neighbouring cue, and on an empty neighbour it creates
+one**, which is the exact harm the whole feature is gated against, arriving through the
+arithmetic instead of through the gate. `test_hc.c` pins all eight, in both directions
+(`k - 0x4116 == pad`, and no pad produces a mode keycode).
+
+The send is `map_flx4.c`'s and `aloop_apply()`'s: one `OP_PRESS` and one `OP_RELEASE`,
+back to back, on rbp's own channel for the deck (`deck + 1`) — which is what keeps deck 1's
+tap from firing deck 2's cue.
+
+### The gesture
+
+`hc_feed()` is `fx_zone.c`'s shape, and it is on the same rung of the ladder — after every
+shim surface and before rbp's own screen — because these are pads rbp **paints**, so
+anything drawn over them gets first refusal. That matters concretely: the right-hand drawer
+(x 1100..1279, full height) lies across deck 2's last two cells while it is out.
+
+- **A pad fires on the PRESS, not on the release.** A hot cue is a jump: on real gear the
+  pad acts the moment it goes down. `hc_feed()` therefore answers the cell on the up→down
+  edge that lands on one, and the release that follows answers `-1` — it is swallowed, never
+  fired, so a tap sends exactly one key. This is the operator's own correction of the first
+  build, 2026-10-07: *"it should trigger on the press not the release"*.
+- **The anchor is set on the up→down edge only.** A touch panel sends a *run* of down
+  reports while a finger is on the glass, so a second `down` is the same finger moving, not
+  a second press. Re-anchoring on it makes the anchor track the finger and fires whichever
+  pad it happened to be over when it lifted. A run fires **nothing** — the press it belongs
+  to already did, and a second fire per finger is the double-trigger the edge rule prevents.
+  `test_hc.c` pins both halves: a run of downs answers `-1`, and a mutation that lets the
+  release fire is caught by five named checks.
+- **A drag across the row fires the cell it STARTED on and not the one it reached.** The
+  press fires pad 1 on the way down; the report over pad 2 is a run and fires nothing; the
+  lift over pad 2 fires nothing. That is why the anchor is taken from the up→down edge's own
+  coordinates.
+- **A gesture that begins off the grid is rbp's for its whole life**, including a slide that
+  crosses the pads: it is never adopted.
+- **A press this module took keeps its release wherever it lands** — including after rbp has
+  left the performance screen under the finger. The screen is re-read on every report, so
+  the press gate is `hc_latched() || (on the performance screen && nothing else up)`; without
+  the `hc_latched()` term rbp would be handed an up for a down it never saw
+  (`declined-press-must-still-see-release`).
+- **Never silent.** A qualifying press logs the deck, the pad, the keycode and the channel;
+  a refused one logs the deck, the pad and all three gate values. A tap that did nothing
+  because the pad is empty and a tap that did nothing because a read failed are the same
+  pixels, and telling them apart is the whole of what the operator would want to know.
+
+### The switch
+
+`POINT_HOTCUE_TOUCH` (default on) gives the row back to rbp: the zone is not fed at all and
+a latch left holding a press is dropped at startup. It is in `start-rb.sh`'s `SHIM_VARS`, so
+`rb.conf` can set it as `RB_POINT_HOTCUE_TOUCH`. It is **not** gated on `POINT_MENU`, for
+`POINT_FX_TOUCH`'s reason: these are rbp's own pads rather than a shim surface, so an
+operator who turns the band off still gets them.
+
+### What is measured, and what is not
+
+**The swallow was measured first, and this time the run carried a positive control that
+fired.** With the shim doing nothing, `work/tap.py` writing records straight into rbp's own
+pipe, all **sixteen** cells — both decks, both rows — were tapped:
+
+| | px changed |
+|---|---|
+| rbp's own `◈ INFO` (logical 1211,25) — **the control** | **549,690** open, **549,254** shut |
+| all 16 pad cells | **416** — the idle blinker, i.e. no response |
+
+The 416 px is the four small red marks at x 32..725, y 605..625 that toggle on their own, so
+a run showing only those has shown nothing. The control's number matches the 549,706 px
+`docs/07-touch.md` already records for that tap. rbp binds nothing to the pad row, so
+withholding these reports costs the operator nothing — the same evidence the BEAT FX zone
+rests on, with a control that this time actually moved.
+
+**Note for anyone re-running it:** `tap.py` writes **wire** coordinates, and rbp reflects x.
+`tscfake_wire_x(x) = 1279 - x`, so a tap aimed at logical x must be fed `1279 - x`; the
+control above is fed `x=68` for logical 1211. Every early pad tap in this drill landed on the
+mirror of the intended point until that was noticed.
+
+`test_hc.c` is **374 checks**, linking the production `hc_zone.c`: all eight combinations of
+the three gate terms, with the dangerous direction named in the message (`AN EMPTY PAD FIRED
+-- this creates a hot cue on the operator's track`); all eight keycodes against rbp's own
+arithmetic; the sixteen cells tiling their two spans exactly, with no overlap and no
+double-counted gutter; every cell centre mapping back to its own deck and pad, and the
+gutter, the deck gap, the label row, the row gap and both margins rejecting; **the press
+firing and the release NOT firing, so a tap is exactly one key**; a run of downs firing
+nothing a second time; a press that began elsewhere never adopted; a drag between two pads
+firing only the one it started on; a release after a slide-off not firing; a later press
+re-anchoring only after a release. All 374 pass on the host and the whole suite passes
+unchanged.
+
+**Mutation-verified, seven ways**, each caught: `registered >= 0` (1 failure), a keycode off
+by one (25), the "began elsewhere" guard dropped (2), a re-anchor on every down (3), the
+wrong column pitch (10), **the press not answering the cell — the old release-firing build
+(8, every one naming the press rule)**, and **the release firing as well as the press (5,
+`the RELEASE fired a pad -- a tap must fire once, on the press` first)**.
+
+**What no machine here settles:** the pad-number ↔ cell mapping and the polarity of the
+registration read both need a **track with hot cues on it**, which is the operator's own
+media on the operator's own unit. Everything in this section that could be settled without
+one has been.
+
+**AND THE MACHINE HALF IS DONE — 2026-10-07, with the finished build loaded and the FLX4
+off the bus (this feature needs only the panel).** Three taps injected into the panel's own
+evdev node (`work/poke.py`, which runs the whole chain — kernel → `pointsrc` → the rung),
+aimed at logical (85,527), (85,558) and (1196,558):
+
+```
+pointsrc: hot cue deck1 pad1 -> nothing sent (mode 1 pad mode 0 registered 0)
+pointsrc: hot cue deck1 pad5 -> nothing sent (mode 1 pad mode 0 registered 0)
+pointsrc: hot cue deck2 pad8 -> nothing sent (mode 1 pad mode 0 registered 0)
+```
+
+**Four things settled at once, and the log line is what settles them.** The rung is
+reachable (the line exists at all — a wrong rectangle would produce no line); the
+cell→pad mapping is right in **both rows** (row 2 names pad 5, not pad 1, which is the
+`row*4+col+1` offset doing its job) and **both decks**; the browse mode reads 1 (the
+performance screen) and the pad mode reads 0 (HOT CUE); and **the registration gate refused
+all three, with nothing sent** — no keycode on the wire and no cue on the track. The last
+one is the dangerous direction demonstrated closed on the unit rather than only in a test.
+
+**Then the mode read was proved to be LIVE rather than a constant.**
+`seqinject2 --dest 128:0 note 0 30 1` — deck 1's pad mode to AUTO BEAT LOOP through the
+shim's own sequencer, so the panel heard no press — moved the log's field to
+`pad mode 1`, and note 27 moved it back to `0`. **A trap for the next person: the shim's
+injection port is `128:0`, not `128:1`** — the port names read backwards
+(`rbp-knob2-in` is the one the outside world *writes* to) and `128:1` answers
+`SUBSCRIBE … Operation not permitted`, which looks like a permission problem and is not.
+
+**The press-not-release rule was then settled at the wire, and by a run that the old build
+could not have passed.** A tap logs one line whichever edge fires it, so the three taps
+above do not on their own separate the two. The decisive run is a **press with no release
+at all** (`work/poke.py`'s `press:` verb):
+
+```
+press:127,753   ->  pointsrc: hot cue deck1 pad5 -> nothing sent (mode 1 pad mode 0 registered 0)
+release         ->  (no line)
+```
+
+The line appears **at the press**, and the `release` that follows logs **nothing** — which
+is exactly the behaviour the first, release-firing build could not produce.
+
+What was left was the **positive**: a pad that *has* a cue, firing. That needs a track
+with hot cues, and loading or cueing one is the operator's own media — which is also why
+this drill could not simply make one. **The operator ran it on their own cue-bearing
+track, 2026-10-07, and their verdict is the feature's close: *"yep it works"*** — a lit pad
+jumps its cue **on the press**, under the finger, and an empty pad does nothing and creates
+nothing.
 
 ## Required files
 

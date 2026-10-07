@@ -22,8 +22,15 @@
 #include "util_zone.h"
 #include "wave_zone.h"
 #include "prompt_zone.h"
+#include "fx_zone.h"
+#include "fxpad_zone.h"  /* the BPM cell's momentary X/Y pad -- the operator's ask of
+                          * 2026-10-07; fxpad_zone.h carries the rectangle, the two
+                          * wire forms and the momentary restore */
+#include "hc_zone.h"
 #include "syscalls.h"
 #include "envutil.h"
+#include "usb_label.h"   /* what a media device's name may contain -- the same rules
+                          * knobshim writes into rbp's own device record with */
 
 /* The one rbp thing this file knows: the keycode a QUANTIZE tap becomes, and
  * how to send it. rbp_key.h is a leaf (rbp_abi.h and libc, nothing more), which
@@ -203,6 +210,16 @@ static int  quantize_enabled = 1;
  * two never overlap. With it on they can, and they self-heal against each other
  * at the cost of a flickering arrow inside the panel -- see docs/07-touch.md. */
 static int  menu_enabled = 1;
+/* The BEAT FX panel's three taps (fx_zone.h), their own switch and NOT POINT_MENU's: they
+ * are rbp's own drawing rather than a shim surface, so an operator who turns the band
+ * off may still want a finger on the FX panel to work -- and one who wants the panel left
+ * entirely to rbp sets POINT_FX_TOUCH=0 and gets exactly that. */
+static int  fx_touch = 1;
+/* The HOT CUE pad row (hc_zone.h), its own switch for fx_touch's reason: it is rbp's own
+ * drawing rather than a shim surface, and an operator who wants only the panel left alone
+ * sets POINT_HOTCUE_TOUCH=0 and gets exactly that. Off means the sixteen reports this
+ * module would have taken go to rbp untouched, byte for byte. */
+static int  hc_touch = 1;
 static int  menu_mouse = 0;
 
 /* The buttons' keycodes, in menu_zone.c's column order: the first six are rbp's own
@@ -714,7 +731,8 @@ static void menu_fire(int button, int held_ms)
      * "when you have USB stop, put up a prompt for USB1, USB2 or Cancel"
      * (2026-10-05). The far right of the band used to stop the operator's stick on
      * one tap, and the stick is production media whose FAT already carries damage
-     * (docs/10-usb.md); now the eject takes a second, aimed tap.
+     * (docs/10-usb.md); now the eject takes a three-second hold on a lit button
+     * (the operator's ask of 2026-10-07, prompt_zone.h).
      *
      * THE TEST IS BY KEYCODE AND NOT BY COLUMN, which is the same choice
      * menu_key_needs_repeat() makes and for the same reason: POINT_MENU_KEY_EXTRA
@@ -733,11 +751,27 @@ static void menu_fire(int button, int held_ms)
         struct prompt_state S;
 
         pointsrc_usb_state(&S);
+        /* And the Beat FX picker goes away if it was up. The funnel's own ladder already
+         * keeps the chooser from being raised UNDER the picker -- it is asked first, so a
+         * tap that would open the picker while the chooser is up is the chooser's -- but
+         * this path is a KEYCODE and not a tap, so it arrives with the picker possibly
+         * still on the glass. Both boxes are centred and both are opaque, so leaving the
+         * two up would show one through the other. Closing here rather than hiding a
+         * plane in menu_draw.c is the honest fix: there is one box at a time, and this is
+         * the line that says so. */
+        if (fxlist_is_open()) {
+            fxlist_close();
+            pointsrc_log("pointsrc: the USB STOP chooser displaces the Beat FX picker");
+        }
         prompt_open(shim_now_ms());
-        pointsrc_log("pointsrc: menu '%s' -> the USB STOP chooser (usb 1 %s,"
-                     " usb 2 %s)", label,
+        /* The two labels are the ones the buttons will READ, word for word, so a drill's
+         * log says which stick each button offered without a screenshot of the glass. */
+        pointsrc_log("pointsrc: menu '%s' -> the USB STOP chooser (usb 1 %s '%s',"
+                     " usb 2 %s '%s')", label,
                      S.live[0] ? "ready" : "absent",
-                     S.live[1] ? "ready" : "absent");
+                     prompt_cell_text(&S, PR_CELL_USB1),
+                     S.live[1] ? "ready" : "absent",
+                     prompt_cell_text(&S, PR_CELL_USB2));
         return;
     }
 
@@ -796,10 +830,54 @@ static void menu_fire(int button, int held_ms)
  *
  *     "when you have USB stop, put up a prompt for USB1, USB2 or Cancel"
  *
- * -- is answered by prompt_zone.c (the box, the rows, the gesture) and prompt_paint.c
- * (its image). This block is the other half: where rbp's answer about the two devices
- * is read, and what a chosen row actually sends.
+ * -- is answered by prompt_zone.c (the box, the rows, the gesture, the labels) and
+ * prompt_paint.c (its image). This block is the other half: where rbp's answer about the
+ * two devices is read, where each device's own NAME is read, and what a chosen row
+ * actually sends.
  * ------------------------------------------------------------------------- */
+
+/* One slot's device name, off the file the watcher leaves beside that slot's FIFO.
+ *
+ * THE FILE IS usb-watch.sh's -- `/tmp/udev_usbN.label`, written at attach with blkid's
+ * LABEL and removed at detach -- and it is the same string rbp's own SOURCE screen shows
+ * in its DEVICE NAME column, by the same route (docs/10-usb.md, section *The device
+ * name*). The chroot's /tmp IS the host's, which is how both reaches work.
+ *
+ * READ THROUGH THE RAW CALLS for the reason syscalls.h gives: rbp's own open/read are
+ * interposed by this same process. Absent, empty and whitespace-only are one answer --
+ * no name -- and prompt_state_name() then leaves the cell its own "HOLD USB n", which is
+ * byte for byte the label this box shipped with before names existed. There is no
+ * memoisation on purpose: a stick that goes away takes its name with it, and a stale name
+ * over an empty slot is worse than reading two small files again.
+ *
+ * NOT AN ERROR AND NOT LOGGED. This is asked on every tick of the builder's thread as
+ * well as from this one, so a line here would be the log-filling trap
+ * ([[rblive4-verbose-log-fills-tmpfs]]); what the box draws is the proof, and it says so
+ * in menu_draw.c's own verbose line. */
+static void usb_name_read(int dev, struct prompt_state *S)
+{
+    char path[64];
+    char raw[USB_LABEL_MAX + 1];
+    char text[USB_LABEL_MAX + 1];
+    int fd, n;
+
+    raw[0] = '\0';
+    snprintf(path, sizeof path, "/tmp/udev_usb%d.label", dev + 1);
+
+    fd = real_open(path, O_RDONLY, 0);
+    n = 0;
+    if (fd >= 0) {
+        n = (int)real_read(fd, raw, sizeof raw - 1);
+        real_close(fd);
+    }
+    if (n < 0)
+        n = 0;
+    else
+        raw[n] = '\0';
+
+    n = usb_label_sanitize(raw, n, text, USB_LABEL_MAX);
+    prompt_state_name(S, dev, n > 0 ? text : 0);
+}
 
 /* rbp's two UsbStorageManager objects, walked exactly the way
  * getUsbStorageManager() does (rbp_abi.h carries the disassembly).
@@ -815,6 +893,11 @@ static void menu_fire(int button, int held_ms)
  * devices absent, which draws both rows dim and sends nothing: a refusal, not an
  * assumption (prompt_zone.h).
  *
+ * THE TWO NAMES ARE FILLED FIRST, before any of the guards below, so every caller of
+ * this leaves with a struct that is filled in full whether or not rbp could be read --
+ * the names are the host's answer and have nothing to do with rbp's. A caller that
+ * cannot walk rbp still gets buttons that name the devices they are refusing.
+ *
  * PUBLIC (pointsrc.h) because the chooser's picture depends on it: a row whose
  * device rbp reports absent is drawn dim (prompt_paint.c), so menu_draw.c's builder
  * reads this too, on every build, and the answer it was read at is part of the
@@ -828,6 +911,8 @@ int pointsrc_usb_state(struct prompt_state *S)
 
     S->live[0] = 0;
     S->live[1] = 0;
+    for (i = 0; i < PROMPT_DEVICES; i++)
+        usb_name_read(i, S);
 
     if (am_rbp < 0)
         am_rbp = is_rbp_process();
@@ -842,8 +927,10 @@ int pointsrc_usb_state(struct prompt_state *S)
     if (!array || count < 1)
         return 0;
     /* This build has two; a larger count is not this binary and is not walked. Sized
-     * by PROMPT_DEVICES and not by the box's button count -- the box's second line is
-     * OK and CANCEL, so its rows are not devices (prompt_zone.h). */
+     * by PROMPT_DEVICES and not by the box's button count -- today's box has one button
+     * per device, but the two-line box it had until 2026-10-07 had OK and CANCEL under
+     * the devices, and a walk that grew with the buttons would have started reading
+     * managers that are not there (prompt_zone.h). */
     if (count > PROMPT_DEVICES)
         count = PROMPT_DEVICES;
 
@@ -873,8 +960,9 @@ int pointsrc_usb_state(struct prompt_state *S)
  * THE CHANNEL IS THE DEVICE'S OWN NUMBER and not CH_GLOBAL, for the reason
  * rbp_abi.h's USB_MGR_OFF_CHANNEL records: onKey drops any key whose channel byte
  * differs from the manager's own. prompt_act_channel() is what names it -- 1 for the
- * first row, 2 for the second, 0 for CANCEL -- and 0 sends nothing, which is the whole
- * of what Cancel is.
+ * left button, 2 for the right -- and it answers 0 for PR_ACT_NONE, which sends
+ * nothing: a box that stopped nothing sends nothing at all, which is what a release
+ * let go before its three seconds, and a press that missed, both are.
  *
  * Back to back, no sleep: one synthesized tap, exactly as menu_fire() sends its own.
  * A wait here would starve the one input loop the band, the window, the drawers and
@@ -886,6 +974,333 @@ static void usb_stop_send(int ch)
     send_rx_key(K_USBSTOP, OP_PRESS, ch, 0);
     send_rx_key(K_USBSTOP, OP_REPEAT, ch, 0);
     send_rx_key(K_USBSTOP, OP_RELEASE, ch, 0);
+}
+
+/* --- THE BEAT FX PANEL'S THREE CONTROLS, on their way to rbp -----------------
+ *
+ * WHY THEY ARE HERE. rbp's own `ui::touch_panel` family has no control that picks the
+ * effect, assigns its channel or powers it (fx_zone.h's header), so all three gestures
+ * exist only as keycodes -- and all three wire forms are ALREADY PROVEN in this tree by
+ * the FLX4, which is the whole reason this is wiring rather than discovery:
+ *
+ *   map_flx4.c:493    send_rx_key(K_BFXCH,   OP_VALUE, CH_GLOBAL, want)  <- the lever
+ *   map_flx4.c:520    send_rx_key(K_BFXTYPE, OP_VALUE, CH_GLOBAL, pos)   <- FX SELECT
+ *   map_flx4.c:1087   K_BFX, PRESS+RELEASE, CH_GLOBAL                    <- FX ON/OFF
+ *
+ * These are the same calls, raised from a finger on rbp's own drawing instead of from
+ * the controller. Back to back, NO SLEEP, like every other send in this file: a wait here
+ * would starve the one input loop the band, the window, the drawers and both popups share
+ * (docs/07-touch.md's TRAP 2). */
+static void fx_ch_send(int want)
+{
+    send_rx_key(K_BFXCH, OP_VALUE, CH_GLOBAL, want);
+}
+
+static void fx_type_send(int pos)
+{
+    send_rx_key(K_BFXTYPE, OP_VALUE, CH_GLOBAL, pos);
+}
+
+/* The Beat FX ON/OFF toggle, on the FLX4's own wire form: a PRESS then a RELEASE of
+ * K_BFX on CH_GLOBAL, which is exactly what the panel's FX ON/OFF button sends
+ * (map_flx4.c:1087 `add_note(CH_FXA, N_FX_ONOFF, K_BFX, CH_GLOBAL)`, pinned by
+ * test_flx4.c:506-509). So a tap on the effect-name cell is one toggle, whatever the
+ * operator's last toggle was -- rbp owns the on/off state, this shim keeps none, and the
+ * two cannot disagree. No value is carried: K_BFX is a keycode, not an absolute. */
+static void fx_power_send(void)
+{
+    send_rx_key(K_BFX, OP_PRESS,   CH_GLOBAL, 0);
+    send_rx_key(K_BFX, OP_RELEASE, CH_GLOBAL, 0);
+}
+
+/* Where BeatEffectManager sits inside MixerEngine, and where the selected channel sits
+ * inside THAT. rbp's own offsets, disassembled off work/rbp.nm.txt; they live here rather
+ * than in rbp_abi.h because this is the only place in the tree that walks them -- the
+ * two shims that already talk to Beat FX (map_flx4.c, map_jp21.c) do it through
+ * rbp_beatfx_type() in rbp_bridge.o, which fbshim.so does NOT link (Makefile:292). */
+#define FX_BEM_IN_MIXER 0x58        /* MixerEngine* -> BeatEffectManager* */
+#define FX_BEM_OFF_CH   0x00        /* BeatEffectManager* -> the select channel */
+
+/* WHAT rbp's Beat FX CH SELECT currently is, or -1 when it cannot be asked.
+ *
+ * A plain .bss word for the singleton, then ONE pointer chase -- so unlike rbp_i32()'s
+ * reads of uiBrowse the two interior words are NULL-checked, and a half-built or
+ * torn-down engine answers -1 rather than faulting. The chain, disassembled and then
+ * MEASURED on the unit 2026-10-06:
+ *
+ *   DjEngineIF::getBeatEffectSelectChannel @0x4d314
+ *     ldr r4,[pc] -> ME_SINGLETON (0x011493c0)
+ *     ldr r0,[r4] -> MixerEngine*
+ *     ldr r0,[r0,#0x58] -> BeatEffectManager*
+ *     ldr r0,[r0,#0x00] -> the channel      0 = deck 1, 1 = deck 2, 5 = MASTER
+ *
+ * Measured by driving the FLX4's OWN lever: CH1 -> 0, CH2 -> 1, MASTER -> 5, and back to
+ * 0 -- with `+0x04` (the NEXT word setBeatEffectSelectChannel writes) tracking it
+ * exactly, so `+0x00` does NOT lag and the cycle can trust what it reads.
+ *
+ * READING rbp BEATS KEEPING A CURSOR OF OUR OWN, which is the whole point of the chase:
+ * the FLX4's lever writes this same word, so a private cursor would desync the moment the
+ * operator touched the hardware. -1 is "not rbp, or not started, or torn down"; the caller
+ * answers it by starting at deck 1, rbp's measured cold-start default. */
+static int fx_ch_read(void)
+{
+    static int am_rbp = -1;
+    unsigned int mixer, bem;
+
+    if (am_rbp < 0)
+        am_rbp = is_rbp_process();
+    if (!am_rbp)
+        return -1;
+    mixer = *(volatile unsigned int *)(uintptr_t)ME_SINGLETON;
+    if (!mixer)
+        return -1;
+    bem = *(volatile unsigned int *)(uintptr_t)(mixer + FX_BEM_IN_MIXER);
+    if (!bem)
+        return -1;
+    return *(volatile int *)(uintptr_t)(bem + FX_BEM_OFF_CH);
+}
+
+/* ------------------------------------------- the Beat FX's own VALUES (fxpad)
+ *
+ * The chase one link further than fx_ch_read(): past BeatEffectManager's select channel
+ * and into the CURRENT BeatEffect, which is where the level, the rung and the on/off
+ * actually live. rbp_abi.h carries the whole disassembly and the values this was checked
+ * against on the unit; what matters here is the SHAPE, which is fx_ch_read()'s: a plain
+ * .bss word for the singleton, then three interior pointers, EACH NULL-CHECKED, so a
+ * half-built or torn-down engine answers 0 rather than faulting.
+ *
+ * THE TYPE WORD IS READ TOO, AND NOT AS DECORATION. `BeatEffect+0x3c` reads 1 on an
+ * effect that is switched off -- rbp then has a `BeatEffectOff` at +0x08, a class whose
+ * ON/OFF, level and time virtuals are all `bx lr`, so nothing maintains its flag. Reading
+ * the flag alone made the pad believe a dead effect was live and send no toggle at all,
+ * which is the operator's "when i switch an effect and then press the x/y pad it doesn't
+ * engage" of 2026-10-07. `BEM_OFF_TYPE` is rbp's own `getBeatEffectType()`, type 0 IS the
+ * off state (measured: one step of the effect selector while the effect is off leaves the
+ * type at 0 and flips +0x3c to 1), and fxpad_zone.c's `live_on()` owns the rule that joins
+ * the two words -- this function's job is only to hand both of them over, unchanged.
+ *
+ * A REFUSAL IS NOT A NUISANCE, IT IS THE PAD'S SAFETY PROPERTY. This read is what the
+ * momentary pad restores TO: a pad that cannot read the old level would put the effect
+ * back at a number it invented, on the operator's own track, mid-set. So a missing link
+ * refuses the whole read, and the caller refuses to engage.
+ *
+ * A REFUSAL NAMES THE LINK THAT FAILED. There was no line here at all until the operator
+ * reported a pad that did nothing, and the absence of a line is the worst possible
+ * evidence: "it never engaged", "it engaged and sent nothing" and "the shim was not
+ * running" all looked identical. The caller logs `why` on the way past. */
+static int fx_float_to_depth(float f)
+{
+    int d = (int)(f * (float)BFX_DEPTH_FULL + 0.5f);
+
+    if (d < 0)
+        d = 0;
+    if (d > BFX_DEPTH_FULL)
+        d = BFX_DEPTH_FULL;
+    return d;
+}
+
+static int fx_state_read_why(struct fxpad_live *out, const char **why)
+{
+    static int am_rbp = -1;
+    unsigned int mixer, bem, be;
+
+    if (why)
+        *why = "not asked";
+    if (!out) {
+        if (why) *why = "no out buffer";
+        return 0;
+    }
+    if (am_rbp < 0)
+        am_rbp = is_rbp_process();
+    if (!am_rbp) {
+        if (why) *why = "this process is not rbp";
+        return 0;
+    }
+    mixer = *(volatile unsigned int *)(uintptr_t)ME_SINGLETON;
+    if (!mixer) {
+        if (why) *why = "MixerEngine singleton is null";
+        return 0;
+    }
+    bem = *(volatile unsigned int *)(uintptr_t)(mixer + BEM_IN_MIXER);
+    if (!bem) {
+        if (why) *why = "MixerEngine+0x58 (BeatEffectManager) is null";
+        return 0;
+    }
+    be = *(volatile unsigned int *)(uintptr_t)(bem + BEM_OFF_EFFECT);
+    if (!be) {
+        if (why) *why = "BeatEffectManager+0x08 (the current effect) is null";
+        return 0;
+    }
+
+    out->type = *(volatile int *)(uintptr_t)(bem + BEM_OFF_TYPE);
+    out->on = *(volatile unsigned char *)(uintptr_t)(be + BE_OFF_ON) ? 1 : 0;
+    out->depth = fx_float_to_depth(*(volatile float *)(uintptr_t)(be + BE_OFF_DEPTH));
+    out->beat = *(volatile int *)(uintptr_t)(be + BE_OFF_BEAT);
+    out->beat_min = *(volatile int *)(uintptr_t)(be + BE_OFF_BEAT_MIN);
+    out->beat_max = *(volatile int *)(uintptr_t)(be + BE_OFF_BEAT_MAX);
+    if (why)
+        *why = 0;
+    return 1;
+}
+
+static int fx_state_read(struct fxpad_live *out)
+{
+    return fx_state_read_why(out, 0);
+}
+
+/* The two value sends the pad drives, each the SAME call the controller map already
+ * makes -- so nothing here is a wire form invented for the shim:
+ *
+ *   K_DEPTH    OP_VALUE, an absolute 10-bit value plus the normalised float. Exactly
+ *              what add_abs(CH_FXA, CC_FX_DEPTH, K_DEPTH, CH_GLOBAL) puts on the wire
+ *              when the FLX4's LEVEL/DEPTH knob turns (map_flx4.c:628).
+ *   K_BEAT*    OP_PRESS ONLY, with the delta in BOTH the param and the l argument,
+ *              exactly map_flx4.c:535. The op is not a style choice: rbp's asEventCode
+ *              gates 0x4490/0x4491 on (op & 0xf) == 0, so a RELEASE would be dropped
+ *              and a level that climbed one way could never climb back.
+ *
+ * Back to back and with NO SLEEP, like every other send in this file: a wait here would
+ * starve the one input loop the band, the window, the drawers and all three boxes share
+ * (docs/07-touch.md's TRAP 2). */
+static void fx_depth_send(int v)
+{
+    send_rx_key_f(K_DEPTH, OP_VALUE, CH_GLOBAL, (long)v,
+                  (float)v / (float)BFX_DEPTH_FULL);
+}
+
+static void fx_beat_step_send(int d)
+{
+    send_rx_key_fl(d > 0 ? K_BEATNEXT : K_BEATPREV, OP_PRESS, CH_GLOBAL,
+                   (long)d, 0.0f, (long)d);
+}
+
+/* deck 1 -> deck 2 -> MASTER -> deck 1, from whatever rbp says it is right now. The step
+ * is 0 -> 1 -> 5 -> 0, the order the operator asked for and the order rbp's own values
+ * run in. Anything rbp answers that is none of the three -- it cannot today, but another
+ * build could -- steps to deck 1 rather than inventing a value rbp has no meaning for. */
+static void fx_ch_cycle(void){
+    int cur = fx_ch_read();
+    int next;
+
+    if (cur < 0) {
+        pointsrc_log("pointsrc: beat fx ch unreadable -- starting the cycle at deck 1");
+        cur = 0;
+    }
+    next = (cur == 0) ? 1 : (cur == 1) ? BFX_CH_MASTER : 0;
+    fx_ch_send(next);
+    pointsrc_log("pointsrc: beat fx ch select %d -> %s", cur,
+                 next == 0 ? "deck 1" : next == 1 ? "deck 2" : "MASTER");
+}
+
+/* Is rbp on the performance screen, where these three controls are drawn? The gate
+ * wave_zone.c already uses -- rbp_abi.h's BROWSE_MODE_PLAY, measured 1 with the
+ * performance screen on the glass and 5 with INFO over it -- and it is re-read on EVERY
+ * report because rbp can leave the screen under a press that is already down. */
+static int rbp_perf_screen(void)
+{
+    static int am_rbp = -1;
+
+    if (am_rbp < 0)
+        am_rbp = is_rbp_process();
+    if (!am_rbp)
+        return 0;
+    return rbp_i32(UIBROWSE_GLOBAL + UIBROWSE_OFF_MODE) == BROWSE_MODE_PLAY;
+}
+
+/* ------------------------------------------------ the HOT CUE pad row (hc_zone.h)
+ *
+ * The operator's ask of 2026-10-06 -- a touch on a HOT CUE pad fires that pad's cue,
+ * and on a pad with no cue does NOTHING and creates nothing -- and the three reads it
+ * needs. hc_zone.c owns the geometry, the anchor and the rule; this owns rbp.
+ *
+ * THE MIDDLE READ IS THE WHOLE FEATURE. On real Pioneer gear an unlit HOT CUE pad
+ * STORES a cue at the playhead, so "fires when it should not" does not merely
+ * disappoint -- it writes a cue onto the operator's own track, mid-set. Every read
+ * below therefore answers its FAILURE as "no": a pad mode that cannot be read is -1, a
+ * registration that cannot be asked is 0, and hc_may_fire() refuses on both. */
+
+/* rbp's per-deck pad mode, straight out of the walk UiGetPadMode @0xfd3cc performs --
+ * rbp_abi.h's UI_PADMODE_* block carries the derivation and the measurement behind it
+ * (0 HOT CUE, 1 AUTO BEAT LOOP, 2 SLIP BEAT LOOP, 3 BEAT JUMP). -1 when any link of the
+ * chain is missing, which hc_may_fire() reads as "not HOT CUE".
+ *
+ * IT IS READ RATHER THAN ASSUMED because rbp's eight pad keycodes mean whatever the
+ * CURRENT mode makes them mean: K_PAD1+p triggers a cue in HOT CUE and engages a beat
+ * loop in AUTO BEAT LOOP, so a tap on a drawn pad in the wrong mode is a beat loop the
+ * operator never asked for. */
+static int hc_pad_mode(int deck)
+{
+    long h  = (long)rbp_i32(UI_PADMODE_HOLDER_GLOBAL);
+    long sw, pd;
+
+    if (!h)
+        return -1;
+    sw = (long)rbp_i32((unsigned long)h + PADMODE_STATWATCHER_OFF);
+    if (!sw)
+        return -1;
+    pd = (long)rbp_i32((unsigned long)sw + (deck ? PADMODE_DECK2_OFF
+                                                 : PADMODE_DECK1_OFF));
+    if (!pd)
+        return -1;
+    return rbp_i32((unsigned long)pd + PADMODE_BYTE_OFF) & 0xff;
+}
+
+/* Is a hot cue registered on this pad? rbp's own question, asked of rbp's own engine.
+ *
+ * THE CALL IS DIRECT BECAUSE THERE IS NOTHING TO CHASE: djengine::DjEngineIF::
+ * isRegisteredHotCue @0x48b00 saves r1 and r2 and RELOADS r0 from its own singleton
+ * (`ldr r6,[pc,#152]` then `ldr r0,[r6]`, at 48b08/48b10), so the `this` argument is
+ * dead and NULL is passed because nothing is ever read from it. What it forwards to
+ * playengine::PlayEngine::isRegisteredHotCue is the channel -- the 0-BASED deck index,
+ * which is what rbp passes -- and the PAD NUMBER 1..8, not an index (rbp_abi.h's
+ * ADDR_ENGINE_IS_REGHOTCUE carries the derivation). rbp_bridge.c's hotcue_delete() has
+ * been making this same call on this same address since 2026-10-01.
+ *
+ * 0 IS THE ANSWER THAT DOES NOTHING, and every failure answers it: not rbp, no track
+ * loaded, no engine built yet. hc_may_fire() reads it as "empty pad". */
+static int hc_registered(int deck, int pad)
+{
+    static int am_rbp = -1;
+
+    if (am_rbp < 0)
+        am_rbp = is_rbp_process();
+    if (!am_rbp)
+        return 0;
+    return ((int (*)(void *, int, int))ADDR_ENGINE_IS_REGHOTCUE)(NULL, deck, pad);
+}
+
+/* A qualifying release on a pad cell: the rule, and the line that says which way it
+ * went. NEVER SILENT -- a tap that did nothing because the pad is empty and a tap that
+ * did nothing because a read failed are the same pixels, and telling them apart is the
+ * whole of what the operator would want to know.
+ *
+ * THE SEND IS map_flx4.c's AND aloop_apply()'s: one press edge and one release edge,
+ * back to back, on rbp's own channel for the deck -- which is what keeps deck 1's tap
+ * from being deck 2's cue. */
+static void hc_fire(int deck, int pad)
+{
+    static int am_rbp = -1;
+    int mode, pm, reg;
+
+    /* The guard is here as well as in hc_registered() because this reads rbp's browse
+     * mode and its pad mode too, and it is reached from a LATCHED press -- which is
+     * deliberately not gated on the performance screen, so the release still lands
+     * after rbp has left it. Outside rbp nothing is read and the gates see -1. */
+    if (am_rbp < 0)
+        am_rbp = is_rbp_process();
+    mode = am_rbp ? rbp_i32(UIBROWSE_GLOBAL + UIBROWSE_OFF_MODE) : -1;
+    pm = am_rbp ? hc_pad_mode(deck) : -1;
+    reg = (pm == HC_PAD_MODE_HOT) ? hc_registered(deck, pad) : 0;
+
+    if (!hc_may_fire(mode, pm, reg)) {
+        pointsrc_log("pointsrc: hot cue deck%d pad%d -> nothing sent "
+                     "(mode %d pad mode %d registered %d)", deck + 1, pad, mode, pm, reg);
+        return;
+    }
+    pointsrc_log("pointsrc: hot cue deck%d pad%d -> key %#x ch%d", deck + 1, pad,
+                 hc_pad_keycode(pad), deck + 1);
+    send_rx_key(hc_pad_keycode(pad), OP_PRESS, deck + 1, 0);
+    send_rx_key(hc_pad_keycode(pad), OP_RELEASE, deck + 1, 0);
 }
 
 /* The drawers' keys and fader, on their way to rbp.
@@ -1386,29 +1801,72 @@ static void pointer_report(int down, int x, int y, int allow_menu, int held_ms)
      * answer is the whole point of the two device buttons and a stop the operator
      * starts elsewhere is exactly the change the box should show.
      *
-     * THE ARMING IS LOGGED, which is why the selection is read around the feed rather
-     * than after it. A tap on a device button sends nothing and answers nothing, so
-     * without this line the one report the operator is most likely to try first --
-     * "does tapping USB 1 do anything?" -- would leave no trace at all, and the drill
-     * would be reading a silence for an answer. */
+     * EVERY WAY A HOLD CAN END IS LOGGED, which is what makes the drill readable. The
+     * eject is logged with the milliseconds it was actually held, because "held 3020 ms"
+     * is the line that says a finger crossed the threshold rather than the tick's own
+     * slice; an early release is logged with its (shorter) duration, because the absence
+     * of an eject line is otherwise the same evidence as "the box never opened"; and a
+     * finger that leaves the button it was holding on is logged for the same reason,
+     * since that rule -- the anchor does not resume -- is invisible on the glass.
+     *
+     * THE CLOSE LAST, and it is the one line that cannot say WHY. By the time the release
+     * arrives the box has no memory of the press either way: the release that dismisses a
+     * box nobody pressed into and the release that puts away a box whose hold just fired
+     * are the same report through the same path (prompt_zone.c's fire branch disowns the
+     * press precisely so that they can be). It is logged as the fact and not as a verdict,
+     * and the line above it says which of the two it was. */
     if (prompt_is_open()) {
         struct prompt_state ps;
         int pact = PR_ACT_NONE;
-        int was_armed = prompt_selected();
+        int held_cell = prompt_hold_cell();
+        unsigned long long now = shim_now_ms();
+        unsigned long long held = prompt_hold_ms(now);
 
         pointsrc_usb_state(&ps);
-        if (prompt_feed(&ps, down, x, y, &pact) != MZ_FEED_NONE) {
-            int now_armed = prompt_selected();
-
-            if (now_armed != was_armed && now_armed)
-                pointsrc_log("pointsrc: usb stop chooser -> %s armed (ok stops it)",
-                             now_armed == PR_CELL_USB1 ? "usb 1" : "usb 2");
+        if (prompt_feed(&ps, down, x, y, now, &pact) != MZ_FEED_NONE) {
             if (pact != PR_ACT_NONE) {
                 int ch = prompt_act_channel(pact);
 
-                pointsrc_log("pointsrc: usb stop chooser -> %s (channel %d)",
-                             ch == 1 ? "usb 1" : ch == 2 ? "usb 2" : "cancel", ch);
+                pointsrc_log("pointsrc: usb stop chooser -> usb %d held %llu ms"
+                             " (hold is %d ms) -> eject (channel %d)",
+                             ch, held, PR_HOLD_MS, ch);
                 usb_stop_send(ch);
+            } else if (!down && held_cell) {
+                pointsrc_log("pointsrc: usb stop chooser -> usb %d released after"
+                             " %llu ms (hold is %d ms) -> nothing",
+                             held_cell, held, PR_HOLD_MS);
+            } else if (down && held_cell && !prompt_hold_cell()) {
+                pointsrc_log("pointsrc: usb stop chooser -> usb %d left the button"
+                             " after %llu ms -> the hold is off",
+                             held_cell, held);
+            } else if (!prompt_is_open()) {
+                pointsrc_log("pointsrc: usb stop chooser closed");
+            }
+            return;
+        }
+    }
+
+    /* THE EFFECT PICKER, beside the USB chooser and for the same reason: while the box is
+     * up it owns every report (fx_zone.h), so a finger that dismisses it must not also
+     * press whatever the performance screen has underneath it. Ungated on `allow_menu`,
+     * like the chooser: the box can only be up if its knob was on when it was raised, and
+     * the POINT_FX_TOUCH=0 path calls fxlist_reset() beside menu_reset().
+     *
+     * A ROW IS SENT AS THE SWITCH POSITION rbp's own effect selector takes -- the same
+     * call the FLX4's FX SELECT button makes (map_flx4.c:520) -- and the word the operator
+     * saw on the row is fx_zone.c's measured table. A release that answered nothing (a
+     * miss, a slide, a tap on the title) is logged as a dismissal, because "the box closed
+     * and nothing happened" is otherwise indistinguishable from "the tap never landed". */
+    if (fxlist_is_open()) {
+        int pos = -1;
+
+        if (fxlist_feed(down, x, y, &pos) != MZ_FEED_NONE) {
+            if (pos >= 0) {
+                fx_type_send(pos);
+                pointsrc_log("pointsrc: beat fx picker -> type position %d (%s)",
+                             pos, fxlist_row_label(pos + 1));
+            } else {
+                pointsrc_log("pointsrc: beat fx picker dismissed");
             }
             return;
         }
@@ -1440,6 +1898,135 @@ static void pointer_report(int down, int x, int y, int allow_menu, int held_ms)
     /* After the one call that can change it and before any of the three ways out, so
      * an open and the key it produced land on consecutive lines. */
     side_log_transitions();
+
+    /* THE BEAT FX PANEL'S THREE TAPS, after every shim surface and before rbp's own screen
+     * -- the same rung the UTILITY gesture sits on and for the same reason: these are
+     * controls rbp PAINTS, so every surface drawn over them must get first refusal. The
+     * three rects are the header bar (x 1090..1269, y 57..85) and the two inset boxes
+     * (x 1100..1259, at y 98..137 and y 168..203), which the right-hand drawer
+     * (x 1100..1279, full height) covers completely while it is out, and which the band's
+     * panel is drawn across -- so an open surface of any kind wins, by the rectangle it
+     * already owns through side_feed_any() and by the explicit gates here.
+     *
+     * NOT GATED ON `allow_menu` and not gated on the drawer being shut for its own sake:
+     * POINT_FX_TOUCH is these three controls' own switch, and a press that misses all three
+     * rects is handed straight back, so rbp's stream is untouched everywhere else.
+     *
+     * THE MODE IS RE-READ HERE rather than cached at the start of the gesture: rbp can
+     * leave the performance screen under a press that is already down, and a swallowed
+     * press on a screen that no longer has the panel is a control firing on nothing. */
+    if (verdict == MZ_FEED_NONE && fx_touch && rbp_perf_screen() &&
+        !menu_window_is_open() && !menu_is_open() && !side_any_open()) {
+        int fact = FX_ACT_NONE;
+
+        if (fx_feed(down, x, y, &fact) != MZ_FEED_NONE) {
+            if (fact == FX_ACT_CH) {
+                fx_ch_cycle();
+            } else if (fact == FX_ACT_PICK) {
+                fxlist_open(shim_now_ms());
+                pointsrc_log("pointsrc: beat fx picker raised (%d rows)",
+                             FXLIST_ROWS);
+            } else if (fact == FX_ACT_POWER) {
+                /* Fires on the PRESS (fx_zone.h), so this line appears as the finger
+                 * goes down. It names the SEND and not the resulting state: the shim
+                 * does not read rbp's enable word -- there is no measured one, the type
+                 * word +0x50 was already measured dead -- and it does not need to, since
+                 * the toggle is rbp's own. */
+                fx_power_send();
+                pointsrc_log("pointsrc: beat fx power toggle sent");
+            }
+            return;
+        }
+    }
+
+    /* THE BPM CELL AS A MOMENTARY X/Y PAD, on the same rung as the three taps above and
+     * for the same reasons: the cell is rbp's own drawing, so every shim surface gets
+     * first refusal (the explicit gates), the mode is re-read here rather than cached
+     * (rbp can leave the performance screen under a press that is already down), and it
+     * is NOT gated on `allow_menu` -- POINT_FX_TOUCH is this panel's own switch.
+     *
+     * THE READ IS THE GATE, AND ONLY ON A PRESS. A pad that cannot read the level and
+     * the rung it would have to put back must not engage at all, or it restores the
+     * effect to a number it invented -- on the operator's own track, mid-set. A pad that
+     * is ALREADY engaged keeps owning its gesture wherever the finger goes, read or no
+     * read, because a press this module swallowed has been withheld from rbp for its
+     * whole life and must see its own release (declined-press-must-still-see-release).
+     *
+     * THE PICKER AND THE CHOSER ARE GATED OUT TOO (`!fxlist_is_open() && !prompt_is_open()`),
+     * which the three taps above do not need: those are one-shot, while this pad owns a
+     * gesture for as long as a finger is down, so a box raised by a second finger, or by
+     * the band, must never have a pad engaged underneath it. */
+    if (verdict == MZ_FEED_NONE && fx_touch &&
+        (fxpad_busy() || (rbp_perf_screen() && !menu_window_is_open() &&
+                          !menu_is_open() && !side_any_open() &&
+                          !fxlist_is_open() && !prompt_is_open()))) {
+        struct fxpad_live fl;
+        const char *why = 0;
+        int may = 1;
+
+        if (!fxpad_engaged())
+            may = fx_state_read_why(&fl, &why);
+        if (!may && down && !fxpad_engaged() && fxpad_hit(x, y)) {
+            /* THE REFUSAL, NAMED. There was no line here at all until 2026-10-07, and
+             * that absence is what made the operator's "it doesn't engage" take a whole
+             * session to place: a pad that never engaged, a pad that engaged and sent
+             * nothing, and a shim that was not running were all the same silence. This
+             * fires only on a press that WOULD have engaged -- a press inside the cell,
+             * with nothing already down -- so a release, a miss and a drag across the
+             * panel cost nothing. */
+            pointsrc_log("pointsrc: beat fx pad refused at (%d,%d) -- %s", x, y, why);
+        }
+        if (may || fxpad_engaged()) {
+            int was = fxpad_engaged();
+
+            if (fxpad_feed(down, x, y) != MZ_FEED_NONE) {
+                if (!was && fxpad_engaged()) {
+                    /* The snapshot is taken on the first TICK, not here, so this line
+                     * names what the pad is about to take away -- which is the thing a
+                     * drill needs to compare the restore against.
+                     *
+                     * THE TYPE IS ON THE LINE BECAUSE IT DECIDES WHAT `effect` MEANS.
+                     * `+0x3c` reads 1 on a switched-off effect (rbp_abi.h, nine states),
+                     * so `type 0` here is the fingerprint of the state that used to
+                     * leave the pad sending nothing at all: the flag says on, the class
+                     * is `BeatEffectOff`, and every control the pad drives is a no-op. */
+                    pointsrc_log("pointsrc: beat fx pad engaged at (%d,%d) -- type %d,"
+                                 " effect %s, level %d/%d, rung %d of %d..%d",
+                                 x, y, fl.type, fxpad_live_on(&fl) ? "on" : "off",
+                                 fl.depth, BFX_DEPTH_FULL,
+                                 fl.beat, fl.beat_min, fl.beat_max);
+                }
+                return;
+            }
+        }
+    }
+
+    /* THE HOT CUE PAD ROW, on the same rung as the BEAT FX panel's three controls and for     * the same reason: these sixteen cells are pads rbp PAINTS, so every surface drawn
+     * over them gets first refusal -- and the right-hand drawer (x 1100..1279, full
+     * height) lies across deck 2's last two cells while it is out.
+     *
+     * NOT GATED ON `allow_menu`, because POINT_HOTCUE_TOUCH is this row's own switch
+     * (the FX rung makes the same choice): these are rbp's own pads, not a shim surface,
+     * so an operator who turns the band off still gets them. A report that misses every
+     * cell comes back MZ_FEED_NONE and reaches rbp untouched, byte for byte.
+     *
+     * THE PRESS IS GATED ON THE PERFORMANCE SCREEN; THE RELEASE IS NOT. rbp can leave
+     * that screen under a finger that is already down -- the FX rung's comment says the
+     * same of its own rects -- and a press this module took has been withheld from rbp
+     * for its whole life, so its release must reach the latch wherever it lands or rbp is
+     * handed an up for a down it never saw. hc_latched() is that term, and hc_feed()
+     * refuses the release of a gesture that began off the grid on its own. */
+    if (verdict == MZ_FEED_NONE && hc_touch &&
+        (hc_latched() || (rbp_perf_screen() && !menu_window_is_open() &&
+                          !menu_is_open() && !side_any_open()))) {
+        int hdeck = -1, hpad = 0;
+
+        if (hc_feed(down, x, y, &hdeck, &hpad) != MZ_FEED_NONE) {
+            if (hdeck >= 0)
+                hc_fire(hdeck, hpad);
+            return;
+        }
+    }
 
     /* AND LAST, rbp's OWN UTILITY SCREEN -- the operator's *"only do this in this
      * menu"*. It is asked after the three shipped surfaces rather than before them,
@@ -1534,7 +2121,16 @@ static void pointer_report_alt(int down, const struct point_xform *x, int rx, in
 
     if (!menu_enabled)
         return;
-    if (prompt_is_open() || menu_window_is_open())
+    /* The picker joins the chooser here: both own every report while they are up, so a
+     * second contact must not reach a drawer underneath one -- and a second finger on a
+     * drawer while a box is over the glass is a hand the operator did not aim with.
+     *
+     * THE BPM CELL'S PAD JOINS THEM for the same reason, and it is the one surface here
+     * that owns the glass for as long as a finger is DOWN rather than while a box is up:
+     * the right-hand drawer's entry column runs the full height of the cell's own panel,
+     * so a second finger landing there while the pad is engaged would open a drawer drawn
+     * straight over the pad the operator is still dragging. */
+    if (prompt_is_open() || fxlist_is_open() || menu_window_is_open() || fxpad_busy())
         return;
 
     point_xform_abs(x, rx, ry, &lx, &ly);
@@ -1623,14 +2219,32 @@ static void read_loop_abs(int fd, const struct point_xform *x)
          * shut -- is answered by the blocking read exactly as before. */
         /* THE CHOOSER'S OWN CLOCK, and the reason it is here rather than in a thread
          * of its own: the box has to be able to go away with nobody touching anything,
-         * and this loop otherwise wakes only on an event. Waiting in slices keeps the
-         * touch thread the ONE writer of the prompt's state, exactly as the hold block
-         * below does -- menu_draw.c only ever reads it.
+         * AND a hold has to be able to fire with nobody touching anything -- the whole
+         * point of a three-second hold is that the finger does not move, so there is no
+         * further report to wake this loop on. Waiting in slices keeps the touch thread
+         * the ONE writer of the prompt's state, exactly as the hold block below does --
+         * menu_draw.c only ever reads it.
          *
-         * prompt_expire() refuses while a finger is down, so this cannot hand rbp a
-         * release with no press behind it (prompt_zone.c). */
+         * prompt_tick() refuses the timeout while a finger is down, so this cannot hand
+         * rbp a release with no press behind it (prompt_zone.c). It is also the only
+         * caller of it: the tick is the module's single time entry point precisely so
+         * that the eject and the blink cannot come to disagree about the clock. */
         if (prompt_is_open()) {
-            if (prompt_expire(shim_now_ms())) {
+            struct prompt_state ps;
+            int pact = PR_ACT_NONE;
+            unsigned long long held = prompt_hold_ms(shim_now_ms());
+            int ev;
+
+            pointsrc_usb_state(&ps);
+            ev = prompt_tick(&ps, shim_now_ms(), &pact);
+            if (ev == PR_TICK_EJECT) {
+                int ch = prompt_act_channel(pact);
+
+                pointsrc_log("pointsrc: usb stop chooser -> usb %d held %llu ms"
+                             " (hold is %d ms) -> eject (channel %d)",
+                             ch, held, PR_HOLD_MS, ch);
+                usb_stop_send(ch);
+            } else if (ev == PR_TICK_TIMEOUT) {
                 pointsrc_log("pointsrc: usb stop chooser timed out after %d ms",
                              PR_TIMEOUT_MS);
             } else {
@@ -1641,6 +2255,92 @@ static void read_loop_abs(int fd, const struct point_xform *x)
                 p.revents = 0;
                 if (real_poll(&p, 1, POINT_MENU_HOLD_TICK_MS) == 0)
                     continue;        /* still up: look at the clock again */
+            }
+        }
+
+        /* THE PICKER'S OWN CLOCK, the same shape one block up and for the same reasons:
+         * a box that covers rbp's pad rows has to be able to go away with nobody touching
+         * anything, and this loop otherwise wakes only on an event. fxlist_expire() refuses
+         * while a finger is down, so this cannot hand rbp a release with no press behind
+         * it (fx_zone.h). */
+        if (fxlist_is_open()) {
+            if (fxlist_expire(shim_now_ms())) {
+                pointsrc_log("pointsrc: beat fx picker timed out after %d ms",
+                             FX_TIMEOUT_MS);
+            } else {
+                struct pollfd p;
+
+                p.fd = fd;
+                p.events = POLLIN;
+                p.revents = 0;
+                if (real_poll(&p, 1, POINT_MENU_HOLD_TICK_MS) == 0)
+                    continue;        /* still up: look at the clock again */
+            }
+        }
+
+        /* THE PAD'S OWN TICK, the fourth of its kind and the same shape as the two above.
+         * It is here, and not in a thread, for two reasons that are the whole design of
+         * the momentary pad:
+         *
+         *   - A FINGER HELD STILL has no report to wake this loop on, and the beat ladder
+         *     is climbed one rung per tick ON RBP'S OWN ANSWER -- so without this the
+         *     pad would move the level and then sit there.
+         *   - THE RELEASE IS THE LAST REPORT THERE IS, and rbp applies keys
+         *     asynchronously, so the unwind that puts the effect back can only be driven
+         *     by a loop that keeps running after the finger is gone.
+         *
+         * fxpad_tick() is the module's single time entry point, exactly as prompt_tick()
+         * and fxlist_expire() are for the two boxes, and it is the only writer of the
+         * pad's state -- menu_draw.c only ever reads it.
+         *
+         * A READ THAT FAILS MID-GESTURE ticks nothing and is NOT logged here: rbp can be
+         * mid-teardown for a tick or two, and the state machine is holding the targets
+         * already. The pad stays busy, so the moment the chase answers again it carries
+         * on to where it was going. */
+        if (fxpad_busy()) {
+            struct fxpad_live fl;
+
+            if (fx_state_read(&fl)) {
+                struct fxpad_out fo;
+
+                fxpad_tick(&fl, &fo);
+                if (fo.want_on >= 0) {
+                    fx_power_send();
+                    pointsrc_log("pointsrc: beat fx pad -> effect %s",
+                                 fo.want_on ? "on" : "off");
+                }
+                if (fo.depth >= 0) {
+                    fx_depth_send(fo.depth);
+                    pointsrc_log("pointsrc: beat fx pad -> level %d/%d",
+                                 fo.depth, BFX_DEPTH_FULL);
+                }
+                if (fo.beat_step) {
+                    fx_beat_step_send(fo.beat_step);
+                    pointsrc_log("pointsrc: beat fx pad -> rung %s from %d",
+                                 fo.beat_step > 0 ? "up" : "down", fl.beat);
+                }
+                if (!fxpad_busy()) {
+                    /* THE RESTORE'S WITNESS, read fresh rather than reusing the values
+                     * the tick above worked from: this is the line a drill compares with
+                     * the "engaged at" line, so it has to be rbp's answer and not the
+                     * shim's intent. */
+                    struct fxpad_live fin;
+
+                    if (fx_state_read(&fin))
+                        pointsrc_log("pointsrc: beat fx pad unwound -- effect %s,"
+                                     " level %d/%d, rung %d",
+                                     fin.on ? "on" : "off", fin.depth,
+                                     BFX_DEPTH_FULL, fin.beat);
+                }
+            }
+            {
+                struct pollfd p;
+
+                p.fd = fd;
+                p.events = POLLIN;
+                p.revents = 0;
+                if (real_poll(&p, 1, POINT_MENU_HOLD_TICK_MS) == 0)
+                    continue;        /* still engaged or still unwinding */
             }
         }
 
@@ -1974,6 +2674,25 @@ static void *reader_thread(void *arg)
          * cannot be dismissed at all -- every press is swallowed while it is up --
          * and its deadline would close it with a press that never came. */
         prompt_reset();
+        /* ...and the BEAT FX panel's three controls. Both halves, because their failures
+         * are the chooser's: a picker left up by a finger that went away with the device
+         * cannot be dismissed at all -- every press is swallowed while it is up -- and its
+         * deadline would close it with a press that never came; and a zone latch left
+         * holding a press would make the next press look like a continuation of it. */
+        fx_reset();
+        fxlist_reset();
+        /* ...and the BPM cell's momentary pad, whose failure is the zone half twice over:
+         * a pad left engaged by a finger that went away with the device would keep this
+         * loop ticking forever, and -- worse -- the restore it is holding is the only
+         * thing that knows where the effect's level and rung BELONGED, so dropping the
+         * gesture without dropping it would leave rbp's effect wherever the finger last
+         * put it. */
+        fxpad_reset();
+        /* ...and the HOT CUE pad row's latch, which has the zone half of that failure and
+         * not the picker half: a latched press would make the next press look like a
+         * continuation of a gesture whose beginning rbp never saw, so the release that
+         * follows would fire a pad the operator never aimed at. */
+        hc_reset();
         /* ...and the bend, which is the one piece of drawer state rbp holds rather
          * than this process: the finger went away without a release, so no STOP edge
          * will ever be delivered and the track would keep sliding. */
@@ -1990,6 +2709,11 @@ int pointsrc_start(void)
     quantize_enabled = env_flag("POINT_QUANTIZE_TAP", 1);
     menu_enabled = env_flag("POINT_MENU", 1);
     menu_mouse = env_flag("POINT_MENU_MOUSE", 0);
+    fx_touch = env_flag("POINT_FX_TOUCH", 1);
+    /* The HOT CUE pad row's own switch, for fx_touch's reason: it is rbp's own drawing
+     * rather than a shim surface. Off means rbp's stream is untouched at those sixteen
+     * cells, byte for byte. */
+    hc_touch = env_flag("POINT_HOTCUE_TOUCH", 1);
     /* menu_key_eff is built even when the menu is off, so the log states the
      * table it would use rather than staying silent about a knob that was set. */
     menu_keys_init();
@@ -2017,6 +2741,25 @@ int pointsrc_start(void)
                             * band's own seventh column: with the band off there is
                             * no way to raise it, and a box left up from a state
                             * before would swallow every report in the file */
+    if (!fx_touch) {
+        /* And the Beat FX panel's three controls, which are rbp's drawing rather than a
+         * shim surface and so have their OWN switch: with POINT_FX_TOUCH=0 the panel
+         * belongs to rbp entirely, and a picker left up from a state before would
+         * swallow every report in the file -- the same failure the chooser's line above
+         * names, one surface over. */
+        fx_reset();
+        fxlist_reset();
+        fxpad_reset();     /* ...and the BPM cell's pad, which is rbp's drawing too and so
+                            * shares this switch rather than POINT_MENU's: an engagement
+                            * left from a run where the panel was live would keep the loop
+                            * ticking and hold the only copy of where the effect belonged */
+    }
+    if (!hc_touch)
+        hc_reset();        /* and the HOT CUE pad row, which is also rbp's own drawing and
+                            * so shares this shape rather than POINT_MENU's: a latch left
+                            * holding a press from a run where the row was live would make
+                            * the next press look like a continuation, and fire a pad the
+                            * operator never aimed at */
 
     if (reader_started)
         return 0;

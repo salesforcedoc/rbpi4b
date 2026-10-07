@@ -594,6 +594,74 @@ sends them (-1 = halve, +1 = double). SHIFT + TIME works too.
 
 so they are sent with **OP_PRESS**.
 
+#### The ladder and the level, read back off the unit (2026-10-07)
+
+The four wire forms above were **sent on the unit and read back** out of
+`/proc/<pid>/mem`, through rbp's `BeatEffect` object
+([07](07-touch.md#rbps-own-values-read-not-inferred)):
+
+```
+K_DEPTH  OP_VALUE  CH_GLOBAL  v  v/1023.0f
+  cc 100 -> BeatEffect+0x20 = 0.7879   (806/1023)      <- ABSOLUTE
+  cc  20 -> BeatEffect+0x20 = 0.1574   (161/1023)          one send lands it,
+                                                           one send restores it
+
+K_BEATNEXT (0x4491) / K_BEATPREV (0x4490)  OP_PRESS  d = +1 / -1
+  rung +0x44:  5 -> 6 -> 7   and   7 -> 6              <- direction MEASURED,
+                                                          one rung per press
+```
+
+**`K_DEPTH` is an absolute 10-bit value, not a delta** — the whole `0..1023`
+comes down the one arg, so no cursor and no feedback loop. **`K_BEAT*` is
+`OP_PRESS`-only and a step** — see the gate above; it is a single rung, so a
+held button needs one send per rung.
+
+The fourth wire form, `K_BFX`, is the odd one out and is deliberately **not** in
+that table: it is a **toggle**, not a value and not a step, so there is no
+value to send and no way to ask for a state. A caller that needs the effect to
+be *on* -- the momentary pad does, because a level moved on a switched-off
+effect is inaudible -- must therefore **read the effect's state back and ask
+again while it disagrees**, bounded, rather than latch what it asked for. That
+distinction is the whole of the fix in
+[07](07-touch.md#the-press-that-did-not-trigger-and-the-loop-it-bought); a
+one-shot toggle and no toggle are the same thing from the caller's side, and
+the operator's *"it doesn't seem to remember to trigger when i press until i
+turn it on off"* is what told the two apart.
+
+**And the state to read back is TWO words, because one of them lies.** Measured
+on the unit 2026-10-07, after the operator's second report that the pad *"doesn't
+engage"* on a freshly switched effect:
+
+```
+BeatEffectManager +0x50            +0x08 -> BeatEffect*      +0x3c
+  getBeatEffectType() @0x89acc       the current object       isBeatEffectOn() @0x89964
+  ldr r0,[r0,#80]                    (null-checked)           ldrb r0,[r3,#60]
+     0   = the Off state                 BeatEffectPingPong        0   <- a real class, off
+     0   = the Off state                 BeatEffectOff            1   <- NOT RUNNING
+  after ONE FX SELECT press while the effect is off:
+     0                                   BeatEffectOff            1
+```
+
+`BeatEffectOff` has every control the pad drives compiled out --
+`changeEffectStatusToOn` @0x8b0b8, `changeEffectStatusToOff` @0x8b0b4,
+`changeLevelDepthValue` @0x8b0ac and `changeTimeValue` @0x8b0b0 are each a bare
+`bx lr` -- so nothing maintains its `+0x3c` and it reads **1** on an effect that
+is doing nothing. The pad believed the flag, agreed with itself and sent
+nothing at all, which is *"it doesn't engage"*. The fix is the **conjunction**
+`+0x50 != 0 && +0x3c != 0` (`fxpad_zone.c`'s `live_on()`); the wire is unchanged.
+Note it is a conjunction and not an equivalence: a **cold-started rbp** also
+reads type 0, but with a stale *real* object at `+0x08` whose own class maintains
+the flag, and that row correctly reads 0. `rbp_abi.h` carries the table.
+
+`+0x44` is an **index into a halving/doubling ladder**, not a count:
+`5 = "1 BEAT"`, `6 = "2 BEAT"`, `7 = "4 BEAT"`, with `+0x48`/`+0x4c` = 9/0 the
+ends. **rbp recomputes the millisecond figure itself** — the same cell went
+`480 msec / 1 BEAT → 960 / 2 BEAT → 1920 / 4 BEAT` at 125.0 BPM — so `+0x24`
+is rbp's own derived value and anything drawn over that cell must copy it
+rather than compute a second copy. The index is also **not** the position the
+hardware button shows: a real BEAT button and an injected key move the same
+rung, and the panel repaints from the struct either way.
+
 ### Beat-loop knob — experimental
 
 The RX3 has no beat-loop knob (its pads trigger loops). The SC Live 4 knob is
@@ -1066,7 +1134,7 @@ pull the USB as it might continue to corrupt the USB stick"*.
 
 | | |
 |---|---|
-| **Keycode** | `0x8002` `K_USBSTOP`, `CH_GLOBAL` (channel 1) |
+| **Keycode** | `0x8002` `K_USBSTOP` — `CH_GLOBAL` is USB 1's number (1) by coincidence; the chooser sends the **chosen device's own channel**, because the handler drops a key whose channel is not its own |
 | **Reached by** | `UsbStorageManager::onKey` (entry **[2]** of the live handler table) → `ui::UsbStorageManager::onUsbStopKey` @ `0x325788` |
 | **Sent as** | **press + repeat + release**, back to back |
 
@@ -1153,6 +1221,25 @@ bit 7 of `[+0x3d0]`), not to the fd table.
 not a caveat about the implementation, it is the feature — it exists so the operator
 never has to pull live media — but it is worth saying plainly in the docs because
 every other column of that panel is safe to press.
+
+**And since 2026-10-05 the column does not send the stop at all.** It *raises a
+chooser* ([07](07-touch.md#the-seventh-column-raises-a-chooser-prompt_zonec-prompt_paintc)),
+and the eject leaves on the **chosen device's own channel** — `usb_stop_send(ch)` in
+`pointsrc.c`, channel 1 for USB 1 and 2 for USB 2. That channel is not decoration:
+`UsbStorageManager::onKey` @ `0x3259f4` drops a key whose channel is not its own, so the
+old `CH_GLOBAL` spelling could only ever have reached the first device.
+**Since 2026-10-07 it also takes a three-second hold** — the box puts up `HOLD USB 1` and
+`HOLD USB 2` (or the stick's own volume label in place of the number, since that day —
+[10](10-usb.md)), lit for a device rbp reports present; the press flashes the button, a hold
+of 3000 ms or more stops that device, and a release before the third second does **nothing
+at all**. So the two `menu 'USB STOP' tapped (button 7) -> key 0x8002` lines above are the
+pre-2026-10-05 build; the log reads `pointsrc: menu 'USB STOP' -> the USB STOP chooser
+(usb 1 ready 'HOLD RBOX USB', …)` when the box comes up, and then on a completed hold
+`pointsrc: usb stop chooser -> usb 1 held 3120 ms (hold is 3000 ms) -> eject (channel 1)`.
+Everything else in this section — the three edges, the press-mutes/repeat-ejects split,
+the `20 s` replug cycle, and that the button stops rbp's media without releasing the host
+mount — is unchanged and still the reason the column exists
+([10](10-usb.md#notes)).
 
 ## The edge drawers' transports, sync, nudge and fader — keycodes rbp already has
 

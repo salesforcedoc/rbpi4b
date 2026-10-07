@@ -71,6 +71,12 @@ stick → kernel usb-storage → usb-watch.sh mounts /opt/rblive4/media/usb1/sda
       → source list shows the drive, categories populate natively
 ```
 
+A **second** stick takes the same route a slot over: the first candidate in
+`/sys/block` order that actually carries an export is USB 1, the next is USB 2,
+onto `/opt/rblive4/media/usb2/sda1` → `/media/usb2/sda1` → `/tmp/udev_usb2`. rbp
+holds one `ui::UsbStorageManager` per channel, so both are separate devices and
+the band's USB STOP chooser can eject either one on its own channel.
+
 **Loading + playing a track**
 
 ```

@@ -23,14 +23,23 @@
 #include "prompt_zone.h"     /* PR_* geometry, struct prompt_state, PROMPT_ROWS */
 
 /* Is this view something prompt_paint() can draw into? The box has a title, a rule
- * and two rows of PR_ROW_H logical px, each of which has to host the font's line box
+ * and one row of PR_ROW_H logical px, which has to host the font's line box
  * (menu_font.h's MENU_FONT_LINE) after scaling, or the labels collide with the frames
- * -- and each of the four buttons has to be wide enough to hold its own label WHOLE,
- * which is a second, independent refusal because a button is half a row wide now and
- * the narrowest page this shim supports scales the box down with it. A view that
+ * -- and each of the two buttons has to be wide enough to hold ITS CELL'S OWN LABEL
+ * WHOLE, which is a second, independent refusal because a button is only half the row
+ * wide and the narrowest page this shim supports scales the box down with it. A view that
  * fails either is refused here rather than drawn as a smear -- menu_paint.h's
  * menu_view_ok() answers the same two questions for the band (menu_labels_fit()),
- * and side_paint.h's side_paint_ok() for the drawer. */
+ * and side_paint.h's side_paint_ok() for the drawer.
+ *
+ * THE WIDTH REFUSAL IS ABOUT THE CELL, NOT ABOUT THE NAME. A button reads
+ * "HOLD <the device's own name>" when its stick has one (prompt_zone.h), and a name is
+ * both longer than the cell's default label and the operator's to choose -- so it is CUT
+ * TO FIT at paint time rather than refused. What is refused here is a cell too narrow for
+ * a button to be legible on at all, measured against the label every cell is guaranteed
+ * to have. A state-dependent refusal would be worse than useless on this route: the
+ * caller asks this once and paints only if it answers yes, so a long name would take the
+ * whole box off the glass. */
 int prompt_paint_ok(const struct menu_view *v);
 
 /* The box's size in framebuffer pixels for a page of dw x dh -- the size the plane
@@ -41,27 +50,26 @@ int prompt_paint_h(int page_dh);
 
 /* Draw the box into `v`.
  *
- *   S             rbp's answer about the two devices (prompt_zone.h); a cell with
- *                 nothing to do is drawn in the palette's two OFF classes.
+ *   S             rbp's answer about the two devices AND what the host calls them
+ *                 (prompt_zone.h): a cell whose device rbp reports absent is drawn in
+ *                 the palette's two OFF classes, and a cell whose device has a name of
+ *                 its own wears that name, cut to fit the button (prompt_text_clip()).
  *   pressed_cell  the cell under the finger, 1..PROMPT_CELLS, or 0 -- prompt_pressed(),
  *                 which is menu_pressed()'s question asked of this module.
- *   selected_cell the cell the operator has armed, or 0 -- prompt_selected(), which is
- *                 the one question this box has that the band does not.
+ *   flash_cell    the lit half of a running hold's blink, or 0 -- prompt_hold_cell() when
+ *                 prompt_hold_flash() is 1. It wears the SAME pressed pair, which is the
+ *                 whole of the flash: the button alternates between that pair and its
+ *                 normal live face every PR_HOLD_FLASH_MS until the hold fires.
  *
- * A pressed cell is never an off cell: prompt_zone.c answers a dead cell with
- * PR_ACT_NONE but it still highlights it while the finger is on it, because a finger
- * that gets no feedback at all reads as a dead panel rather than as a refused button.
- * The highlight here is therefore the ordinary pressed pair for every cell.
- *
- * AN ARMED CELL WEARS THE SAME PRESSED PAIR, deliberately. The palette has no third
- * button state, and "lit up like the one you are touching" is the clearest available
- * way to say "this is the one OK would stop". The two coincide while the arming tap
- * is still down and are otherwise on different cells, so the reading is never
- * ambiguous where it matters -- on the device buttons -- and the answers below them
- * are never armed at all.
+ * A pressed cell is never an off cell: prompt_zone.c starts no hold on a dim button but
+ * a finger on one still highlights it, because a finger that gets no feedback at all
+ * reads as a dead panel rather than as a refused button. The highlight here is
+ * therefore the ordinary pressed pair for every cell, and a cell is drawn pressed when
+ * it is the finger's OR the flash's -- the two are never the same cell, which is what
+ * gives the blink somewhere to blink to (prompt_zone.c's prompt_pressed()).
  *
  * Every pixel of the view is written. Does nothing when prompt_paint_ok() is 0. */
 void prompt_paint(const struct menu_view *v, const struct prompt_state *S,
-                  int pressed_cell, int selected_cell);
+                  int pressed_cell, int flash_cell);
 
 #endif /* RBPI4B_PROMPT_PAINT_H */

@@ -1491,6 +1491,105 @@ static void test_two_hands(void)
     side_reset_all();
 }
 
+/* The columns a string's ink really reaches, read from the atlas itself: walk the pens
+ * with menu_font_adv() -- what every painter steps -- and for each glyph take the first
+ * and last column that carries any coverage.
+ *
+ * BOTH ENDS MUST COME FROM THE COVERAGE, not from the glyph's metrics. A glyph's ink
+ * begins at its `left` bearing (signed, and not zero for the thinned Decker bake: Decker
+ * Bold's 'l' is 11 px of ink at -1) and ends at `left + w - 1` BEFORE the thinning --
+ * lighten() thins each glyph a sixth of a pixel a side and the bake says outright that
+ * "the outermost pixels of the box are allowed to fall to zero", so the last inked
+ * column can be short of the box. A `left`-blind oracle would read every label 1-2 px
+ * wrong and call a correct painter broken. */
+static void ink_extent(const char *s, int pen, int *lo, int *hi)
+{
+    int k, col, row, first = 1;
+
+    *lo = *hi = 0;
+    for (k = 0; s[k]; k++) {
+        const struct menu_glyph *g = menu_font_glyph((unsigned char)s[k]);
+
+        for (col = 0; col < (int)g->w; col++) {
+            int hit = 0;
+
+            for (row = 0; row < (int)g->h && !hit; row++)
+                hit = menu_font_cov(g, col, row) != 0;
+            if (!hit)
+                continue;
+            if (first) {
+                *lo = *hi = pen + g->left + col;
+                first = 0;
+            } else if (pen + g->left + col > *hi) {
+                *hi = pen + g->left + col;
+            }
+        }
+        pen += menu_font_adv((unsigned char)s[k], (unsigned char)s[k + 1]);
+    }
+}
+
+/* THE DRAWER'S LABEL IS LAID DOWN BY THE PENS THE ATLAS MEASURES.
+ *
+ * The width sp_text_center() CENTRES with (menu_text_width) and the pens sp_text()
+ * steps have to be the same numbers, and nothing else in this file can see a
+ * disagreement: the drawer has no classifier to fall out with, so a walk that stepped
+ * something else would draw a slightly different word, off its centre by however much
+ * it got wrong -- invisible in a test that checks marks by name.
+ *
+ * The INK WIDTH is the tooth, and it needs no copy of sp_x()'s mirror: the extent from
+ * the first inked column to the last is a pure function of the string and the atlas --
+ * the pen's origin, and the mirror, both cancel out. On a bake whose pair table is live
+ * it also says WHICH walk was used, because the two answer differently at every kerned
+ * pair; on the shipped Decker bake the table is all zero (MENU_FONT_KERNED 0), so what
+ * it pins there is the pen arithmetic itself -- that a glyph is followed by its own
+ * advance, and that the last glyph's ink is not counted as an advance. The scan stays
+ * inside the frame (sp_frame is 2 px) so it measures the label and not the box, and the
+ * button face is MENU_BTN, which is not the bed. */
+static void test_paint_label_pens(void)
+{
+    static const struct { int ly0, ly1; const char *s; } labels[] = {
+        { SZ_SYNC_Y0, SZ_SYNC_Y1, "SYNC" },
+        { SZ_CUE_Y0,  SZ_CUE_Y1,  "CUE"  },
+        { SZ_PLAY_Y0, SZ_PLAY_Y1, "PLAY" }
+    };
+    int side, i;
+
+    for (side = 0; side < 2; side++) {
+        struct menu_view v = mkview(180, 800);
+
+        for (i = 0; i < 3; i++) {
+            const char *s = labels[i].s;
+            unsigned int face = menu_pixel(16, MENU_BTN);
+            int dx0, dx1, minx = 99999, maxx = -1, x, y, ix0, ix1, want;
+
+            ink_extent(s, 0, &ix0, &ix1);
+            want = ix1 - ix0 + 1;
+
+            dx0 = devx(180, side == SZ_LEFT ? SZ_BTN_X0 : SZ_W - 1 - SZ_BTN_X1);
+            dx1 = devx(180, side == SZ_LEFT ? SZ_BTN_X1 : SZ_W - 1 - SZ_BTN_X0);
+            dx0 += 2;                       /* inside sp_frame's 2 px */
+            dx1 -= 2;
+
+            fill(0xa5a5u, 180, 800);
+            side_paint(&v, side, 0, 512);
+
+            for (y = labels[i].ly0 + 2; y <= labels[i].ly1 - 2; y++)
+                for (x = dx0; x <= dx1; x++)
+                    if (fb[y * 180 + x] != face) {
+                        if (x < minx) minx = x;
+                        if (x > maxx) maxx = x;
+                    }
+            CHECK(maxx >= 0, "side %d: %s drew no ink at all", side, s);
+            if (maxx < 0)
+                continue;
+            CHECK(maxx - minx + 1 == want,
+                  "side %d: %s is %d px wide where the atlas's own advances make it %d"
+                  " -- a walk that is not stepping menu_font_adv()",
+                  side, s, maxx - minx + 1, want);
+        }
+    }
+}
+
 int main(void)
 {
     test_geometry();
@@ -1512,6 +1611,7 @@ int main(void)
     test_paint_mirror();
     test_paint_fader_cap();
     test_paint_signs();
+    test_paint_label_pens();
 
     printf("%s: %d checks, %d failures\n", failures ? "FAIL" : "ok", checks, failures);
     return failures ? 1 : 0;

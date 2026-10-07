@@ -173,7 +173,18 @@ static int find_surface(int *in_c, int *in_p, int *out_c, int *out_p,
      return found_in;
 }
 
-static int subscribe_in(int c, int p)
+/* What one subscribe attempt found.
+ *
+ * SUB_ALREADY is not a failure and is the whole point of this being three-valued.
+ * The kernel refuses a second identical subscription with EBUSY, so a subscribe
+ * call is also a *question* -- "is the subscription I believe I have still
+ * there?" -- and that question is the one the cached client:port cannot answer.
+ * Measured on the unit 2026-10-06: a duplicate subscribe returns EBUSY and leaves
+ * the existing connection untouched (`aconnect` reports "Connection is already
+ * subscribed"). */
+enum sub_result { SUB_FAILED = 0, SUB_ALREADY, SUB_NEW };
+
+static enum sub_result subscribe_in(int c, int p)
 {
      struct snd_seq_port_subscribe sub;
 
@@ -183,15 +194,16 @@ static int subscribe_in(int c, int p)
      sub.dest.client = seq_client;
      sub.dest.port = in_port;
      sub.queue = SNDRV_SEQ_QUEUE_DIRECT;
-     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) < 0) {
-          klog("knobshim2: subscribe %d:%d -> %d:%d (input) failed: %s\n",
-               c, p, seq_client, in_port, strerror(errno));
-          return -1;
-     }
-     return 0;
+     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) == 0)
+          return SUB_NEW;
+     if (errno == EBUSY)
+          return SUB_ALREADY;
+     klog("knobshim2: subscribe %d:%d -> %d:%d (input) failed: %s\n",
+          c, p, seq_client, in_port, strerror(errno));
+     return SUB_FAILED;
 }
 
-static int subscribe_out(int c, int p)
+static enum sub_result subscribe_out(int c, int p)
 {
      struct snd_seq_port_subscribe sub;
 
@@ -201,12 +213,13 @@ static int subscribe_out(int c, int p)
      sub.dest.client = c;
      sub.dest.port = p;
      sub.queue = SNDRV_SEQ_QUEUE_DIRECT;
-     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) < 0) {
-          klog("knobshim2: subscribe %d:%d -> %d:%d (output) failed: %s\n",
-               seq_client, out_port, c, p, strerror(errno));
-          return -1;
-     }
-     return 0;
+     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) == 0)
+          return SUB_NEW;
+     if (errno == EBUSY)
+          return SUB_ALREADY;
+     klog("knobshim2: subscribe %d:%d -> %d:%d (output) failed: %s\n",
+          seq_client, out_port, c, p, strerror(errno));
+     return SUB_FAILED;
 }
 
 /* The port name of the surface we are subscribed to, or "" when there is none.
@@ -253,13 +266,29 @@ static void open_raw_out(void)
           "no rawmidi node)\n");
 }
 
-/* One attempt at connecting to the surface. Cheap and idempotent: it does
- * nothing when nothing changed, which is what lets the read loop call it once a
- * second forever. */
+/* One attempt at connecting to the surface. Cheap and idempotent: on a healthy
+ * system both calls come back SUB_ALREADY and nothing changes, which is what lets
+ * the read loop call it once a second forever.
+ *
+ * It is called whenever the surface is *found*, and deliberately not only when
+ * its client:port numbers changed. Those numbers cannot tell a live subscription
+ * from one the kernel has already torn down: ALSA hands out the lowest free client
+ * id, so a controller that leaves and comes back -- a re-enumeration, a cable
+ * glitch -- is handed 28:0 again, the cache still matches, no subscribe is issued,
+ * and the shim goes on believing it is connected while the kernel has destroyed
+ * the subscription with the old client. Every LED and meter write then goes into
+ * a port nobody is listening on, and `midi_out_ready()` still says yes, so nothing
+ * says so. Measured on the unit 2026-10-06: two sub-second re-enumerations left the
+ * controller deaf until rbp was restarted, while a 33-minute absence recovered by
+ * itself -- the long one is sampled absent at least once, the short one is not.
+ *
+ * So the subscribe call is issued every time and EBUSY is read as the answer to
+ * "is it still there?" rather than as an error. */
 static void midi_connect_try(void)
 {
      int in_c, in_p, out_c, out_p;
      char in_name[64], out_name[64];
+     enum sub_result r;
 
      if (!find_surface(&in_c, &in_p, &out_c, &out_p, in_name, out_name)) {
           if (sub_in_client >= 0) {
@@ -273,19 +302,33 @@ static void midi_connect_try(void)
           }
           return;
      }
-     if (in_c != sub_in_client || in_p != sub_in_port) {
-          if (subscribe_in(in_c, in_p) < 0)
-               return;
+
+     r = subscribe_in(in_c, in_p);
+     if (r == SUB_FAILED)
+          return;
+     if (r == SUB_NEW) {
+          if (sub_in_client >= 0)
+               klog("knobshim2: control surface: RE-subscribed to %d:%d '%s' -- "
+                    "the old subscription was gone\n", in_c, in_p, in_name);
+          else
+               klog("knobshim2: control surface: subscribed to %d:%d '%s' "
+                    "(match '%s')\n", in_c, in_p, in_name, in_match);
           sub_in_client = in_c;
           sub_in_port = in_p;
-          klog("knobshim2: control surface: subscribed to %d:%d '%s' "
-               "(match '%s')\n", in_c, in_p, in_name, in_match);
      }
-     if (out_c >= 0 && (out_c != sub_out_client || out_p != sub_out_port) &&
-         subscribe_out(out_c, out_p) == 0) {
-          sub_out_client = out_c;
-          sub_out_port = out_p;
-          route_sequencer(out_name);
+
+     if (out_c >= 0) {
+          r = subscribe_out(out_c, out_p);
+          /* SUB_ALREADY with the route not on the sequencer is not "nothing to
+           * do": the subscription is live but we are talking to a rawmidi node,
+           * or to nothing at all. The sequencer route is the preferred one, so
+           * take it. Repeating this is stable -- route_sequencer() leaves
+           * out_route at ROUTE_SEQ, and the next round then finds nothing to do. */
+          if (r == SUB_NEW || (r == SUB_ALREADY && out_route != ROUTE_SEQ)) {
+               sub_out_client = out_c;
+               sub_out_port = out_p;
+               route_sequencer(out_name);
+          }
      }
 }
 

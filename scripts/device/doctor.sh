@@ -428,12 +428,17 @@ if [ -d "$RB_CHROOT" ]; then
 	fi
 fi
 
-if [ -p /tmp/udev_usb1 ]; then
-	ok "/tmp/udev_usb1 FIFO present (this is how rbp hears about the stick)"
-else
-	bad "/tmp/udev_usb1 is missing or not a FIFO — rbp will never see the media"
-	fix "sh $RB_DEPLOY_ROOT/fix-dev.sh"
-fi
+# Both slots have their own FIFO: rbp opens all four (the two mount ones and the
+# two it must never be sent "connect" on) at startup, and a missing one means that
+# slot can never be told anything.
+for _f in 1 2; do
+	if [ -p "/tmp/udev_usb$_f" ]; then
+		ok "/tmp/udev_usb$_f FIFO present (this is how rbp hears about slot $_f)"
+	else
+		bad "/tmp/udev_usb$_f is missing or not a FIFO — rbp will never see slot $_f's media"
+		fix "sh $RB_DEPLOY_ROOT/fix-dev.sh"
+	fi
+done
 
 # --- 7. the service, and what is ACTUALLY running ---------------------------
 
@@ -504,21 +509,34 @@ fi
 # --- 8. the media -----------------------------------------------------------
 
 hdr 8 "media"
-if is_mount "$MNT"; then
-	ok "stick mounted host-side: $MNT"
-else
-	note "no stick mounted at $MNT (normal if nothing is plugged in)"
-fi
-if is_mount "$CH_MNT"; then
-	ok "bound into the chroot: $CH_MNT (rbp's view of the media)"
-else
-	if is_mount "$MNT"; then
-		bad "$MNT is mounted but $CH_MNT is not — rbp cannot see the stick"
+# Both slots, derived the same way usb-watch.sh derives them (usb-watch.sh:59-69).
+# rbp has two media devices and either may be empty, so an empty slot is not a
+# fault on its own; a slot that is mounted but not bound is.
+media_check() {
+	mslot=$1
+	if [ "$mslot" = 2 ]; then
+		mmnt="${RB_MEDIA_MOUNT2:-$RB_DEPLOY_ROOT/media/usb2}/sda1"
+		mchmnt="$RB_CHROOT${RB_CHROOT_MEDIA2:-/media/usb2/sda1}"
+	else
+		mmnt="$MNT"
+		mchmnt="$CH_MNT"
+	fi
+	if is_mount "$mmnt"; then
+		ok "slot $mslot stick mounted host-side: $mmnt"
+	else
+		note "slot $mslot: nothing mounted at $mmnt (normal if nothing is plugged in)"
+	fi
+	if is_mount "$mchmnt"; then
+		ok "slot $mslot bound into the chroot: $mchmnt (rbp's view of the media)"
+	elif is_mount "$mmnt"; then
+		bad "slot $mslot: $mmnt is mounted but $mchmnt is not — rbp cannot see the stick"
 		fix "sh $RB_DEPLOY_ROOT/usb-watch.sh   # it owns both mounts"
 	else
-		note "not bound (nothing to bind)"
+		note "slot $mslot: not bound (nothing to bind)"
 	fi
-fi
+}
+media_check 1
+media_check 2
 
 # --- 9. the controller table ------------------------------------------------
 

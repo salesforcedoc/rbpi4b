@@ -549,7 +549,8 @@ it is stated where the operator will meet it (`07-touch.md`).
 
 Which surface owns which plane is legible from the log without any pixels at all,
 because `drm_band_setup()` prints the geometry it was asked for: `1280x56` is the band,
-`180x800` is a drawer, `560x271` is the USB STOP chooser's box, and the browser window
+`180x800` is a drawer, `560x127` is the USB STOP chooser's box (it was `560x271`
+until the box went to two buttons on 2026-10-07), and the browser window
 has its own size. A handover prints the old surface's teardown, the new one's setup, and
 a line naming the direction (`side: a drawer is out -- the plane is handed over from the
 band`). Measured on the unit with both drawers out: **two distinct plane ids on the same

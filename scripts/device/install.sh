@@ -92,7 +92,8 @@ fi
 CHROOT="${RB_CHROOT:-$DEPLOY/rbx3-run}"
 LOG_DIR="${RB_LOG_DIR:-$DEPLOY/log}"
 
-mkdir -p "$LOG_DIR" "${RB_MEDIA_MOUNT:-$DEPLOY/media/usb1}"
+mkdir -p "$LOG_DIR" "${RB_MEDIA_MOUNT:-$DEPLOY/media/usb1}" \
+                   "${RB_MEDIA_MOUNT2:-$DEPLOY/media/usb2}"
 
 # Untarring over an existing tree upgrades in place but never *removes*
 # anything, so a deploy root that has ever received a tarball built on a

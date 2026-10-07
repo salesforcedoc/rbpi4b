@@ -103,6 +103,17 @@ fader_state.o: fader_state.c rbp_vu.h
 rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 	$(CC) $(CFLAGS) -fvisibility=hidden -c -o $@ $<
 
+# usb_label.o is the THIRD object both libraries link, and for a third reason:
+# knobshim writes a device's name into rbp's own record with it, and fbshim draws the
+# same name on the USB STOP chooser's buttons (pointsrc.c reads the file, prompt_zone.c
+# composes the label from it). Each library gets its own copy and neither needs the
+# other's -- but the copy has to be hidden, so it is a member of CTRL_OBJS and there is
+# NO rule here for it: the static pattern rule over CTRL_OBJS below is the one that
+# builds it, with -fvisibility=hidden, and make builds a target once. A rule of its own
+# here would be a second recipe for the same target -- which make warns about and
+# silently resolves to the pattern rule anyway. Same reasoning as rbp_key.o's rule
+# above, except that rbp_key.o is outside CTRL_OBJS and so does need its own.
+
 # knobshim.so: the control surface, split into modules.
 #
 #   ctrlshim.o   the front end: environment, map selection, the threads, and the
@@ -130,6 +141,12 @@ rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 #                found (port-name hint, card id, USB id) and the SysEx it wants.
 #                Pure, so the anti-drift claim is a host test; see test_controllers.
 #   shimutil.o   the log, the clock, and the environment contract
+#   usb_label.o  the text rules for a media device's name: the volume label the
+#                host read off a stick, turned into the 64-byte UTF-16 field one
+#                of rbp's device rows draws in place of its own "USB1"/"USB2".
+#                Pure -- no file, no rbp address, no global -- so the rules (a
+#                shorter label's tail, an empty answer, the drawable range) are
+#                pinned on a host by test_usblabel.
 #
 # The split exists so that the part of this shim that is rbp (rbp_bridge) can be
 # read and re-derived on its own, and so the part that is a particular controller
@@ -152,11 +169,10 @@ rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 # list; it is hidden too, and says why in its own rule above.)
 CTRL_OBJS  := ctrlshim.o ctrl_map.o map_flx4.o map_jp21.o map_kbd.o evdev_io.o \
               mididump.o rbp_bridge.o rbp_led.o led_table.o plinn_scan.o \
-              rbp_vu.o midi_io.o controllers.o shimutil.o
+              rbp_vu.o midi_io.o controllers.o shimutil.o usb_label.o
 CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \
               midi_io.h shimutil.h ctrl_map.h mididump.h evdev_io.h syscalls.h \
-              shmstate.h plinn_scan.h controllers.h
-
+              shmstate.h plinn_scan.h controllers.h usb_label.h
 knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o fader_state.o $(CTRL_HDRS) \
              $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
 	$(CC) $(CFLAGS) -shared -o $@ $(CTRL_OBJS) rbp_key.o shmstate.o \
@@ -284,6 +300,32 @@ master_policy.o: master_policy.c master_policy.h
 #                  while it is up and answers on the release
 #   prompt_paint.o the chooser's image: frame, title, rule and three row buttons,
 #                  the two dead-device rows in the palette's OFF classes (pure)
+#   fx_zone.o     the BEAT FX panel's two controls: the CH SELECT cycle and the
+#                  effect picker rbp's own effect-name cell raises -- one column,
+#                  fourteen rows, in the order the FLX4's FX SELECT button steps
+#                  (pure, unit-tested). prompt_zone.o's shape a fourth time, and it
+#                  holds both interactions because the picker IS raised by the
+#                  zone's own tap
+#   fx_paint.o    the picker's image: a black bed, a centred title, one rule and
+#                  fourteen row buttons (pure)
+#   hc_zone.o     the HOT CUE pad row rbp draws across the bottom of each deck:
+#                  sixteen cells that trigger their own cue, and NOTHING at all on
+#                  a pad with no cue registered -- the gate that stops a touch
+#                  writing a cue onto the operator's own track (pure, unit-tested).
+#                  fx_zone.o's shape: the drawn cell is the visual promise, the
+#                  release answers for the cell the press began on, and a gesture
+#                  that began off the grid is rbp's for its whole life
+#   fxpad_zone.o  the momentary X/Y pad in the BEAT FX panel's BPM detail cell:
+#                  X is the effect's level, Y is the beat ladder, it is engaged
+#                  while the finger is down and the release puts all three axes
+#                  back (pure, unit-tested). The EIGHTH of the family, and the
+#                  first whose values are read out of rbp rather than computed --
+#                  it still never reads rbp itself: the caller hands them in
+#   fxpad_paint.o the pad's HUD: a frame round rbp's own cell and a dot at the
+#                  finger. The family's first COPIER -- a plane is opaque and
+#                  rbp's live BPM/msec/BEAT readout has to stay visible
+#                  underneath, so each call takes rbp's pixels in and annotates
+#                  them (pure over the page it is handed)
 #
 # This is the SECOND shim to reach rbp: pointsrc.c turns a recognized tap into
 # the keycode rbp has for that button (send_rx_key, rbp_key.o below). It is a
@@ -299,13 +341,15 @@ FBSHIM_OBJS := fb_shim.o tscfake.o pointsrc.o point_xform.o touch_zone.o \
                fb_cursor.o cursor_paint.o menu_zone.o menu_paint.o menu_draw.o \
                menu_window.o menu_window_paint.o menu_keyboard.o \
                browser_link.o drmband.o side_zone.o side_paint.o util_zone.o \
-               wave_zone.o prompt_zone.o prompt_paint.o
+               wave_zone.o prompt_zone.o prompt_paint.o fx_zone.o fx_paint.o \
+               hc_zone.o usb_label.o fxpad_zone.o fxpad_paint.o
 FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h touch_zone.h syscalls.h \
                envutil.h fb_cursor.h cursor_paint.h fbdev.h menu_zone.h \
                menu_paint.h menu_font.h menu_draw.h drmband.h menu_window.h \
                menu_window_paint.h menu_keyboard.h browser_link.h side_zone.h \
                side_paint.h rbp_vu.h util_zone.h wave_zone.h prompt_zone.h \
-               prompt_paint.h
+               prompt_paint.h fx_zone.h fx_paint.h hc_zone.h usb_label.h \
+               fxpad_zone.h fxpad_paint.h
 
 fbshim.so: $(FBSHIM_OBJS) rbp_key.o fader_state.o $(FBSHIM_HDRS) \
            $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
@@ -324,7 +368,7 @@ fb_shim.o: CFLAGS += -Wno-nonnull-compare -Wno-maybe-uninitialized
 
 pointsrc.o: pointsrc.c pointsrc.h point_xform.h tscfake.h touch_zone.h \
             rbp_key.h rbp_abi.h menu_zone.h menu_window.h side_zone.h rbp_vu.h \
-            prompt_zone.h
+            prompt_zone.h fx_zone.h usb_label.h fxpad_zone.h
 point_xform.o: point_xform.c point_xform.h
 touch_zone.o: touch_zone.c touch_zone.h
 fb_cursor.o: fb_cursor.c fb_cursor.h cursor_paint.h fbdev.h pointsrc.h point_xform.h
@@ -340,7 +384,8 @@ menu_paint.o: menu_paint.c menu_paint.h menu_zone.h menu_font.h
 # header is listed.
 menu_draw.o: menu_draw.c menu_draw.h menu_paint.h menu_zone.h fbdev.h \
              point_xform.h pointsrc.h drmband.h menu_window.h menu_window_paint.h \
-             side_zone.h side_paint.h rbp_vu.h prompt_zone.h prompt_paint.h
+             side_zone.h side_paint.h rbp_vu.h prompt_zone.h prompt_paint.h \
+             fx_zone.h fx_paint.h fxpad_zone.h fxpad_paint.h
 # menu_window_paint.o takes menu_paint.h for the palette and the view, and
 # menu_window.h for the rectangles it must draw the marks exactly inside -- a
 # dependency that is not written down is a rebuild that silently does not happen.
@@ -378,9 +423,39 @@ wave_zone.o: wave_zone.c wave_zone.h
 # which is why rbp's answer about the two devices arrives in a struct prompt_state
 # and not from a pointer. prompt_paint.o takes prompt_zone.h as well because every
 # rectangle it draws is a PR_* literal from it, the same dependency side_paint.o has
-# on side_zone.h.
-prompt_zone.o: prompt_zone.c prompt_zone.h menu_zone.h
+# on side_zone.h. menu_font.h is on prompt_zone.o's line since the buttons started
+# carrying a device's own name: how wide a name draws is what decides how much of it
+# fits, and the atlas is where that number lives. It is a compile-time table and
+# nothing else, so it costs this object none of its purity.
+prompt_zone.o: prompt_zone.c prompt_zone.h menu_zone.h menu_font.h
 prompt_paint.o: prompt_paint.c prompt_paint.h prompt_zone.h menu_paint.h menu_font.h
+# fx_zone.o is the sixth of the pure family and is built to prompt_zone.o's exact
+# shape: menu_zone.h is on the line for the MZ_FEED_* codes and MZ_LOGICAL_W/H it
+# answers in, and for nothing else -- it links no rbp symbol and reads no address,
+# which is why rbp's answer about its Beat FX channel is read by pointsrc.c and
+# arrives here as an argument. fx_paint.o takes fx_zone.h as well because every
+# rectangle it draws is an FX_* literal from it, the same dependency side_paint.o
+# has on side_zone.h.
+fx_zone.o: fx_zone.c fx_zone.h menu_zone.h
+fx_paint.o: fx_paint.c fx_paint.h fx_zone.h menu_paint.h menu_font.h
+# hc_zone.o is the seventh of the pure family and is fx_zone.o's shape exactly, right
+# down to the include line: hc_zone.h brings menu_zone.h in for the MZ_FEED_* codes and
+# the logical space it answers in, and rbp_abi.h is taken for BROWSE_MODE_PLAY and
+# K_PAD1 and for NOTHING ELSE -- rbp's pad mode and its answer about whether a cue is
+# registered are read by pointsrc.c and arrive here as arguments. That is why the test
+# rule below can pin all 365 checks with no Pi, no panel and no player.
+hc_zone.o: hc_zone.c hc_zone.h menu_zone.h rbp_abi.h
+# fxpad_zone.o is the eighth of the pure family and is fx_zone.o's shape a fifth time:
+# fxpad_zone.h brings menu_zone.h in for the MZ_FEED_* codes, and rbp_abi.h is NOT on
+# this line -- the pad's whole point is that rbp's own values arrive as a struct and
+# leave as a struct, so this object names no rbp address at all. The offsets it is filled
+# from are pointsrc.c's business (rbp_abi.h) and the test rule below pins all 411 checks
+# with no Pi, no panel and no player.
+fxpad_zone.o: fxpad_zone.c fxpad_zone.h menu_zone.h
+# fxpad_paint.o takes fxpad_zone.h for the cell's rect and menu_paint.h for the palette,
+# exactly as fx_paint.o takes fx_zone.h's -- and it takes menu_zone.h through
+# menu_paint.h for MZ_LOGICAL_W/H, the space fxpad_paint_w/h scale out of.
+fxpad_paint.o: fxpad_paint.c fxpad_paint.h fxpad_zone.h menu_paint.h menu_zone.h
 # browser_link.o is the one object in the menu that opens a file, so its header is
 # where the three paths and the frame's own header layout live -- nothing else in
 # the shim names /tmp/rbwin.*.
@@ -497,8 +572,8 @@ pcmprobe: ../../tools/pcmprobe.c
 # and the rectangle -- see that file's header.
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
          test_evdev test_cursor_dev test_menu test_side test_window test_keyboard \
-         test_menu_dev test_util test_wave test_prompt test_led_table \
-         test_plinn_scan test_controllers
+         test_menu_dev test_util test_wave test_prompt test_fx test_hc test_fxpad \
+         test_led_table test_plinn_scan test_controllers test_usblabel
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -638,6 +713,16 @@ test_controllers: test_controllers.c controllers.c controllers.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_controllers.c controllers.c
 
+# test_usblabel links the PRODUCTION usb_label.c, for the same reason the four
+# tests above link their modules: the rules it holds are the ones that would
+# otherwise only ever be exercised by a stick in the slot and a screenshot. It
+# reads no address of rbp's and opens no file -- the label's SOURCE and its
+# DESTINATION are both ctrlshim.c's business -- so it needs nothing but its own
+# two files, which is exactly what "pure" was supposed to buy.
+test_usblabel: test_usblabel.c usb_label.c usb_label.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_usblabel.c usb_label.c
+
 # test_prompt links the PRODUCTION prompt_zone.c and prompt_paint.c, and menu_paint.c
 # with them because the box's palette comes from menu_pixel() -- one table, so the
 # chooser cannot drift into colours the band and the drawers do not have. menu_zone.c is
@@ -653,6 +738,54 @@ test_prompt: test_prompt.c prompt_zone.c prompt_paint.c menu_paint.c menu_zone.c
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_prompt.c prompt_zone.c \
 	    prompt_paint.c menu_paint.c menu_zone.c side_zone.c
+
+# test_fx links the PRODUCTION fx_zone.c and fx_paint.c, and menu_paint.c and
+# menu_zone.c with them for exactly the reasons test_prompt names: the picker's palette
+# comes from menu_pixel(), so the sixth drawn surface cannot drift into colours the
+# other five do not have, and menu_paint.c's layout code calls menu_label() and
+# menu_button_x0/x1(), which live in menu_zone.c. side_zone.c is on the line because
+# menu_zone.c's closed-entry arm calls side_any_open() in turn -- the same chain
+# test_prompt and test_side both carry.
+#
+# Its surface is a local array: no framebuffer, no plane, no thread, no rbp. What it
+# stops is a tap on rbp's own panel firing the wrong control, a picker that answers a
+# row the finger never anchored to, and above all a box that closes itself or a release
+# that reaches rbp with no press behind it.
+test_fx: test_fx.c fx_zone.c fx_paint.c menu_paint.c menu_zone.c side_zone.c \
+         fx_zone.h fx_paint.h menu_paint.h menu_zone.h menu_font.h side_zone.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_fx.c fx_zone.c \
+	    fx_paint.c menu_paint.c menu_zone.c side_zone.c
+
+# test_hc links the PRODUCTION hc_zone.c -- not a copy and not the cross-built .o,
+# so the test needs no arm object to run. hc_zone.c is pure: rbp's pad mode and its
+# answer about whether a cue is registered are arguments here, exactly as they are
+# parameters there, which is what lets the gate be pinned on a host with no rbp. The
+# rbp_abi.h prerequisite is for the two constants hc_zone.c takes from it (K_PAD1 and
+# BROWSE_MODE_PLAY) -- the keycode arithmetic is rbp's own, read off the instruction
+# stream, and pinning it against a number the test typed itself would pin nothing.
+test_hc: test_hc.c hc_zone.c hc_zone.h menu_zone.h rbp_abi.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_hc.c hc_zone.c
+
+# test_fxpad links the PRODUCTION fxpad_zone.c AND fxpad_paint.c -- test_fx.c and
+# test_side.c carry their feature's painter for the same reason: the HUD's two marks are
+# drawn over rbp's own pixels, and "which pixels of the operator's readout survive" is
+# exactly the property a copy of the code would get wrong without anyone noticing. Neither
+# is a copy and neither is the cross-built .o, so the test needs no arm object to run.
+# fxpad_zone.c is pure: rbp's level, rung and effect state are arguments here, exactly as
+# they are parameters there, which is what lets a whole gesture -- press, climb, release,
+# unwind -- be driven against a simulated rbp on a host. The fx_zone.h prerequisite is for
+# the three neighbouring rects the cell must not overlap; fx_zone.c is NOT linked, because
+# nothing here calls it. menu_paint.c and menu_zone.c come with fxpad_paint.c for the
+# reasons test_fx names -- the palette is menu_pixel()'s, and menu_paint.c's layout calls
+# into menu_zone.c, which in turn calls side_any_open().
+test_fxpad: test_fxpad.c fxpad_zone.c fxpad_paint.c menu_paint.c menu_zone.c \
+            side_zone.c fxpad_zone.h fxpad_paint.h fx_zone.h menu_paint.h \
+            menu_zone.h menu_font.h side_zone.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_fxpad.c fxpad_zone.c fxpad_paint.c \
+	    menu_paint.c menu_zone.c side_zone.c
 
 test_audio: test_audio.c s24pack.c s24pack.h mirror_policy.c mirror_policy.h \
             master_policy.c master_policy.h pace_policy.c pace_policy.h
@@ -820,10 +953,22 @@ test_cursor_dev.o: test_cursor_dev.c fb_cursor.h fbdev.h cursor_paint.h \
 # menu_draw.o now presents the USB STOP chooser on a plane of its own, so the box's
 # state machine and its image are part of the driver this pins. Both are the REAL
 # objects, so what is pinned is the shipped box.
+# fx_zone.o and fx_paint.o are here because menu_draw.o's tick now syncs the BEAT FX
+# picker's plane as well. They are linked for the same reason and are the REAL objects;
+# unlike the chooser's there is no scenario that arms a picker plane, so there is no
+# --wrap for fxlist_paint -- what the tick pins here is that a CLOSED picker costs the
+# sync nothing, which is the state every scenario in this file is in.
+# fxpad_zone.o and fxpad_paint.o are here for the third box: menu_draw.o now presents the
+# momentary pad's HUD on a plane of its own, so the pad's own liveness -- fxpad_busy(),
+# which is what decides whether that plane is up at all -- is part of the driver this
+# pins. Both are the REAL objects, so what is pinned is the shipped pad; and like the
+# picker's there is no scenario that engages a finger on the cell, so what the tick pins
+# is that an IDLE pad costs the sync nothing.
 MENU_TEST_OBJS := test_menu_dev.o menu_draw.o menu_paint.o menu_zone.o \
                   menu_window.o menu_window_paint.o menu_keyboard.o \
                   browser_link.o point_xform.o drmband.o side_zone.o \
-                  side_paint.o prompt_zone.o prompt_paint.o fader_state.o
+                  side_paint.o prompt_zone.o prompt_paint.o fx_zone.o fx_paint.o \
+                  fxpad_zone.o fxpad_paint.o fader_state.o
 
 # The drawer's wrappers, and they are the ONE exception to "drmband.o is the real
 # object". --wrap=drm_band_* lets scenario_drawer() hand the module a plane that

@@ -110,7 +110,15 @@ static unsigned short fb16[FB_MAX_W * FB_MAX_H];
  * 480x320 is the entry that moved. It was usable while the panel was 112 rows; at
  * 56 it is 22 rows there, the button band 16, and the witness's band rows would
  * land on label ink -- so the size is refused, and what it is refused FOR is the
- * rule that keeps the witness off the glyphs (menu_paint.c's menu_view_ok()). */
+ * rule that keeps the witness off the glyphs (menu_paint.c's menu_view_ok()).
+ *
+ * THE THREE WIDE ENTRIES ARE THE ONES THE ATLAS DECIDES. The JH face was baked and
+ * shipped on 2026-10-07 and taken back off the glass the same day, and while it was in
+ * it refused every picture under 823 px, so the 800- and 640-wide shapes went with it
+ * -- this list carried them as refused and a 1024x480 was added to keep a 480-row
+ * usable shape in the walk. The Decker bake puts the floor back at 605 px, so they are
+ * usable again. A WIDTH refusal is not a height one, which is why the two lists are
+ * kept apart: this one is the height floor and the width floor is a sweep below. */
 struct tsize { int w, h, usable; };
 static const struct tsize TSIZES[] = {
     { 1280, 800, 1 }, { 1280, 720, 1 }, { 1024, 768, 1 }, { 1024, 600, 1 },
@@ -341,14 +349,49 @@ static void test_font(void)
     CHECK(menu_font_selfcheck(),
           "the font table is malformed: a metrics run does not match the atlas");
 
-    /* The glyph metrics the label layout depends on. */
+    /* The glyph metrics the label layout depends on. The width is a sum of
+     * menu_font_adv() -- the glyph's own advance plus its pair entry, and that entry
+     * is zero for every pair on a face that was not kerned (MENU_FONT_KERNED 0), which
+     * is what ships. The pin below is therefore the same walk either way: it says the
+     * width the layout centres a label with is the advance the painters step, which is
+     * the one thing a face change can silently break. */
     CHECK(menu_text_width("") == 0, "the empty string has a width");
     CHECK(menu_text_width(NULL) == 0, "a NULL string has a width");
-    CHECK(menu_text_width("A") == (int)menu_font_glyph('A')->adv,
+    CHECK(menu_text_width("A") == menu_font_adv('A', '\0'),
           "one glyph is not its own advance wide");
-    CHECK(menu_text_width("AB") == (int)menu_font_glyph('A')->adv +
-                                    (int)menu_font_glyph('B')->adv,
-          "two glyphs are not the sum of their advances");
+    CHECK(menu_text_width("AB") == menu_font_adv('A', 'B') + menu_font_adv('B', '\0'),
+          "two glyphs are not the sum of their walked advances");
+    /* THE PAIR TABLE IS BOUNDED, and on a kerned bake it is LIVE. A bake whose kern
+     * table came out all zeros would pass every width pin above and quietly put back
+     * the 1.9..13.7 px swing the table exists to remove, so a kerned bake pins that it
+     * moves something; and both bake kinds pin the clamp, because an entry outside it
+     * is a pair whose ink boxes overlap (below 1) or a pair pushed apart by a 0 read as
+     * a measurement (above 4). MENU_FONT_KERNED is the header's own statement about
+     * which kind this is -- the liveness check would otherwise read a table that was
+     * never filled as one the bake lost. */
+    {
+        int moved = 0;
+
+        for (i = 0; i < MENU_FONT_GLYPHS; i++)
+            for (j = 0; j < MENU_FONT_GLYPHS; j++) {
+                CHECK(menu_font_kern[i][j] >= -1 && menu_font_kern[i][j] <= 2,
+                      "kern[%d][%d] is outside the clamp", i, j);
+                if (menu_font_kern[i][j] != 0)
+                    moved++;
+            }
+#if MENU_FONT_KERNED
+        CHECK(moved > 0, "the bake says it is kerned but the pair table is all zeros");
+#else
+        CHECK(moved == 0, "the bake says it is unkerned but the pair table moves %d "
+              "pairs", moved);
+#endif
+        /* The space row and column are exactly zero: a gap is never kerned against,
+         * so a label's leading or trailing space cannot move its centring. */
+        for (i = 0; i < MENU_FONT_GLYPHS; i++) {
+            CHECK(menu_font_kern[0][i] == 0, "the space kerns against glyph %d", i);
+            CHECK(menu_font_kern[i][0] == 0, "glyph %d kerns against the space", i);
+        }
+    }
     /* An unsupported character is a gap of the space's advance, not a zero-width
      * hole and not a smear -- menu_draw.h's labels are all in the set, but a
      * future label with a character the font lacks should look like a space. */
@@ -1223,7 +1266,11 @@ static void test_paint_image(void)
  * the panel rather than a decision: the labels are centred and CLIPPED to their own
  * column (menu_label_cov()), so the guarantee this test pins is that no label pixel
  * is ever outside its own button, at any size -- including sizes where the label
- * cannot fit and the clip is all that saves it. */
+ * cannot fit and the clip is all that saves it -- which the JH bake of 2026-10-07
+ * briefly made real again, refusing every picture under 823 px until the operator took
+ * it back off the glass. The Decker bake ships, its floor is 605 px, and no shape in
+ * this walk is under it: what the clip guards here is a label that fits its column but
+ * whose ink box runs one px past the button. */
 static void test_labels_fit(void)
 {
     unsigned int s;
@@ -1286,8 +1333,10 @@ static void test_labels_fit(void)
      * nothing, in the one band the operator reads most. menu_paint.c refuses such a
      * picture outright (menu_labels_fit()), and what this pins is where the refusal
      * starts, as a SHAPE rather than as a number: it is the ATLAS's width that moves
-     * it, so the 19 px bake costs the 480-px-wide shape its band (68 px columns
-     * against a 76 px "USB STOP") and keeps it at 640 wide and up.
+     * it, so the 19 px Decker bake costs the 480-px-wide shape its band (68 px columns
+     * against a 76 px "USB STOP") and keeps it at 640 wide and up -- which is where it
+     * stood before the JH bake of 2026-10-07 briefly raised it to 823 px and where it
+     * stands again now that the operator has taken that face back off the glass.
      *
      * The old check here was a fixed list of seven widths with "widest <= column" on
      * each. That was a canary -- at 16 px it was 3 px from failing, deliberately --
@@ -1364,9 +1413,13 @@ static void test_labels_fit(void)
          * narrowest shape this port can still be asked to draw the band on. 480 wide
          * is the one the 19 px atlas spends -- 68 px columns against a 76 px "USB
          * STOP" -- and it is pinned so that the refusal stays a decision rather than
-         * drift. */
+         * drift. 800 sits in the bracket as well as 640, because the JH bake's 823 px
+         * floor spent both of them on 2026-10-07 and the point of these three lines is
+         * that going back to Decker gave them back. */
         v = mkview(1280, 800);
         CHECK(menu_view_ok(&v), "1280 wide was refused");
+        v = mkview(800, 800);
+        CHECK(menu_view_ok(&v), "800 wide was refused");
         v = mkview(640, 800);
         CHECK(menu_view_ok(&v), "640 wide was refused");
         v = mkview(480, 800);
@@ -1472,6 +1525,125 @@ static void test_paint_matches_value(void)
             }
         CHECK(n > 50, "only %d label pixels are the exact label colour: the"
               " coverage never reaches 255", n);
+    }
+}
+
+/* The columns a string's ink really reaches, read from the atlas itself: walk the pens
+ * with menu_font_adv() -- what every painter steps -- and for each glyph take the first
+ * and last column that carries any coverage.
+ *
+ * BOTH ENDS MUST COME FROM THE COVERAGE, not from the glyph's metrics. A glyph's ink
+ * begins at its `left` bearing (signed, and not zero for the thinned Decker bake: Decker
+ * Bold's 'l' is 11 px of ink at -1) and ends at `left + w - 1` BEFORE the thinning --
+ * lighten() thins each glyph a sixth of a pixel a side and the bake says outright that
+ * "the outermost pixels of the box are allowed to fall to zero", so the last inked
+ * column can be short of the box. A `left`-blind oracle would read every label 1-2 px
+ * wrong and call a correct painter broken. */
+static void ink_extent(const char *s, int pen, int *lo, int *hi)
+{
+    int k, col, row, first = 1;
+
+    *lo = *hi = 0;
+    for (k = 0; s[k]; k++) {
+        const struct menu_glyph *g = menu_font_glyph((unsigned char)s[k]);
+
+        for (col = 0; col < (int)g->w; col++) {
+            int hit = 0;
+
+            for (row = 0; row < (int)g->h && !hit; row++)
+                hit = menu_font_cov(g, col, row) != 0;
+            if (!hit)
+                continue;
+            if (first) {
+                *lo = *hi = pen + g->left + col;
+                first = 0;
+            } else if (pen + g->left + col > *hi) {
+                *hi = pen + g->left + col;
+            }
+        }
+        pen += menu_font_adv((unsigned char)s[k], (unsigned char)s[k + 1]);
+    }
+}
+
+/* THE PENS THE CENTRING ASSUMED.
+ *
+ * A label's width is the sum of the atlas's advances -- and, on a bake that carries a
+ * live pair table, of its kerned ones (menu_font.h; the shipped Decker bake's table is
+ * all zero, MENU_FONT_KERNED 0, so there it is the glyphs' own advances). Every walk
+ * that draws or classifies a label must step the same ones. The failure if one does not
+ * is quiet: the text is drawn off the centre its own measured width put it on, drifting
+ * through the word until the last glyph ends somewhere lx1 does not predict.
+ * test_paint_matches_value() cannot see it -- the painter and the classifier share
+ * menu_label_cov(), so mutating that one function moves both together and every pixel
+ * still agrees with itself. What catches it is the INDEPENDENT oracle below:
+ * menu_text_width() is the layout's width (menu_layout_make() centres with it), and the
+ * ink the painter actually lays down must be exactly the ink a walk of THOSE advances,
+ * over the same atlas, puts there.
+ *
+ * The comparison is a pure function of the string and the atlas, so no copy of the
+ * module's own scaling is needed -- the pen's origin cancels out of the ink extent when
+ * it is measured from the layout's own lx, which is why the pen is passed in rather than
+ * predicted. Two other things are pinned beside it: that the ink is not clipped (the
+ * check the oracle itself depends on, and the one menu_labels_fit() promises), and that
+ * lx1 is menu_text_width() from the pen, which is the layout half of the same
+ * arithmetic. */
+static void test_label_pens(void)
+{
+    struct menu_view v = mkview(1280, 800);
+    struct menu_layout L;
+    int i, fx, fy, minx, maxx;
+
+    CHECK(menu_view_ok(&v), "1280x800 was refused");
+    menu_layout_make(&v, &L);
+    fill16(1280, 800, 0);
+    menu_paint(&v, 0);
+
+    for (i = 0; i < MZ_COLS; i++) {
+        const char *s = menu_label(i + 1);
+        int ix0, ix1, in0, in1;
+
+        if (!s || L.ln[i] <= 0)
+            continue;
+        in0 = L.bx0[i] + MENU_BTN_PAD_PX + MENU_BTN_BORDER_PX;
+        in1 = L.bx1[i] - MENU_BTN_PAD_PX - MENU_BTN_BORDER_PX;
+        /* The oracle is only the ink's extent while the label sits WHOLLY inside the
+         * button's inner rect: a clipped label's first or last ink pixel is the clip,
+         * not the pen, and this test would then be asserting the clip. It is the INK
+         * that has to fit and not the advances -- a glyph sits off its pen by its
+         * bearing, so the ink can reach a pixel past lx1 while the width still fits.
+         * menu_labels_fit() is what promises this, at the width the operator runs. */
+        ink_extent(s, L.lx[i], &ix0, &ix1);
+        CHECK(ix0 >= in0 && ix1 <= in1,
+              "cell %d's ink at %d..%d is clipped into %d..%d at 1280x800",
+              i + 1, ix0, ix1, in0, in1);
+        if (ix0 < in0 || ix1 > in1)
+            continue;
+
+        minx = 99999;
+        maxx = -1;
+        for (fy = L.ly; fy < L.ly + MENU_FONT_LINE; fy++)
+            for (fx = in0; fx <= in1; fx++)
+                /* The label CLASS, not "not the bed": the button is a filled
+                 * rectangle, so every pixel of it is non-black and only the class
+                 * says which of them a glyph covers. */
+                if (menu_class_at(&v, fx, fy, 0) == MENU_LABEL) {
+                    if (fx < minx)
+                        minx = fx;
+                    if (fx > maxx)
+                        maxx = fx;
+                }
+        CHECK(maxx >= 0, "cell %d drew no ink at all", i + 1);
+        if (maxx < 0)
+            continue;
+
+        CHECK(minx == ix0, "cell %d: the ink starts at %d where the pens put it at %d",
+              i + 1, minx, ix0);
+        CHECK(maxx == ix1,
+              "cell %d: the ink ends at %d where the atlas's own advances put it at"
+              " %d -- a walk that is not stepping what menu_text_width() sums",
+              i + 1, maxx, ix1);
+        CHECK(L.lx1[i] == L.lx[i] + menu_text_width(s) - 1,
+              "cell %d: the layout's lx1 is not menu_text_width() from the pen", i + 1);
     }
 }
 
@@ -1962,6 +2134,7 @@ int main(void)
     test_hold();
     test_paint_covers();
     test_paint_matches_value();
+    test_label_pens();
     test_paint_image();
     test_partial_repaint();
     test_layout_hoist();
