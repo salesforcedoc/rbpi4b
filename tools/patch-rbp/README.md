@@ -17,7 +17,7 @@ python3 rbp_patch.py /path/to/stock/rbp -o rbp-audio
 * Validates the expected stock instruction at every address; a wrong or
   foreign binary is rejected rather than corrupted.
 * Reproduces the reference `rbp-audio` **byte-for-byte**
-  (md5 `3706c68f7242779d46afa09f35a39acf`).
+  (md5 `3dda2d4e10187a75bfc16a7b4f16f192`).
 
 Code/data at `VA` maps to `file_offset = VA − 0x8000` (non-PIE ARM32 ELF).
 
@@ -32,7 +32,7 @@ exist because the stock RX3 binary assumes hardware the SC Live 4 does not have:
 | **Browse / USB routing cave** | Provides a routine to force the Source/browse mode the UI needs on the SC Live 4. |
 | **Key dispatch hardening** | `IKeyManager` throws from `FixedAddressArray::add()` when the panel never sends data; the throw is uncaught and aborts `rbp`. |
 | **Power-manager NULL guards** | No Pioneer power-manager MCU; notification routines dereference `NULL` and crash the `UsbMountManager` thread. |
-| **Display waveform gate** | The scrolling waveform is gated on a browse-caution id that never clears. |
+| **Display waveform gate** | *Removed 2026-10-08* — it forced the play-mode centre down the create/render path past a caution-id gate that `knobshim` already clears, and cost the boot logo. See `PATCHES.md` §6. |
 | **Touch** | Browse-caution gate discards all touches; list drag-scroll has a state bug. |
 | **Panel comm** | `PanelComPeerLinux::postMessage` waits forever for a front-panel thread that never starts → startup deadlock. |
 | **Audio** | `scanForDevices()` skips the device list on non-i.MX6 CPUs. |

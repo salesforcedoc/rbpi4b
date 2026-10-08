@@ -22,7 +22,7 @@ start from the extracted assets described in
 
 `rbp_patch.py` contains the complete, verified instruction table that turns the
 stock v1.20 `rbp` (md5 `4f2efcfc0c9e3f539289f863acfddcc6`) into `rbp-audio`
-(md5 `3706c68f7242779d46afa09f35a39acf`). It is idempotent and validates the
+(md5 `3dda2d4e10187a75bfc16a7b4f16f192`). It is idempotent and validates the
 stock words before writing. [`PATCHES.md`](patch-rbp/PATCHES.md) explains what
 each patch does.
 

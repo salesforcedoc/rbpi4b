@@ -83,9 +83,7 @@ PATCHES = [
     (0x32E728, 0xE92D45F8, 0xE12FFF1E, "pm: USB/power notification helper -> bx lr"),
     (0x3871D0, 0xE1A00006, 0xE3A00000, "pm: notification helper -> mov r0,#0"),
 
-    # --- display: middle scrolling waveform enabled unconditionally ---
-    (0x24FC88, 0x1A000004, 0xE1A07004, "display: waveform gate (1/2)"),
-    (0x24FC8C, 0xE5943070, 0xEA00007E, "display: waveform gate -> always render"),
+    # --- display: the section-6 waveform gate is REMOVED (see PATCHES.md §6) ---
 
     # --- touch: caution gate + playlist drag-scroll deadlock ---
     (0x2DC228, 0xE1A07000, 0xE3A07000, "touch: solveCoordToKey ignores caution id"),

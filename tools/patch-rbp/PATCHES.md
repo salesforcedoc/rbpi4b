@@ -5,12 +5,16 @@ Source of truth: [`rbp_patch.py`](rbp_patch.py). Every entry is
 before writing and is idempotent. `VA = file_offset + 0x8000`.
 
 * stock: md5 `4f2efcfc0c9e3f539289f863acfddcc6`
-* patched (`rbp-audio`): md5 `3706c68f7242779d46afa09f35a39acf`
-* fully patched (`rbp-nopc`, second stage applied): md5 `18a64bc4d0ffd1cbd35f3a6ea447fca8`
+* patched (`rbp-audio`): md5 `3dda2d4e10187a75bfc16a7b4f16f192`
+* fully patched (`rbp-nopc`, second stage applied): md5 `83763a65f8f997b3dc40629912cf4300`
 
 The third md5 is the binary that actually ships. It is produced by
 [`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py), a second stage run
 by `scripts/build-chroot.sh` over the `rbp-audio` output; see section 11 below.
+
+Both moved on 2026-10-08 when section 6's two-word waveform-gate pair was removed
+(the previous pins were `3706c68f…` and `18a64bc4…`); they are reproduced by the
+patchers in this tree, in the order above, from the stock v1.20 binary.
 
 Words are shown as little-endian u32 hex. `E320F000` is `nop`,
 `E1A00000` is `mov r0,r0` (also a nop), `E12FFF1E` is `bx lr`.
@@ -94,12 +98,32 @@ before the library imports.
 | `0x32e728` | `E92D45F8` | `E12FFF1E` | USB/power notification helper → `bx lr` |
 | `0x3871d0` | `E1A00006` | `E3A00000` | notification helper → `mov r0,#0` |
 
-## 6. Display
+## 6. Display — REMOVED 2026-10-08
+
+Two words in `ui_PLAYMODE_Set` @`0x24fb80` forced the play-mode window's centre
+down the create/render path unconditionally, bypassing a gate that reads the
+browse-caution id `uxth([0x05a191fc])` and two flags:
+
+```
+24fc88  bne 24fca0      →  E1A07004  mov r7,r4
+24fc8c  ldr r3,[r4,#0x70] →  EA00007E  b 24fe8c   (the create path)
+```
+
+The gate is **open on this unit anyway**: measured live on both the Pi and the
+reference, `[0x05a191fc]` is 0, `[0x032b2a8b] & 2` is 0 and `[0x522af4]` is 0, so
+stock takes the same path. The patch was a workaround for an id that a second
+workaround already clears — `ctrlshim.c` (in `knobshim.so`) writes 0 to
+`0x05a191fc` whenever USB1 is mounted, and §7's touch patches are a third.
+
+Removed because it was not free: with the two words present the play-mode centre
+is repainted at startup and **the boot logo is stamped over**; with them back to
+stock the logo persists to the deck view. Reverted on the unit 2026-10-08 and
+confirmed on the glass. Stock behaviour when a deck is empty is simply an
+unpainted centre — a loaded track still draws the full scrolling waveform.
 
 | VA | stock | patched | purpose |
 |---|---|---|---|
-| `0x24fc88` | `1A000004` | `E1A07004` | waveform gate (1/2) |
-| `0x24fc8c` | `E5943070` | `EA00007E` | unconditionally create/render scrolling waveform |
+| — | — | — | *(no words; the pair `0x24fc88`/`0x24fc8c` was removed)* |
 
 ## 7. Touch
 
