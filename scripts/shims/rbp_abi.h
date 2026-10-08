@@ -881,4 +881,51 @@ static const signed char bfx_type_to_pos[15] = {
 
 #define RBP_METER_SEGMENTS 11
 
+
+/* ---- Pro DJ Link bring-up: NetworkManager::operateConnectNetwork ---------
+ * rbp carries Pioneer's whole Link stack and, on this unit, never commands it up.
+ * The one entry point is NetworkManager::operateConnectNetwork(bool) @0x38f830: it
+ * reads NetworkMonitor's address out of the object, hands a "+24 == 2" message
+ * to ProDjLink::operate, and lands in SystemManager::operateMessage ->
+ * UdpServer::start() @0x393c88, which is what binds UDP 50000.
+ *
+ * THIS COMMENT USED TO SAY IT HAS NO CALLER. THAT IS WRONG. It is virtual, so
+ * reaching it leaves no `bl` to find in a scan, and that absence was mistaken for
+ * an absent caller. NetworkMonitor::timerCallback @0x392160 calls it through the
+ * NetworkMonitor subobject's vtable slot +12 (vptr address point 0x4e107c), and
+ * main's NetworkManager::initialize() starts that timer unconditionally at 1000 ms
+ * (NetworkMonitor::startMonitoring @0x391f58). What the tick tests first is
+ * ui::PcController::isUsbBConnected() -- the byte at PcController+0x72, whose only
+ * writer is ui::PcController::handleUsbMountMessage @0x2e9700 on EnUsbMountMessage
+ * 3. rbp raises that itself from the word `connect` on /tmp/udev_usb1 (see
+ * read_sf_rbp @0x3785b4 and UsbMountManager::run @0x320a28), which is the in-band
+ * route and the one to prefer. The call below is the out-of-band alternative.
+ *
+ * rbp is non-PIE, so these are absolute and identical in every process, the
+ * same fact the meter hook above relies on. Both were read off the stock v1.20
+ * binary; docs/18-prodjlink.md carries the disassembly.
+ *
+ * [+0x24] is NetworkMonitor's copy of the interface address, filled by
+ * NetworkMonitor::checkNetworkConnectionChange @0x392084 through the "eth0"
+ * literal — the field netshim's name substitution exists to make non-zero, and
+ * operateConnectNetwork returns at its first compare while it is zero. It is zero
+ * only while [+0x72] is, and that check runs only on the connected branch.
+ * [+0xc4] is the bool main passed to initialize(): 0 when rbp runs with -a, as
+ * this unit's launcher does, which is also why the Autoip object at [+0xc0] is
+ * NULL and is never dereferenced. */
+#define NM_SINGLETON       0x026873d8UL  /* NetworkManager::_singletonInstance */
+#define NM_FN_CONNECT      0x0038f830UL  /* NetworkManager::operateConnectNetwork(bool) */
+#define NM_OFF_IP          0x24          /* NetworkMonitor's IPv4 address */
+#define NM_OFF_CONNECT_FLG 0xc4          /* initialize()'s bool: 0 with -a */
+
+/* The player's own file name, for the "am I the player?" test. rbp is non-PIE,
+ * so what makes NM_SINGLETON and NM_FN_CONNECT valid is that they are inside the
+ * rw and rx LOAD segments of THIS binary's image — its rw MemSiz is 0x56480b8,
+ * reaching 0x5b5acd4, which is why the singleton at 0x26873d8 is legitimately in
+ * the .bss (and shows in /proc/self/maps under the anonymous tail, labelled
+ * [heap], rather than under the file). In any other process those addresses are
+ * unmapped or somebody else's heap. rbp's rw segment is file-backed by a file of
+ * this name, so its executable segment is what tells the two apart. */
+#define RBP_BIN_NAME       "rbp"
+
 #endif /* RBPI4B_RBP_ABI_H */

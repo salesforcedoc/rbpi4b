@@ -214,6 +214,13 @@ cp "$SHIMS/knobshim.so"    "$CHROOT/root/pdj/knobshim.so"
 if [ -f "$SHIMS/crashcatch.so" ]; then
   cp "$SHIMS/crashcatch.so" "$CHROOT/usr/lib/crashcatch.so"
 fi
+# The network alias. SECOND in RB_LD_PRELOAD, before fbshim.so: both define
+# ioctl and the first one loaded wins (netshim.c's header has the argument).
+# It ships switched OFF -- RB_NETALIAS defaults to 0 -- so a unit that never opts
+# in behaves exactly as it did before this file existed.
+if [ -f "$SHIMS/netshim.so" ]; then
+  cp "$SHIMS/netshim.so" "$CHROOT/usr/lib/netshim.so"
+fi
 
 # 5. DirectFB 1.4.16 core (soft-float, .so.0 sonames) over the stock 1.4.0 core,
 #    plus the patched fbdev + input/wm modules in the 1.4-6 module dir.

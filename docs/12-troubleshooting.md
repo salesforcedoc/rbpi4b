@@ -142,7 +142,10 @@ the rectangle that was actually drawn into.
 |---|---|---|
 | `cannot find libpthread_nonshared.a` | the RX3 rootfs lacks the dev archive | `scripts/shims/Makefile` creates empty stubs in `compat/` |
 | `GLIBC_2.17`/`GLIBC_2.34` in a shim | linked against host glibc | link the RX3 libs; `make check` fails on `GLIBC > 2.7` and on `Tag_ABI_VFP_args` (a hard-float shim would never load) |
-| A shim loads but a global is missing | wrong `LD_PRELOAD` order | `fbshim:knobshim:audioshim` — the audio shim reads globals the controls shim defines, and `SHMSTATE_STRICT=1` makes a mismatch fail loudly ([11](11-runtime-launcher.md)) |
+| A shim loads but a global is missing | wrong `LD_PRELOAD` order | `…:knobshim:audioshim` — the audio shim reads globals the controls shim defines, and `SHMSTATE_STRICT=1` makes a mismatch fail loudly ([11](11-runtime-launcher.md)) |
+| `netshim.so` is loaded but the network rewrite does nothing | it is **after** `fbshim.so`, and `fbshim`'s `ioctl` won | both define `ioctl` and the first preload that does wins; `netshim.so` must be **second, before `fbshim.so`**. `doctor.sh` checks the order ([18](18-prodjlink.md)) |
+| rbp still behaves as if it has no network | `RB_NETALIAS` is not `1` | the shim ships **off**; every hook is an identity pass-through until `RB_NETALIAS=1` in `rb.local.conf` ([18](18-prodjlink.md)) |
+| Pro DJ Link finds nothing on a network you can ping | the AP filters station-to-station traffic | discovery is broadcast-based; no shim fixes it. The test is a capture showing replies from a peer ([18](18-prodjlink.md)) |
 | A shim does nothing, no error | loaded by the host loader instead of the chroot's | `LD_PRELOAD` is set inside the chroot by the launcher, never exported ([11](11-runtime-launcher.md)) |
 | A flag in `rb.conf` has no effect | read by presence, and exported empty (see [11](11-runtime-launcher.md)) | the workaround lines in `start-rb.sh` cover the affected names |
 | Exec bits lost on `/bin/*` | Windows/WSL extraction | `scripts/build-chroot.sh` restores them (or `chmod -R 755`) |

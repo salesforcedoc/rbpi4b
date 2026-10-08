@@ -839,6 +839,14 @@ loader; starts `rbp`; waits for rbp to open its USB FIFO; starts the watcher;
 then sleeps while rbp lives. See
 [11 — runtime launcher](11-runtime-launcher.md).
 
+It also re-copies `netshim.so` into the chroot with the other shims. That one is
+listed in `RB_LD_PRELOAD` from the start, but its substitution is **off**
+(`RB_NETALIAS=0`), so a default deploy is inert — the point of listing it anyway
+is that the load-order contract with `fbshim.so` is exercised on every launch.
+Turning it on is one line in `rb.local.conf`; [18 — Pro DJ Link](18-prodjlink.md)
+has the whole argument, the whitelist that keeps a setter ioctl away from
+`wlan0`, and the unit drills that are **not yet run**.
+
 ## Bring-up order
 
 Ordered so a failure cannot be masked by the next subsystem. **S1–S3 come
@@ -847,7 +855,7 @@ before most code**, because they convert the biggest unknowns into facts.
 | # | Step | Check | Likely failure |
 |---|---|---|---|
 | S0.1 | `make -C scripts/shims RX3=… check` | only `GLIBC_2.4/2.7`, no `!! HARD-FLOAT` | a new file pulls `GLIBC_2.17` |
-| S0.2 | stock `rbp` `4f2efcfc…` → `rbp-audio` `3706c68f…` → `rbp-nopc` `18a64bc4…`; pin all three | **measured 2026-10-06:** re-running both patchers over the local stock copy reproduces `18a64bc4…` **byte-for-byte**, and the unit's `root/pdj/rbp` is that same file — so the deployed player is provably *stock + 68 words + 2 words* and nothing else. `doctor.sh` now reports which of the three by name, and flags a deploy-root `rbp-audio` (stage 1) that `start-rb.sh` would silently copy over it | wrong stock binary (both patchers validate the stock word at every address and abort by design) |
+| S0.2 | stock `rbp` `4f2efcfc…` → `rbp-audio` `3706c68f…` → `rbp-nopc` `3cecd92a…` | **measured 2026-10-06:** re-running both patchers over the local stock copy reproduces the output **byte-for-byte**, and the unit's `root/pdj/rbp` is that same file — so the deployed player is provably *stock + 68 words + 12 words* and nothing else. `doctor.sh` reports which build by name and flags a deploy-root `rbp-audio` (stage 1) that `start-rb.sh` would silently copy over it. **Superseded hash `18a64bc4…` (2026-10-06 → 07):** that build ran and played, but its `getPcController()` stub silently disabled Pro DJ Link on both routes; `doctor.sh` still names it so a unit holding it is not reported as merely "not ours" | wrong stock binary (both patchers validate the stock word at every address and abort by design) |
 | S0.3 | `scripts/build-chroot.sh` | tarball has `directfbrc`, `TouchCalib_*`, all shims, `rb.conf`, and its `usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so` sha256 matches `work/dfb`'s — a stale module is otherwise invisible until S2.2 | — |
 | S1.1 | Pi OS Lite 32-bit boots | **measured:** the userland is 32-bit — `getconf LONG_BIT` = **32**, `dpkg --print-architecture` = **`armhf`** — and the kernel can run it: `32-bit EL0 Support` in the CPU features line, then S1.5's chroot `echo ok` proves it end to end. `uname -m` is **not** the check: the measured unit's kernel is aarch64, and it reports `aarch64` *inside* the 32-bit chroot too. (`file /bin/sh` is not part of this either — `/bin/sh` is a symlink to `dash`, so it prints `symbolic link to dash` and stops; `file -L` would follow it) | a kernel with no 32-bit emulation — the chroot's own binaries then cannot run, and **that** is what the S1.5 exec test catches |
 | S1.2 | device nodes | `/dev/fb0`, `/dev/snd/seq`, `/dev/input/event*` all present | missing `seq` → `modprobe snd-seq`; symptom is "sequencer setup failed" + zero controls |

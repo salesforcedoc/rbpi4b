@@ -309,7 +309,7 @@ say "deploy-root runtime artifacts (these override the copies inside the chroot)
 # explicit `if`, not `[ -f ... ] && found=1`: under `set -e` a bare `&&` list whose
 # test fails is a failing command, and would end the install.)
 _found=0
-for a in fbshim.so knobshim.so audioshim.so crashcatch.so ccexit controllers_cli; do
+for a in fbshim.so knobshim.so audioshim.so crashcatch.so netshim.so ccexit controllers_cli; do
   if [ -f "$SHIM_SRC/$a" ]; then _found=1; fi
 done
 if [ -f "$DFB_SRC/libdirectfb_fbdev.so" ]; then _found=1; fi
@@ -323,6 +323,11 @@ else
   install_artifact knobshim.so  "$SHIM_SRC/knobshim.so"
   install_artifact audioshim.so "$SHIM_SRC/audioshim.so"
   install_artifact crashcatch.so "$SHIM_SRC/crashcatch.so"
+  # The network alias. Ships switched OFF (RB_NETALIAS defaults to 0 in rb.conf),
+  # so installing it changes no behaviour on its own; what it does change is that
+  # the load-order contract is exercised by doctor.sh from the first boot rather
+  # than on the day someone turns it on.
+  install_artifact netshim.so    "$SHIM_SRC/netshim.so"
   install_artifact ccexit       "$SHIM_SRC/ccexit"
   # The controller table, asked from a shell. Nothing rbp loads needs it -- it is
   # here because doctor.sh reads every surface name out of this one program

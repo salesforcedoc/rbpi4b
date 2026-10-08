@@ -101,14 +101,26 @@ sh "$HERE/fix-dev.sh" || { echo "start-rb: fix-dev.sh failed" >&2; exit 1; }
 # the shims and the patched fbdev module *inside* the chroot. But dropping a
 # freshly built file at the deploy root and re-running this script is how you
 # iterate on one shim without rebuilding the tarball, so honour it when present.
+#
+# Staged beside the target and RENAMED into place -- never a bare `cp`. `cp`
+# opens the destination O_TRUNC, so copying over a shim that a live rbp has
+# mapped truncates the file underneath it, and the next call into a page past
+# the new EOF is a SIGBUS. A rename within one directory is atomic, and it
+# leaves the old inode -- and any running process's mappings of it -- intact.
+# This is normally safe here because systemd has reaped the previous rbp before
+# this script runs, but "normally" is doing real work in that sentence: running
+# start-rb.sh by hand against a live player is the same player-killing bug, and
+# it is not worth the two lines to be immune to it. install.sh's
+# install_artifact() already does exactly this.
 install_override() {
     src=$1
     dst=$2
     [ -f "$src" ] || return 0
-    if cp "$src" "$dst"; then
-        chmod 755 "$dst"
+    tmp="$dst.new.$$"
+    if install -m 755 "$src" "$tmp" && mv -f "$tmp" "$dst"; then
         echo "  override: $(basename "$src") -> $dst"
     else
+        rm -f "$tmp" 2>/dev/null || true
         echo "  WARNING: could not install override $src" >&2
     fi
 }
@@ -118,6 +130,11 @@ install_override "$RB_DEPLOY_ROOT/audioshim.so"  "$RB_CHROOT/usr/lib/audioshim.s
 # The exit witness. It is in RB_LD_PRELOAD (rb.conf), so naming it here is what
 # keeps the loaded copy and the deployed copy the same file (docs/13 S3.7).
 install_override "$RB_DEPLOY_ROOT/crashcatch.so" "$RB_CHROOT/usr/lib/crashcatch.so"
+# The network alias. It is in RB_LD_PRELOAD too, and it is the one shim whose
+# POSITION in that list matters: it must be second, before fbshim.so, because
+# both define ioctl. deploy-root/doctor.sh checks the order; this line is what
+# keeps the loaded copy the deployed one, exactly as for crashcatch above.
+install_override "$RB_DEPLOY_ROOT/netshim.so"    "$RB_CHROOT/usr/lib/netshim.so"
 install_override "$RB_DEPLOY_ROOT/rbp-audio"     "$RB_CHROOT/root/pdj/rbp"
 install_override "$RB_DEPLOY_ROOT/libdirectfb_fbdev-rot16.so" \
                  "$RB_CHROOT/usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so"
@@ -129,11 +146,20 @@ install_override "$RB_DEPLOY_ROOT/libdirectfb_fbdev-rot16.so" \
 # rendezvous points — a leftover guard_LocalDBServer from an unclean exit makes
 # the next rbp believe a database server is already running.
 rm -f /tmp/guard_LocalDBServer /tmp/req_LocalDBServer
-# The two shim logs are appended to, so a stale one would mix two runs together.
+# These shim logs are appended to, so a stale one would mix two runs together.
 # The MIDI dump is not in this list: it is not a fixed path any more, and the
 # shim opens it for writing (see RB_MIDI_DUMP in rb.conf), so a stale dump is
 # truncated by the writer rather than by us.
 rm -f /tmp/knobshim.log /tmp/audioshim.log
+# netshim.log is in this list for the same reason and one of its own: it is the
+# only evidence of what the alias decided, and a surviving copy would make the
+# next run's "armed" line look like it came from this one.
+rm -f /tmp/netshim.log
+# The Link bring-up's request file (/tmp/rb_link.req) is deliberately NOT cleared
+# here. It is a REQUEST, and one that arrived before rbp had a network address is
+# meant to wait for one — clearing it would discard the operator's intent at the
+# exact moment it is about to be honoured. The shim unlinks it itself, just before
+# it makes the call, so a request never fires twice.
 rm -f /tmp/dfbdig*.log /tmp/rot_surface.dump
 # The display watcher's baseline goes first, and it is written again below
 # immediately before the launch it describes. Between those two points there is
@@ -196,6 +222,8 @@ JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV MIRROR_GAIN_MID
 KNOB_VERBOSE JOG_VERBOSE TEMPO_VERBOSE LED_VERBOSE
 SHMSTATE_STRICT
 CRASH_LOG
+NETALIAS NETALIAS_IFACE NETALIAS_MAC_SCRAPE NETALIAS_LOG
+NETALIAS_CONNECT NETALIAS_CONNECT_FILE
 "
 for v in $SHIM_VARS; do
     eval "val=\${RB_$v:-}"

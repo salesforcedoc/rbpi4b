@@ -6,15 +6,14 @@ before writing and is idempotent. `VA = file_offset + 0x8000`.
 
 * stock: md5 `4f2efcfc0c9e3f539289f863acfddcc6`
 * patched (`rbp-audio`): md5 `3dda2d4e10187a75bfc16a7b4f16f192`
-* fully patched (`rbp-nopc`, second stage applied): md5 `83763a65f8f997b3dc40629912cf4300`
+* fully patched (`rbp-nopc`, second stage applied): md5 `97aa2223c4ca5906b66389420f29d03f`
+* **superseded** (`rbp-nopc`, 2026-10-06 → 2026-10-07): md5 `18a64bc4d0ffd1cbd35f3a6ea447fca8`
+  — ran and played correctly, but its `getPcController()` stub silently disabled Pro
+  DJ Link on both routes. Section 11 explains why. `doctor.sh` still names it. 
 
 The third md5 is the binary that actually ships. It is produced by
 [`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py), a second stage run
 by `scripts/build-chroot.sh` over the `rbp-audio` output; see section 11 below.
-
-Both moved on 2026-10-08 when section 6's two-word waveform-gate pair was removed
-(the previous pins were `3706c68f…` and `18a64bc4…`); they are reproduced by the
-patchers in this tree, in the order above, from the stock v1.20 binary.
 
 Words are shown as little-endian u32 hex. `E320F000` is `nop`,
 `E1A00000` is `mov r0,r0` (also a nop), `E12FFF1E` is `bx lr`.
@@ -185,18 +184,64 @@ Applied by [`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py) to the
 `rbp-audio` output, not part of `rbp_patch.py`. It is a separate stage because it
 is not a Rockchip/board fix but a "no PC controller is attached" fix: `rbp`'s
 network monitor calls `IUiObjManager::getPcController()` about a second after
-start and dereferences the resulting `NULL` at `[NULL+0x9c]`, which happens
-*before* `fb0` opens — so the symptom is a process that dies instantly with no
-display and no log.
+start, and the getter dereferences `[NULL+0x9c]` because the `UiObjManager` global
+(`0x026867C0`, `.bss`) is not published until the UI is built — while
+`NetworkManager::initialize()` arms a 1000 ms timer from `main`, so the first tick
+can beat it. Address `0x9c` is unmapped here (the ELF's first `PT_LOAD` starts at
+`0x8000`), so the symptom is a process that dies instantly with no display and no
+log.
+
+**The fault is inside the getter, not at its call site.** `timerCallback` already
+handles a NULL return correctly — `ldrbne r3,[r0,#0x72]` / `moveq r3,r0`
+@`0x3921a8`. So each getter only has to *return* NULL instead of *faulting*, and
+that fits the stock five-word slot exactly: no branch, no shared helper, no
+function moved, every entry address unchanged.
 
 | VA | stock | patched | purpose |
 |---|---|---|---|
-| `0x31df64` | `E30636B0` | `E3A00000` | `getPcController(): mov r0,#0` (return NULL) |
-| `0x31df68` | `E3403268` | `E12FFF1E` | `getPcController(): bx lr` |
+| `0x31df3c` | `E30636B0` | `E59F3058` | `getNet(): ldr r3,[pc,#88]` → pool `0x026866B0` |
+| `0x31df40` | `E3403268` | `E5933110` | `getNet(): r3 = [r3,#0x110]` (UiObjManager) |
+| `0x31df44` | `E5933110` | `E1B00003` | `getNet(): movs r0,r3` — sets Z from r3 |
+| `0x31df48` | `E5930094` | `15930094` | `getNet(): ldrne r0,[r3,#0x94]` |
+| `0x31df50` | `E30636B0` | `E59F3044` | `getSettings(): ldr r3,[pc,#68]` |
+| `0x31df54` | `E3403268` | `E5933110` | `getSettings(): r3 = UiObjManager` |
+| `0x31df58` | `E5933110` | `E1B00003` | `getSettings(): movs r0,r3` |
+| `0x31df5c` | `E5930098` | `15930098` | `getSettings(): ldrne r0,[r3,#0x98]` |
+| `0x31df64` | `E30636B0` | `E59F3030` | `getPcController(): ldr r3,[pc,#48]` |
+| `0x31df68` | `E3403268` | `E5933110` | `getPcController(): r3 = UiObjManager` |
+| `0x31df6c` | `E5933110` | `E1B00003` | `getPcController(): movs r0,r3` |
+| `0x31df70` | `E593009C` | `1593009C` | `getPcController(): ldrne r0,[r3,#0x9c]` |
 
-The caller's own NULL check then skips the absent object. Idempotent, and it
-refuses a file too short to contain the patch offsets rather than throwing. The
-resulting md5 is pinned at the top of this file.
+The three `bx lr` words (`0x31df4c`, `0x31df60`, `0x31df74`) are unchanged and are
+listed in the patcher for completeness. `movs` is the flag-setter that replaces the
+dropped `cmp`; flags are caller-saved across a `bl`, so setting them is free. The
+three pc-relative offsets were checked against the target's own literal at
+`0x31df9c` — ARM reads `pc` as instruction+8, so `0x31df9c - (entry+8)` is 88, 68
+and 48. That literal is shared with `getPcChController` @`0x31df78` and is left
+alone.
+
+Idempotent, and it refuses a file too short to contain the patch offsets rather
+than throwing. The resulting md5 is pinned at the top of this file.
+
+### The stub this replaces, and what it broke
+
+The first version of this stage patched only `getPcController`, to a permanent
+`mov r0,#0; bx lr` (`E3A00000`/`E12FFF1E`). It stopped the crash, and it is
+byte-identical to the `mov r0,#0; bx lr` thunks Pioneer ships for its own
+unimplemented functions, which is exactly why the damage went unnoticed.
+
+But `NetworkMonitor::timerCallback` @`0x392160` reads the Pro DJ Link gate
+`ui::PcController::isUsbBConnected()` (`PcController+0x72`) through that getter
+**once a second**. A stubbed getter makes the gate structurally unreadable: `rbp`
+never calls `operateConnectNetwork` and never calls `checkNetworkConnectionChange`,
+so `NetworkMonitor`'s own IP field (`+0x1c`) is never filled either — which in turn
+makes the out-of-band `NETALIAS_CONNECT` route refuse forever (`no-ip`). One 2-word
+patch disabled Pro DJ Link on **both** routes, silently, on every host that
+carried it.
+
+`getNet` and `getSettings` dereference the same NULL `UiObjManager` at `+0x94` and
+`+0x98`; they are only lucky that no 1-second timer calls them before the UI is up.
+They are patched too.
 
 > This patch is **not** device-specific. It applies unchanged to any host with no
 > Pioneer PC-controller link, which is why the file is named `nopc` and not

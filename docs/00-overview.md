@@ -28,10 +28,11 @@ of the whole thing.
 │  │  soft-float glibc 2.13 + RX3 libs + DirectFB 1.4              ││
 │  │                                                               ││
 │  │   rbp-audio  ──  the XDJ-RX3 rekordbox player                 ││
-│  │      ▲  ▲  ▲                                                  ││
-│  │      │  │  └── knobshim.so    DDJ-FLX4 MIDI → RX3 keycodes    ││
-│  │      │  └───── audioshim.so   JUCE/ALSA → FLX4 USB audio      ││
-│  │      └──────── fbshim.so      fb ioctl + evdev → tsc2007      ││
+│  │      ▲  ▲  ▲  ▲                                               ││
+│  │      │  │  │  └── netshim.so    eth0-name introspection → wlan0││
+│  │      │  │  └───── knobshim.so   DDJ-FLX4 MIDI → RX3 keycodes  ││
+│  │      │  └──────── audioshim.so  JUCE/ALSA → FLX4 USB audio    ││
+│  │      └─────────── fbshim.so     fb ioctl + evdev → tsc2007    ││
 │  │                                                               ││
 │  │   libdirectfb_fbdev.so (rebuilt) ── the present path          ││
 │  └────────────────────────────────────────────────────────────────┘│
@@ -52,6 +53,7 @@ of the whole thing.
 | Audio | 3× discrete CS4344 DACs | the FLX4's 4-channel USB audio | `audioshim.so` maps rbp's streams onto the FLX4's output pairs |
 | USB | 2 host ports + sub-MCU | USB-A host ports | `usb-watch.sh` + native DeviceSQL import |
 | Music DB | internal EDB daemon | — | RX3 `edb_streamd` runs in the chroot |
+| Networking | `eth0` with a Pro DJ Link peer on the LAN | `eth0` **down**, WiFi up | `netshim.so` rewrites the interface *name* in rbp's whitelisted `eth0` introspection — **built and host-verified, off by default, not deployed** ([18](18-prodjlink.md)) |
 
 Every row above is a *device* difference. Nothing in the list touches the
 binary, which is why the `rbp` patch table and the shims' hardcoded `rbp`

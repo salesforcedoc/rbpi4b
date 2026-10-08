@@ -35,8 +35,15 @@ $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a:
 	@ar rcs $(COMPAT)/libc_nonshared.a
 	@ar rcs $(COMPAT)/libpthread_nonshared.a
 
-# Shared LD_PRELOAD libraries (soft-float, libc-only NEEDED)
-SHARED  := knobshim.so audioshim.so fbshim.so crashcatch.so
+# Shared LD_PRELOAD libraries (soft-float, libc-only NEEDED).
+#
+# The ORDER here is not the load order -- that is RB_LD_PRELOAD's business -- but
+# it is the order `make check` reports in, and the two that carry a constraint are
+# worth naming: crashcatch.so must be FIRST in the preload list (its constructor
+# arms the signal handlers before anything else can fault), and netshim.so must
+# be SECOND, before fbshim.so, because both define ioctl and the first one loaded
+# wins. See netshim.c's header and doctor.sh.
+SHARED  := knobshim.so audioshim.so fbshim.so crashcatch.so netshim.so
 
 # Static ARM helpers (have no soft-float runtime dependency)
 STATIC  := seqinject2 udplog controllers_cli
@@ -479,10 +486,49 @@ tscshim.so: tscshim.c $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.
 crashcatch.so: crashcatch.c
 	$(CC) $(CFLAGS) -shared -o $@ $< $(RX3LIB)/libdl.so.2 -lc $(LDFLAGS)
 
+# netalias.o holds the whole policy of the network alias: which ioctl requests
+# may be retargeted at all, what to do with a `system` command line, and which
+# interface to answer for. Pure -- no syscall, no kernel header, no clock -- which
+# is what lets test_netalias.c pin every verdict on the host. See netalias.h.
+#
+# HIDDEN, like rbp_key.o, and for the same reason: this library is loaded into the
+# same global scope as rbp and four other shims, and nothing outside netshim.so
+# has any business calling na_* by name. The interposers themselves (ioctl,
+# if_nametoindex, system) are netshim.o's and are deliberately NOT hidden -- a
+# hidden interposer interposes nothing. `nm -D netshim.so | grep ' na_'` is
+# silent; if it ever is not, this rule stopped applying.
+netalias.o: netalias.c netalias.h
+	$(CC) $(CFLAGS) -fvisibility=hidden -c -o $@ $<
+
+# netshim.so: rbp's Pro DJ Link stack, over the interface that is actually up.
+# See netshim.c's header for the whole argument; what the rule has to get right
+# is the same thing crashcatch.so's does -- dlsym is in libdl, NOT libc, on this
+# rootfs, so libdl.so.2 is named explicitly and netshim.c pins the symbol version.
+#
+# -lpthread is for the Link bring-up's poll thread, and it is the same shape as
+# knobshim.so's: the vendor rootfs carries no libpthread_nonshared.a, so the
+# empty stub above is a prerequisite too. pthread_create resolves against the
+# libpthread rbp itself is already using -- juce::Thread is pthreads underneath
+# -- so this adds a dependency rbp has satisfied since it started.
+netshim.so: netshim.c netalias.o netalias.h envutil.h \
+            $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
+	$(CC) $(CFLAGS) -shared -o $@ netshim.c netalias.o \
+	    $(RX3LIB)/libdl.so.2 -lpthread -lc $(LDFLAGS)
+
 # The witness's test subject. Must NOT be -static: LD_PRELOAD needs a dynamic
 # loader, which is exactly why this is not one of TESTS. Run it in the chroot,
 # where this rootfs's loader and soft-float ABI apply -- see docs/13 S3.7.
 ccexit: ccexit.c
+	$(CC) $(CFLAGS) -o $@ $< -lc $(LDFLAGS)
+
+# netshim.so's drill, and for ccexit's reason the same constraint applies: it is
+# the LD_PRELOAD *subject*, so it must be dynamic. Not in TESTS -- `make test`
+# runs its suite statically and this cannot run that way. What it adds over
+# test_netalias is that it is not a test of the RULES but of the shim: it links
+# the real netshim.so through the loader, so the constructor, the RTLD_NEXT
+# chain and the name restore are all exercised, and a rewrite that never happens
+# reads as a wrong address rather than as a silent pass.
+netcheck: netcheck.c
 	$(CC) $(CFLAGS) -o $@ $< -lc $(LDFLAGS)
 
 seqinject2: seqinject2.c
@@ -573,7 +619,7 @@ pcmprobe: ../../tools/pcmprobe.c
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
          test_evdev test_cursor_dev test_menu test_side test_window test_keyboard \
          test_menu_dev test_util test_wave test_prompt test_fx test_hc test_fxpad \
-         test_led_table test_plinn_scan test_controllers test_usblabel
+         test_led_table test_plinn_scan test_controllers test_usblabel test_netalias
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -722,6 +768,21 @@ test_controllers: test_controllers.c controllers.c controllers.h
 test_usblabel: test_usblabel.c usb_label.c usb_label.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_usblabel.c usb_label.c
+
+# test_netalias links the PRODUCTION netalias.c, for the same reason the tests
+# above link their modules: the verdicts it holds are the ones that would
+# otherwise only ever be read off a Link screen that stayed empty -- or, in the
+# one case that matters more, off a unit the operator can no longer reach.
+#
+# It includes <net/if.h> and <sys/ioctl.h> and asserts the module's own written-
+# out request numbers, interface flags and struct layout against them, so the
+# whitelist cannot silently decay into a list of numbers no caller ever sends.
+# The first thing it walks is the getter/setter PAIRS: every SIOCGIF* this shim
+# retargets has a SIOCSIF* twin that writes, and setIpAddr @0x39dfb4 is one of
+# the twelve functions that name eth0. No device, no interface, no rootfs.
+test_netalias: test_netalias.c netalias.c netalias.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_netalias.c netalias.c
 
 # test_prompt links the PRODUCTION prompt_zone.c and prompt_paint.c, and menu_paint.c
 # with them because the box's palette comes from menu_pixel() -- one table, so the
@@ -1042,11 +1103,12 @@ check: $(SHARED)
 	done; exit $$rc
 
 clean:
-	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) pcmprobe ccexit *.o
-# ccexit is named literally because it is deliberately not in TESTS (see its rule
-# above): it must stay dynamic, so `make test` cannot run it under the static
-# suite. It is still a build output, and leaving it here would make `clean`
-# incomplete -- which is how a stale one survived a rebuild once already.
+	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) pcmprobe ccexit netcheck *.o
+# ccexit and netcheck are named literally because they are deliberately not in
+# TESTS (see their rules above): both must stay dynamic, so `make test` cannot
+# run them under the static suite. They are still build outputs, and leaving them
+# here would make `clean` incomplete -- which is how a stale one survived a
+# rebuild once already.
 
 # The always-out-of-date prerequisite that keeps the two fixture-baking objects
 # above from being reused across working directories.

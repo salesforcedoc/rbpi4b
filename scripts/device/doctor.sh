@@ -239,7 +239,13 @@ pair "libdirectfb_fbdev (rot16)" \
 # second after start, with no display and no log.
 RB_RBP_STOCK=4f2efcfc0c9e3f539289f863acfddcc6	# Pioneer XDJ-RX3 v1.20, untouched
 RB_RBP_STAGE1=3706c68f7242779d46afa09f35a39acf	# +68 words; no getPcController() fix
-RB_RBP_FINAL=18a64bc4d0ffd1cbd35f3a6ea447fca8	# +2 words; the build that ships
+# Superseded 2026-10-07. This is the WORST of the four to meet in the field, because
+# it looks perfect: rbp starts, paints, plays. Its getPcController() is a permanent
+# `mov r0,#0`, which is byte-identical to the thunks Pioneer ships for its own
+# unimplemented functions -- and it makes the Pro DJ Link gate structurally
+# unreadable, so Link is dead on both routes with nothing on screen to say so.
+RB_RBP_NOPC2=18a64bc4d0ffd1cbd35f3a6ea447fca8	# +2 words; SILENTLY DISABLES Pro DJ Link
+RB_RBP_FINAL=3cecd92a02c90962bbaad31b5e1860bd	# +12 words; the build that ships
 
 # The full digest, unlike _sum() above which truncates for display: these are
 # compared, not just shown. No md5sum means NO verdict rather than a wrong one,
@@ -257,10 +263,11 @@ _md5() {
 _rbp_build() {
 	case "$1" in
 		"$RB_RBP_FINAL")  echo "final -- stock + all interoperability patches";;
+		"$RB_RBP_NOPC2")  echo "SUPERSEDED -- runs fine, but Pro DJ Link is silently dead";;
 		"$RB_RBP_STAGE1") echo "STAGE 1 ONLY -- missing the getPcController() fix";;
 		"$RB_RBP_STOCK")  echo "Pioneer's stock binary, unpatched";;
 		"?")              echo "unknown (no md5sum on this target)";;
-		*)                echo "not one of the three known builds";;
+		*)                echo "not one of the four known builds";;
 	esac
 }
 
@@ -295,7 +302,8 @@ if [ -f "$RB_DEPLOY_ROOT/rbp-audio" ]; then
 	_ovr_sum=$(_md5 "$RB_DEPLOY_ROOT/rbp-audio")
 	if [ "$_ovr_sum" = "$RB_RBP_FINAL" ]; then
 		ok "deploy-root override is the final build, and will re-install cleanly"
-	elif [ "$_ovr_sum" = "$RB_RBP_STAGE1" ] || [ "$_ovr_sum" = "$RB_RBP_STOCK" ]; then
+	elif [ "$_ovr_sum" = "$RB_RBP_STAGE1" ] || [ "$_ovr_sum" = "$RB_RBP_STOCK" ] \
+	  || [ "$_ovr_sum" = "$RB_RBP_NOPC2" ]; then
 		bad "$RB_DEPLOY_ROOT/rbp-audio is $(_rbp_build "$_ovr_sum")"
 		note "start-rb.sh copies that over the installed player at every launch, so"
 		note "the next restart would replace a working player with a broken one."
@@ -317,6 +325,48 @@ case "${RB_LD_PRELOAD:-}" in
 	   note "the exit witness has to install its handler before any other preload"
 	   note "can fault or exit, so an earlier shim can hide a crash entirely."
 	   fix "put /usr/lib/crashcatch.so first in RB_LD_PRELOAD ($RB_CONF_FILE)";;
+esac
+
+# netshim vs fbshim, and this one is a POSITION rather than a presence: both
+# define ioctl (fb_shim.c:180), and a process resolves ioctl to the FIRST
+# preloaded object that defines it. Get it wrong and there is no error anywhere --
+# either the network rewrite silently never runs, or fbshim never sees an ioctl
+# and the display breaks. So it is asked as a comparison of positions in the
+# list, not as a substring test that both names would satisfy.
+case "${RB_LD_PRELOAD:-}" in
+	*netshim.so*)
+		_net=${RB_LD_PRELOAD%%netshim.so*}
+		_fb=${RB_LD_PRELOAD%%fbshim.so*}
+		if [ "${#_net}" -lt "${#_fb}" ]; then
+			ok "netshim.so precedes fbshim.so in RB_LD_PRELOAD (both define ioctl; first wins)"
+		else
+			bad "netshim.so comes AFTER fbshim.so in RB_LD_PRELOAD"
+			note "both define ioctl, and the first one loaded is the one that runs."
+			note "fbshim's would win, so every network query would pass through"
+			note "unrewritten and rbp's Link stack would stay silent with no error."
+			fix "put /usr/lib/netshim.so second in RB_LD_PRELOAD ($RB_CONF_FILE)"
+		fi
+		# The flag is deliberately OFF by default, so say which state the unit is
+		# in rather than leaving "it does nothing" unexplained.
+		if [ "${RB_NETALIAS:-0}" = "1" ]; then
+			ok "RB_NETALIAS=1 — the alias is armed${RB_NETALIAS_IFACE:+ for $RB_NETALIAS_IFACE}"
+		else
+			note "RB_NETALIAS is not 1, so netshim passes every call through"
+			note "unchanged. That is the shipped default; set RB_NETALIAS=1 in"
+			note "$RB_DEPLOY_ROOT/rb.local.conf to arm it (docs/18-prodjlink.md)."
+		fi
+		# The bring-up trigger. Worth a line of its own because it is the only
+		# part of netshim that runs rbp's own code, and because it is useless
+		# without the substitution above — a reader who has armed one and not
+		# the other should be told here rather than from an empty log.
+		if [ "${RB_NETALIAS_CONNECT:-0}" = "1" ]; then
+			ok "RB_NETALIAS_CONNECT=1 — the Link bring-up is armed, watching ${RB_NETALIAS_CONNECT_FILE:-/tmp/rb_link.req}"
+			if [ "${RB_NETALIAS:-0}" != "1" ]; then
+				bad "but RB_NETALIAS is not 1: the call will refuse with no-ip forever"
+				fix "set RB_NETALIAS=1 as well ($RB_CONF_FILE) — the substitution is what gives rbp an address to connect with"
+			fi
+		fi;;
+	*) note "netshim.so is not in RB_LD_PRELOAD (fine unless you want Pro DJ Link)";;
 esac
 
 # --- 4. the ABI test: can this kernel actually run the tree -----------------
