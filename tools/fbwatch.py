@@ -34,6 +34,10 @@ Read the result like this:
 
 Ctrl-C stops it and kills the remote loop by pid; the remote process only ever
 reads /dev/fb0.
+
+Which unit, and with which key, is not in this file. It is read from
+tools/unit.local.conf, which is not checked in (unit.local.conf.example is the
+shape); --host and --key override it for one run.
 """
 import argparse
 import os
@@ -42,6 +46,26 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fbimg  # noqa: E402
+
+LOCAL_CONF = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "unit.local.conf")
+
+
+def local_conf():
+    """KEY=VALUE lines, '#' comments; a missing file is an empty dict."""
+    conf = {}
+    try:
+        with open(LOCAL_CONF) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                conf[k.strip()] = v.strip().strip("'\"")
+    except FileNotFoundError:
+        pass
+    return conf
+
 
 REMOTE = r'''
 import glob, os, sys, time
@@ -116,16 +140,23 @@ print("KEPT %s" % " ".join(saved), flush=True)
 
 
 def main():
+    conf = local_conf()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="root@192.168.1.239")
-    ap.add_argument("--key", default="/Users/andrewsim/.ssh/cdj_root_key")
+    ap.add_argument("--host", default=conf.get("RB_UNIT_HOST"))
+    ap.add_argument("--key", default=conf.get("RB_UNIT_KEY"))
     ap.add_argument("--secs", type=float, default=120.0)
     ap.add_argument("--fps", type=float, default=1.0)
     ap.add_argument("--remote-dir", default="/tmp/fbseq")
     ap.add_argument("--out", default="work/fbseq")
     a = ap.parse_args()
+    if not a.host:
+        ap.error("no unit to talk to: set RB_UNIT_HOST in %s "
+                 "(see unit.local.conf.example) or pass --host" % LOCAL_CONF)
 
-    ssh = ["ssh", "-i", a.key, "-o", "StrictHostKeyChecking=no", a.host]
+    ssh = ["ssh"]
+    if a.key:
+        ssh += ["-i", os.path.expanduser(a.key)]
+    ssh += ["-o", "StrictHostKeyChecking=no", a.host]
     proc = subprocess.Popen(
         ssh + ["python3", "-", str(a.secs), str(a.fps), a.remote_dir],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

@@ -1,0 +1,5 @@
+# Copy to tools/unit.local.conf (not checked in) and fill in. Read by
+# tools/fbwatch.py; --host / --key override it for one run.
+RB_UNIT_HOST=root@<unit address>
+# Optional: leave it out and ssh uses its own config and agent.
+RB_UNIT_KEY=~/.ssh/<private key>
