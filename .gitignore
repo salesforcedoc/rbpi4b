@@ -18,6 +18,12 @@ keys/*.bin
 # Extracted firmware tree (you generate this locally)
 /extracted/*
 !/extracted/README.md
+/extracted*/
+# ...and the name itself, which on a machine that renamed the tree is a SYMLINK
+# to the versioned directory. A pattern ending in `/` only matches a real
+# directory, and git does not call a symlink one -- so `/extracted*/` catches
+# `extracted_v120` and misses the very `extracted` it points at.
+/extracted
 
 # Pioneer / Denon binaries
 rbp
@@ -30,6 +36,16 @@ rbp-*
 *.so.*
 *.a
 *.elf
+
+# The test binaries and the crashcatch test subject. They have no extension, so
+# none of the rules above catches them, and they were tracked for a while by
+# accident — which had a tell: `make clean` runs `rm -f … $(TESTS)`, so on a
+# fresh checkout it deleted 17 *tracked* files and `git status` showed the tree
+# as dirty. `make test` rebuilds all of them (Makefile:796); nothing deploys
+# them. The negation keeps the sources, which are the part worth versioning.
+/scripts/shims/test_*
+!/scripts/shims/test_*.c
+/scripts/shims/ccexit
 
 # --- Rust ------------------------------------------------------------------
 target/
@@ -49,5 +65,7 @@ Thumbs.db
 /scripts/shims/pcmprobe
 /scripts/shims/seqinject2
 /scripts/shims/udplog
+/scripts/shims/netcheck
+/scripts/shims/controllers_cli
 /scripts/device/timeout
 __pycache__/

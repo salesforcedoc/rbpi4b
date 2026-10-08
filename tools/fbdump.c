@@ -1,5 +1,5 @@
 /*
- * fbdump.c — dump everything about a framebuffer that the rblive4 display path
+ * fbdump.c — dump everything about a framebuffer that the rbpi4b display path
  * depends on, then say what it means for the port.
  *
  * The patched DirectFB fbdev driver makes decisions from these exact fields:

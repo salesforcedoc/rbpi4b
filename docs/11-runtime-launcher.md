@@ -82,6 +82,21 @@ line is what keeps the console off the screen at all
     (S10.6). When the exit *is* the restart the display watcher asked for, the
     request has already reached systemd, so stopping it here cancels nothing.
 
+    **"Report" is the word to be careful with.** The loop is `while kill -0 "$RBP";
+    do sleep 2; done`, and the last command on every path is an `echo` — so the
+    script exits 0 whatever rbp did, the unit always looks like a *successful*
+    stop, and **rbp's exit status is never captured**. Reading `start-rb: rbp
+    exited` therefore says only *that* it left, never *why*: a deliberate stop and
+    a player that died on its own print the same thing, and the journal is the only
+    place they differ (`Stopped rblive4.service` versus **`Scheduled restart job,
+    restart counter is at N`**). rbp has left on its own seven times between
+    2026-09-27 and 2026-10-05, and the reason is the one thing nothing on the box
+    recorded until the exit witness was armed — `crashcatch.so`, first in
+    `RB_LD_PRELOAD`, which interposes `exit`/`_exit`/`_Exit` and the fatal signals
+    and logs to disk at the chroot-relative `/root/pdj/crash.log`. **A death with
+    no line there is evidence too: it was SIGKILLed**, which is what `cleanup`
+    sends. The whole measurement is in [13](13-raspberrypi4.md) S3.7.
+
 ## The rbp launch line
 
 ```sh
@@ -101,12 +116,21 @@ nohup chroot "$RB_CHROOT" env \
   `sh: ls: not found` without it.
 * The player is started through the chroot's loader rather than by exec because
   it is non-PIE, soft-float, and linked against glibc 2.13.
-* **The `LD_PRELOAD` order is load-bearing**:
-  `fbshim.so:knobshim.so:audioshim.so`. The audio shim reads globals
-  (`g_master_gain`, `g_vu_peak`, …) that the controls shim defines. A wrong order
-  fails loudly rather than silently — see
+* **The `LD_PRELOAD` order is load-bearing**, and two of its positions are fixed
+  for reasons that are not the data-symbol contract below:
+  `crashcatch.so:netshim.so:fbshim.so:knobshim.so:audioshim.so`.
+  `crashcatch.so` is **first** because its constructor arms the exit and
+  fatal-signal handlers. `netshim.so` is **second, before `fbshim.so`**, because
+  both define `ioctl` and a process resolves a symbol to the *first* preloaded
+  object that defines it — so netshim chains via `dlsym(RTLD_NEXT, "ioctl")` and
+  everything it does not rewrite reaches fbshim, which passes `SIOCGIF*` straight
+  to the kernel. Get that pair the wrong way round and the network rewrite fails
+  *silently* while the display still works; `deploy-root/doctor.sh` checks the
+  order. The remaining order is the globals contract: `knobshim.so` before
+  `audioshim.so`, because the audio shim reads globals (`g_master_gain`) that the
+  controls shim defines. That one fails loudly rather than silently — see
   [`scripts/shims/shmstate.h`](../scripts/shims/shmstate.h) and the
-  `SHMSTATE_STRICT` guard.
+  `SHMSTATE_STRICT` guard. See also [18 — Pro DJ Link](18-prodjlink.md).
 
 ## `rb.conf` → the shim environment
 

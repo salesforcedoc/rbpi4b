@@ -5,12 +5,19 @@ Source of truth: [`rbp_patch.py`](rbp_patch.py). Every entry is
 before writing and is idempotent. `VA = file_offset + 0x8000`.
 
 * stock: md5 `4f2efcfc0c9e3f539289f863acfddcc6`
-* patched (`rbp-audio`): md5 `3706c68f7242779d46afa09f35a39acf`
-* fully patched (`rbp-nopc`, second stage applied): md5 `18a64bc4d0ffd1cbd35f3a6ea447fca8`
+* patched (`rbp-audio`): md5 `3dda2d4e10187a75bfc16a7b4f16f192`
+* fully patched, 16 bpp (`rbp-nopc`, second stage applied): md5 `97aa2223c4ca5906b66389420f29d03f`
+* fully patched, 32 bpp (`rbp-nopc` + third stage): md5 `990404244853a7d613be3d469ad1bc1d`
+  — **the default and what the unit runs**
+* **superseded** (`rbp-nopc`, 2026-10-06 → 2026-10-07): md5 `18a64bc4d0ffd1cbd35f3a6ea447fca8`
+  — ran and played correctly, but its `getPcController()` stub silently disabled Pro
+  DJ Link on both routes. Section 11 explains why. `doctor.sh` still names it. 
 
-The third md5 is the binary that actually ships. It is produced by
-[`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py), a second stage run
-by `scripts/build-chroot.sh` over the `rbp-audio` output; see section 11 below.
+The last two are the same build at two depths, and *which one is correct depends on
+`RB_FB_LIE_BPP` in rb.conf* — see section 12. The first three are produced by
+[`tools/patch-rbp/rbp_patch.py`](rbp_patch.py) and
+[`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py), the second and third
+of them staged by `scripts/build-chroot.sh`; see sections 11 and 12 below.
 
 Words are shown as little-endian u32 hex. `E320F000` is `nop`,
 `E1A00000` is `mov r0,r0` (also a nop), `E12FFF1E` is `bx lr`.
@@ -94,12 +101,32 @@ before the library imports.
 | `0x32e728` | `E92D45F8` | `E12FFF1E` | USB/power notification helper → `bx lr` |
 | `0x3871d0` | `E1A00006` | `E3A00000` | notification helper → `mov r0,#0` |
 
-## 6. Display
+## 6. Display — REMOVED 2026-10-08
+
+Two words in `ui_PLAYMODE_Set` @`0x24fb80` forced the play-mode window's centre
+down the create/render path unconditionally, bypassing a gate that reads the
+browse-caution id `uxth([0x05a191fc])` and two flags:
+
+```
+24fc88  bne 24fca0      →  E1A07004  mov r7,r4
+24fc8c  ldr r3,[r4,#0x70] →  EA00007E  b 24fe8c   (the create path)
+```
+
+The gate is **open on this unit anyway**: measured live on both the Pi and the
+reference, `[0x05a191fc]` is 0, `[0x032b2a8b] & 2` is 0 and `[0x522af4]` is 0, so
+stock takes the same path. The patch was a workaround for an id that a second
+workaround already clears — `ctrlshim.c` (in `knobshim.so`) writes 0 to
+`0x05a191fc` whenever USB1 is mounted, and §7's touch patches are a third.
+
+Removed because it was not free: with the two words present the play-mode centre
+is repainted at startup and **the boot logo is stamped over**; with them back to
+stock the logo persists to the deck view. Reverted on the unit 2026-10-08 and
+confirmed on the glass. Stock behaviour when a deck is empty is simply an
+unpainted centre — a loaded track still draws the full scrolling waveform.
 
 | VA | stock | patched | purpose |
 |---|---|---|---|
-| `0x24fc88` | `1A000004` | `E1A07004` | waveform gate (1/2) |
-| `0x24fc8c` | `E5943070` | `EA00007E` | unconditionally create/render scrolling waveform |
+| — | — | — | *(no words; the pair `0x24fc88`/`0x24fc8c` was removed)* |
 
 ## 7. Touch
 
@@ -161,19 +188,135 @@ Applied by [`scripts/patch-rbp-nopc.py`](../../scripts/patch-rbp-nopc.py) to the
 `rbp-audio` output, not part of `rbp_patch.py`. It is a separate stage because it
 is not a Rockchip/board fix but a "no PC controller is attached" fix: `rbp`'s
 network monitor calls `IUiObjManager::getPcController()` about a second after
-start and dereferences the resulting `NULL` at `[NULL+0x9c]`, which happens
-*before* `fb0` opens — so the symptom is a process that dies instantly with no
-display and no log.
+start, and the getter dereferences `[NULL+0x9c]` because the `UiObjManager` global
+(`0x026867C0`, `.bss`) is not published until the UI is built — while
+`NetworkManager::initialize()` arms a 1000 ms timer from `main`, so the first tick
+can beat it. Address `0x9c` is unmapped here (the ELF's first `PT_LOAD` starts at
+`0x8000`), so the symptom is a process that dies instantly with no display and no
+log.
+
+**The fault is inside the getter, not at its call site.** `timerCallback` already
+handles a NULL return correctly — `ldrbne r3,[r0,#0x72]` / `moveq r3,r0`
+@`0x3921a8`. So each getter only has to *return* NULL instead of *faulting*, and
+that fits the stock five-word slot exactly: no branch, no shared helper, no
+function moved, every entry address unchanged.
 
 | VA | stock | patched | purpose |
 |---|---|---|---|
-| `0x31df64` | `E30636B0` | `E3A00000` | `getPcController(): mov r0,#0` (return NULL) |
-| `0x31df68` | `E3403268` | `E12FFF1E` | `getPcController(): bx lr` |
+| `0x31df3c` | `E30636B0` | `E59F3058` | `getNet(): ldr r3,[pc,#88]` → pool `0x026866B0` |
+| `0x31df40` | `E3403268` | `E5933110` | `getNet(): r3 = [r3,#0x110]` (UiObjManager) |
+| `0x31df44` | `E5933110` | `E1B00003` | `getNet(): movs r0,r3` — sets Z from r3 |
+| `0x31df48` | `E5930094` | `15930094` | `getNet(): ldrne r0,[r3,#0x94]` |
+| `0x31df50` | `E30636B0` | `E59F3044` | `getSettings(): ldr r3,[pc,#68]` |
+| `0x31df54` | `E3403268` | `E5933110` | `getSettings(): r3 = UiObjManager` |
+| `0x31df58` | `E5933110` | `E1B00003` | `getSettings(): movs r0,r3` |
+| `0x31df5c` | `E5930098` | `15930098` | `getSettings(): ldrne r0,[r3,#0x98]` |
+| `0x31df64` | `E30636B0` | `E59F3030` | `getPcController(): ldr r3,[pc,#48]` |
+| `0x31df68` | `E3403268` | `E5933110` | `getPcController(): r3 = UiObjManager` |
+| `0x31df6c` | `E5933110` | `E1B00003` | `getPcController(): movs r0,r3` |
+| `0x31df70` | `E593009C` | `1593009C` | `getPcController(): ldrne r0,[r3,#0x9c]` |
 
-The caller's own NULL check then skips the absent object. Idempotent, and it
-refuses a file too short to contain the patch offsets rather than throwing. The
-resulting md5 is pinned at the top of this file.
+The three `bx lr` words (`0x31df4c`, `0x31df60`, `0x31df74`) are unchanged and are
+listed in the patcher for completeness. `movs` is the flag-setter that replaces the
+dropped `cmp`; flags are caller-saved across a `bl`, so setting them is free. The
+three pc-relative offsets were checked against the target's own literal at
+`0x31df9c` — ARM reads `pc` as instruction+8, so `0x31df9c - (entry+8)` is 88, 68
+and 48. That literal is shared with `getPcChController` @`0x31df78` and is left
+alone.
+
+Idempotent, and it refuses a file too short to contain the patch offsets rather
+than throwing. The resulting md5 is pinned at the top of this file.
+
+### The stub this replaces, and what it broke
+
+The first version of this stage patched only `getPcController`, to a permanent
+`mov r0,#0; bx lr` (`E3A00000`/`E12FFF1E`). It stopped the crash, and it is
+byte-identical to the `mov r0,#0; bx lr` thunks Pioneer ships for its own
+unimplemented functions, which is exactly why the damage went unnoticed.
+
+But `NetworkMonitor::timerCallback` @`0x392160` reads the Pro DJ Link gate
+`ui::PcController::isUsbBConnected()` (`PcController+0x72`) through that getter
+**once a second**. A stubbed getter makes the gate structurally unreadable: `rbp`
+never calls `operateConnectNetwork` and never calls `checkNetworkConnectionChange`,
+so `NetworkMonitor`'s own IP field (`+0x1c`) is never filled either — which in turn
+makes the out-of-band `NETALIAS_CONNECT` route refuse forever (`no-ip`). One 2-word
+patch disabled Pro DJ Link on **both** routes, silently, on every host that
+carried it.
+
+`getNet` and `getSettings` dereference the same NULL `UiObjManager` at `+0x94` and
+`+0x98`; they are only lucky that no 1-second timer calls them before the UI is up.
+They are patched too.
 
 > This patch is **not** device-specific. It applies unchanged to any host with no
 > Pioneer PC-controller link, which is why the file is named `nopc` and not
 > `sclive4`.
+
+---
+
+## 12. Third stage: the layer pixel format (the depth pair)
+
+Applied by [`scripts/patch-rbp-depth.py`](../../scripts/patch-rbp-depth.py) to the
+output of section 11, not part of `rbp_patch.py`. It is a separate stage because it
+is not a fix at all: it is a **choice**, and the only one in this tree that has a
+matching half outside the binary.
+
+`DS_HW_Core_Layer_Create` builds the DirectFB layer description in two
+instructions, and the format it names is what rbp renders its whole UI in:
+
+| build | instructions | `DSPF_*` | |
+|---|---|---|---|
+| 16 bpp | `movw r3,#0x801` / `movt r3,#0x20` | `0x00200801` RGB16 | the RX3's own framebuffer |
+| 32 bpp | `movw r3,#0xc03` / `movt r3,#0x40` | `0x00400c03` RGB32 | **the default**, and what the unit runs |
+
+| VA | file offset | 16 bpp | 32 bpp | purpose |
+|---|---|---|---|---|
+| `0x1a3ab8` | `0x19bab8` | `E3003801` | `E3003C03` | `movw r3,#0x801` / `#0xc03` |
+| `0x1a3ac0` | `0x19bac0` | `E3403020` | `E3403040` | `movt r3,#0x20` / `#0x40` |
+
+**The other half is `RB_FB_LIE_BPP`** (rb.conf), which is the depth the
+framebuffer shim reports in `FBIOGET_VSCREENINFO` — `fb_lie_bpp()` in
+`scripts/shims/fb_shim.c`, together with the `line_length` that must move with it
+(`1280 * bpp / 8`, so 2560 or 5120). rbp and DirectFB both size their layers from
+that lie. The two must agree, and neither can see the other:
+
+* word 16 + lie 32 (or the mirror) → DirectFB's `DS_HW` plugin refuses the layer
+  and rbp segfaults **before the panel opens**: black screen, systemd
+  restart-looping every 10 s, and nothing in `rbp.log` that names the depth.
+* 32 bpp on a 16-bpp panel changes DirectFB's present mode from `off` to
+  `convert` (a bpp-only mismatch at unchanged geometry is AUTO-FALLBACK's
+  `PRESENT_CONVERT` case), which is what makes the panel path legal here at all.
+
+Two guards keep the pair together, because a silent mismatch is the one failure
+nobody can read off the glass:
+
+* `build-chroot.sh` reads `RB_FB_LIE_BPP` out of **the same rb.conf it embeds** and
+  passes it to this patcher, so a tarball cannot carry a mismatched pair.
+* `start-rb.sh` § 4b reads the byte at `0x19bab8` out of the player that is about
+  to run (`01` = 16 bpp, `03` = 32 bpp) and **refuses to launch** on a positive
+  mismatch, printing both fixes. A byte that is neither is not a build this tree
+  produced and is only noted, so the deploy-root override's whole purpose —
+  iterating on one file without a rebuild — still works.
+
+**What 32 bpp costs**, measured on `.239` 2026-10-08, both arms 25 s from a fresh
+restart on the same screen (frame rate from the `FB_VSYNC_RATE` counter in
+`fb_shim.c`):
+
+| | 16 bpp | 32 bpp |
+|---|---|---|
+| frame rate | 56.5/s | ~46/s |
+| rbp CPU | 36 % of one core | 67 % |
+
+Two parts: rbp's own renderer writes 4 MB a frame instead of 2, and DirectFB takes
+one full-frame `rgb32_to_rgb565` convert per present. The convert exists **only**
+because the panel is 16 bpp (the whole DirectFB build is `-march=armv5t`, so it is
+a scalar loop on a board that has NEON).
+
+**What it buys**: the deck-1 bottom strip's right vertical edge is drawn whole
+rather than at 1/4 and 1/8 coverage. That edge is rbp's own 16-bpp render path, so
+this word *is* the fix rather than one way to reach it — there is no DirectFB knob
+for it.
+
+The patcher is idempotent **in both directions** (`--bpp 16` reverts) and validates
+the word it finds at every address, so it aborts on a foreign binary rather than
+corrupting it. Round-tripping `97aa2223…` → `99040424…` → `97aa2223…` is
+byte-exact.

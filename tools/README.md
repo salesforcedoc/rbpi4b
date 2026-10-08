@@ -14,7 +14,7 @@ Two kinds of tool live here:
 | [`aseqdump2dump.py`](aseqdump2dump.py) | the Pi or a workstation | Python | turn an `aseqdump` capture into a replayable MIDI dump, and print the inventory and arithmetic a controller map is written from |
 | [`pi-bringup/`](pi-bringup/) | **the Pi** | Python / shell | drive the input path on the unit: a virtual keyboard with a chosen hold time, a raw evdev reader, a state probe, a key-and-capture harness |
 
-Firmware acquisition, decryption and key handling are out of scope for rblive4;
+Firmware acquisition, decryption and key handling are out of scope for rbpi4b;
 start from the extracted assets described in
 [`docs/04-firmware-assets.md`](../docs/04-firmware-assets.md).
 
@@ -22,7 +22,7 @@ start from the extracted assets described in
 
 `rbp_patch.py` contains the complete, verified instruction table that turns the
 stock v1.20 `rbp` (md5 `4f2efcfc0c9e3f539289f863acfddcc6`) into `rbp-audio`
-(md5 `3706c68f7242779d46afa09f35a39acf`). It is idempotent and validates the
+(md5 `3dda2d4e10187a75bfc16a7b4f16f192`). It is idempotent and validates the
 stock words before writing. [`PATCHES.md`](patch-rbp/PATCHES.md) explains what
 each patch does.
 
@@ -32,7 +32,12 @@ python3 tools/patch-rbp/rbp_patch.py /path/to/stock/rbp -o extracted/rbp-audio
 
 The `getPcController()` patch is applied as a second stage by
 [`scripts/build-chroot.sh`](../scripts/build-chroot.sh) via
-[`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py).
+[`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py), and the layer pixel
+format as a third via [`scripts/patch-rbp-depth.py`](../scripts/patch-rbp-depth.py).
+The third stage is not a fix but a choice — 32 bpp by default, 16 bpp kept — and it
+has a matching half outside the binary, so the build reads `RB_FB_LIE_BPP` out of
+the `rb.conf` it embeds and passes it to the patcher. Moving one half alone leaves
+rbp unable to open its layer: black screen, no log line naming the cause.
 
 ## `build-directfb`
 
@@ -48,8 +53,8 @@ plus `gcc-arm-linux-gnueabi` (**armel/soft-float**, never `…hf`) and
 test binaries come from one place.
 
 ```bash
-docker build -t rblive4-build tools/build-toolchain/
-docker run --rm -v "$PWD:/src" -w /src rblive4-build \
+docker build -t rbpi4b-build tools/build-toolchain/
+docker run --rm -v "$PWD:/src" -w /src rbpi4b-build \
     make -C scripts/shims RX3=/src/extracted/XDJRX3-rootfs test
 ```
 

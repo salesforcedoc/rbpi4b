@@ -101,23 +101,99 @@ sh "$HERE/fix-dev.sh" || { echo "start-rb: fix-dev.sh failed" >&2; exit 1; }
 # the shims and the patched fbdev module *inside* the chroot. But dropping a
 # freshly built file at the deploy root and re-running this script is how you
 # iterate on one shim without rebuilding the tarball, so honour it when present.
+#
+# Staged beside the target and RENAMED into place -- never a bare `cp`. `cp`
+# opens the destination O_TRUNC, so copying over a shim that a live rbp has
+# mapped truncates the file underneath it, and the next call into a page past
+# the new EOF is a SIGBUS. A rename within one directory is atomic, and it
+# leaves the old inode -- and any running process's mappings of it -- intact.
+# This is normally safe here because systemd has reaped the previous rbp before
+# this script runs, but "normally" is doing real work in that sentence: running
+# start-rb.sh by hand against a live player is the same player-killing bug, and
+# it is not worth the two lines to be immune to it. install.sh's
+# install_artifact() already does exactly this.
 install_override() {
     src=$1
     dst=$2
     [ -f "$src" ] || return 0
-    if cp "$src" "$dst"; then
-        chmod 755 "$dst"
+    tmp="$dst.new.$$"
+    if install -m 755 "$src" "$tmp" && mv -f "$tmp" "$dst"; then
         echo "  override: $(basename "$src") -> $dst"
     else
+        rm -f "$tmp" 2>/dev/null || true
         echo "  WARNING: could not install override $src" >&2
     fi
 }
 install_override "$RB_DEPLOY_ROOT/fbshim.so"     "$RB_CHROOT/usr/lib/fbshim.so"
 install_override "$RB_DEPLOY_ROOT/knobshim.so"   "$RB_CHROOT/usr/lib/knobshim.so"
 install_override "$RB_DEPLOY_ROOT/audioshim.so"  "$RB_CHROOT/usr/lib/audioshim.so"
+# The exit witness. It is in RB_LD_PRELOAD (rb.conf), so naming it here is what
+# keeps the loaded copy and the deployed copy the same file (docs/13 S3.7).
+install_override "$RB_DEPLOY_ROOT/crashcatch.so" "$RB_CHROOT/usr/lib/crashcatch.so"
+# The network alias. It is in RB_LD_PRELOAD too, and it is the one shim whose
+# POSITION in that list matters: it must be second, before fbshim.so, because
+# both define ioctl. deploy-root/doctor.sh checks the order; this line is what
+# keeps the loaded copy the deployed one, exactly as for crashcatch above.
+install_override "$RB_DEPLOY_ROOT/netshim.so"    "$RB_CHROOT/usr/lib/netshim.so"
 install_override "$RB_DEPLOY_ROOT/rbp-audio"     "$RB_CHROOT/root/pdj/rbp"
 install_override "$RB_DEPLOY_ROOT/libdirectfb_fbdev-rot16.so" \
                  "$RB_CHROOT/usr/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so"
+
+# --- 4b. the depth pair, checked before the player is started ---------------
+#
+# rbp's DS_HW_Core_Layer_Create carries a DirectFB layer pixel format, and
+# FBIOGET_VSCREENINFO -- the shim's lie, fed by FB_LIE_BPP just above -- describes
+# the framebuffer in the same terms. THE TWO MUST AGREE. A 32-bpp word under a
+# 16-bpp lie (or the mirror) makes DirectFB's DS_HW layer plugin refuse the layer
+# and rbp segfaults before the panel opens: black screen, systemd restart-looping
+# every 10 s, and nothing in rbp.log that names the depth. That is a diagnosis
+# nobody can make from the glass, so it is made here instead.
+#
+# Every remaining way to get the mismatch is a hand edit -- rb.local.conf, or a
+# deploy-root override left behind by a build at the other depth -- and this is the
+# last point that can see both halves at once, because after this line the player is
+# running and the lie is in its environment. `scripts/patch-rbp-depth.py` is what
+# writes the word and states the offsets as 0x19bab8/0x19bac0 (its table); they
+# are the two `movw`/`movt` immediates, so the low byte of each is 01/20 for
+# DSPF_RGB16 and 03/40 for DSPF_RGB32. BOTH are read: one byte alone would
+# classify roughly one file in 128 as a build it is not, and the answer here can
+# stop the unit from starting. od is present on every target this has run on; its
+# absence skips the check rather than failing the launch.
+#
+# Only a POSITIVE mismatch refuses. A pair that matches neither means a player
+# this tree did not build -- a stock binary, or someone's experiment -- and doctor.sh
+# is the tool that names builds; refusing here would block the deploy-root override's
+# whole reason for existing, which is iterating on one file without a rebuild.
+DEPTH_PLAYER="$RB_CHROOT/root/pdj/rbp"
+if [ -n "${RB_FB_LIE_BPP:-}" ] && [ -f "$DEPTH_PLAYER" ] && command -v od >/dev/null 2>&1; then
+    DEPTH_B0="$(od -An -tx1 -j $((0x19BAB8)) -N 1 "$DEPTH_PLAYER" 2>/dev/null | tr -d ' \t\n')"
+    DEPTH_B1="$(od -An -tx1 -j $((0x19BAC0)) -N 1 "$DEPTH_PLAYER" 2>/dev/null | tr -d ' \t\n')"
+    case "$DEPTH_B0$DEPTH_B1" in
+        0120) PLAYER_BPP=16;;
+        0340) PLAYER_BPP=32;;
+        *)    PLAYER_BPP=;;
+    esac
+    if [ -z "$PLAYER_BPP" ]; then
+        echo "start-rb: note: $DEPTH_PLAYER holds no DSPF_RGB16/32 word at"
+        echo "start-rb:       0x19bab8 -- not a player this tree built. Not checking"
+        echo "start-rb:       it against RB_FB_LIE_BPP=$RB_FB_LIE_BPP (sh doctor.sh)."
+    elif [ "$PLAYER_BPP" != "$RB_FB_LIE_BPP" ]; then
+        echo "start-rb: REFUSING TO START: the depth pair disagrees." >&2
+        echo "start-rb:   player $DEPTH_PLAYER renders ${PLAYER_BPP} bpp" >&2
+        echo "start-rb:   shim   RB_FB_LIE_BPP=${RB_FB_LIE_BPP} (rb.conf, or this unit's rb.local.conf)" >&2
+        echo "start-rb: DirectFB's layer plugin refuses that pair and rbp dies before the" >&2
+        echo "start-rb: panel opens, so this is checked here instead of on the glass." >&2
+        echo "start-rb: Either half fixes it, and both are one line:" >&2
+        echo "start-rb:   keep the player, change the lie:" >&2
+        echo "start-rb:     echo RB_FB_LIE_BPP=${PLAYER_BPP} >> \$RB_DEPLOY_ROOT/rb.local.conf" >&2
+        echo "start-rb:   keep the lie at ${RB_FB_LIE_BPP}, change the player:" >&2
+        echo "start-rb:     put a ${RB_FB_LIE_BPP}-bpp player at \$RB_DEPLOY_ROOT/rbp-audio" >&2
+        echo "start-rb:     (host: python3 scripts/patch-rbp-depth.py <player> --bpp ${RB_FB_LIE_BPP})" >&2
+        exit 1
+    else
+        echo "start-rb: depth: player and lie both ${PLAYER_BPP} bpp"
+    fi
+fi
 
 # --- 5. clear stale IPC and logs --------------------------------------------
 #
@@ -126,11 +202,20 @@ install_override "$RB_DEPLOY_ROOT/libdirectfb_fbdev-rot16.so" \
 # rendezvous points — a leftover guard_LocalDBServer from an unclean exit makes
 # the next rbp believe a database server is already running.
 rm -f /tmp/guard_LocalDBServer /tmp/req_LocalDBServer
-# The two shim logs are appended to, so a stale one would mix two runs together.
+# These shim logs are appended to, so a stale one would mix two runs together.
 # The MIDI dump is not in this list: it is not a fixed path any more, and the
 # shim opens it for writing (see RB_MIDI_DUMP in rb.conf), so a stale dump is
 # truncated by the writer rather than by us.
 rm -f /tmp/knobshim.log /tmp/audioshim.log
+# netshim.log is in this list for the same reason and one of its own: it is the
+# only evidence of what the alias decided, and a surviving copy would make the
+# next run's "armed" line look like it came from this one.
+rm -f /tmp/netshim.log
+# The Link bring-up's request file (/tmp/rb_link.req) is deliberately NOT cleared
+# here. It is a REQUEST, and one that arrived before rbp had a network address is
+# meant to wait for one — clearing it would discard the operator's intent at the
+# exact moment it is about to be honoured. The shim unlinks it itself, just before
+# it makes the call, so a request never fires twice.
 rm -f /tmp/dfbdig*.log /tmp/rot_surface.dump
 # The display watcher's baseline goes first, and it is written again below
 # immediately before the launch it describes. Between those two points there is
@@ -178,20 +263,23 @@ rm -f /tmp/displaywatch.geom
 # would be overwritten with the empty string. Set those by exporting the shim
 # name directly, which reaches rbp because nothing here uses `env -i`.
 SHIM_VARS="
-DFB_PRESENT DFB_ROTATE PAN_PACER_MS FB_DEV
+DFB_PRESENT DFB_ROTATE PAN_PACER_MS FB_DEV FB_LIE_BPP
 DFB_PRESENT_AUTO DFB_PRESENT_FIT DFB_PRESENT_SKIP DFB_PRESENT_PX_BUDGET
 POINT_KIND POINT_DEV POINT_DEBUG POINT_MIN_DWELL_MS POINT_MOUSE_SPEED
 POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y POINT_CURSOR POINT_CURSOR_MS
-POINT_QUANTIZE_TAP POINT_MENU POINT_MENU_MOUSE
+POINT_QUANTIZE_TAP POINT_MENU POINT_MENU_MOUSE POINT_FX_TOUCH POINT_HOTCUE_TOUCH
 AUDIO_DEV AUDIO_CHANNELS AUDIO_MAP AUDIO_FMT AUDIO_MONITOR_PAIR
 AUDIO_MIRROR_DEV AUDIO_MIRROR_FMT AUDIO_MIRROR_REOPEN_MS AUDIO_MIRROR_BOOST_DB
 STARTUP_MUTE_MS STARTUP_FADE_MS SCHED_RT
 MIDI_MAP EVDEV_MAP MIDI_IN_MATCH MIDI_OUT_MATCH MIDI_DUMP MIDI_REPLAY
-MIDI_REPLAY_SPEED KBD_DEV
+MIDI_REPLAY_SPEED KBD_DEV CTRL_KEEPALIVE
 LED_VU LED_VU_SEGMENTS LED_PADS LED_DISABLE PAD_BRIGHT JOG_PPR
 JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV MIRROR_GAIN_MID
 KNOB_VERBOSE JOG_VERBOSE TEMPO_VERBOSE LED_VERBOSE
 SHMSTATE_STRICT
+CRASH_LOG
+NETALIAS NETALIAS_IFACE NETALIAS_MAC_SCRAPE NETALIAS_LOG
+NETALIAS_CONNECT NETALIAS_CONNECT_FILE
 "
 for v in $SHIM_VARS; do
     eval "val=\${RB_$v:-}"

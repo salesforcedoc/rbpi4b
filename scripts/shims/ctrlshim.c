@@ -36,6 +36,9 @@
 #include "mididump.h"
 #include "evdev_io.h"
 #include "ctrl_map.h"
+#include "controllers.h"   /* the surface table: the default map, the keepalive */
+#include "usb_label.h"     /* a stick's own name, for rbp's device row */
+#include "syscalls.h"      /* real_open/real_read: rbp interposes open itself */
 
 /* KNOB_VERBOSE. Defined here because this is the module that reads the
  * environment; declared in shimutil.h for everyone whose logging it gates. */
@@ -93,19 +96,39 @@ static const struct ctrl_map *const evdev_maps[] = {
 };
 
 /* The surface to fall back to when the environment says nothing, or says
- * something this build has never heard of. The MIDI side falls back to the FLX4
- * for the same reason it always did: it is the surface this port targets, and it
- * is the value rb.conf ships, so a shim started by hand with no environment and
- * a typo'd name both end up where they would have been anyway. The previous
- * target's map is one word away (MIDI_MAP=jp21) -- the point of the fallback is
- * that a mistake is LOUD, not that it is impossible.
+ * something this build has never heard of.
  *
- * The evdev side falls back to the keyboard: it is the only non-MIDI surface
- * there is, it is the value rb.conf ships, and asking for no keyboard on purpose
- * has a name of its own (EVDEV_MAP=none), so the fallback does not have to be
- * one.
+ * THE MIDI SIDE'S FALLBACK IS NOW A LOOKUP, not a pointer to map_flx4. It is the
+ * map that the controller table's default row selects, so "which controller this
+ * port targets" is written down in exactly one place -- controllers.c -- and a
+ * table row naming a map this build does not have is caught twice over (by
+ * test_controllers.c, and by the log line below). The fallback's REASON is
+ * unchanged: the FLX4 is the surface this port targets and the value rb.conf
+ * ships, so a shim started by hand with no environment and a typo'd name both end
+ * up where they would have been anyway. The previous target's map is one word
+ * away (MIDI_MAP=jp21) -- the point of the fallback is that a mistake is LOUD,
+ * not that it is impossible.
+ *
+ * The evdev side is a plain pointer to map_kbd and stays one: it is the only
+ * non-MIDI surface there is, it is the value rb.conf ships, and asking for no
+ * keyboard on purpose has a name of its own (EVDEV_MAP=none), so the fallback
+ * does not have to be one. It is not a controller and has no row.
  */
-static const struct ctrl_map *const default_midi_map = &map_flx4;
+static const struct ctrl_map *default_midi_map(void)
+{
+     const struct controller *c = controllers_default();
+     unsigned i;
+
+     for (i = 0; i < sizeof midi_maps / sizeof midi_maps[0]; i++)
+          if (strcmp(midi_maps[i]->name, c->map_name) == 0)
+               return midi_maps[i];
+
+     klog("knobshim2: the default controller '%s' selects map '%s', which this "
+          "build does not have; falling back to '%s'\n",
+          c->id, c->map_name, midi_maps[0]->name);
+     return midi_maps[0];
+}
+
 static const struct ctrl_map *const default_evdev_map = &map_kbd;
 
 /* Resolve one selection. The warning names the environment variable rather than
@@ -236,7 +259,7 @@ static void *midi_thread(void *arg)
 
      g_midi = pick_map("MIDI_MAP", midi_maps,
                        (unsigned)(sizeof midi_maps / sizeof midi_maps[0]),
-                       default_midi_map);
+                       default_midi_map());
      g_evdev = pick_map("EVDEV_MAP", evdev_maps,
                         (unsigned)(sizeof evdev_maps / sizeof evdev_maps[0]),
                         default_evdev_map);
@@ -348,13 +371,33 @@ static void *midi_thread(void *arg)
 
 /* The maps' ~20 ms heartbeat: button-hold timeouts and idle state, the things
  * that are about time rather than about an event. One thread for all of them,
- * because they are all short checks at the same cadence. */
+ * because they are all short checks at the same cadence.
+ *
+ * THE CONTROLLER KEEPALIVE RIDES THIS TICK rather than getting a thread of its
+ * own. 20 ms against the FLX4's 200 ms period is ten chances per period, which is
+ * finer than the period itself needs, and a second thread sleeping 5 Hz would be
+ * a thread to start, name and keep alive for one message every fifth of a second.
+ *
+ * WHAT IT SENDS AND TO WHOM is the controller table's business, not this
+ * function's: the row comes from the port name of the surface actually
+ * subscribed (controllers_by_hint), so it follows what is PLUGGED IN rather than
+ * what MIDI_MAP selected. Under MIDI_MAP=kbd -- a map with no row -- the FLX4 is
+ * still attached, still lit and still polled, which is the behaviour that
+ * selection has always had. When nothing is attached the name is empty, the
+ * lookup is NULL and the whole thing is one comparison. */
 static void *tick_thread(void *arg)
 {
+     const int ka_on = env_on("CTRL_KEEPALIVE", 1);
+     unsigned long long last_ka = 0;
+     int ka_announced = 0;
      (void)arg;
      if (!is_rbp_process())
           return NULL;
+     if (!ka_on)
+          klog("knobshim2: keepalive: off (CTRL_KEEPALIVE=0); no surface is "
+               "polled\n");
      for (;;) {
+          unsigned long long now;
           usleep(20000);   /* 50 Hz */
           /* Both sides tick, and a shared map ticks once: a hold timeout driven
            * twice per round would expire at half the interval it was written
@@ -363,12 +406,39 @@ static void *tick_thread(void *arg)
                g_midi->tick();
           if (g_evdev && g_evdev != g_midi && g_evdev->tick)
                g_evdev->tick();
+
+          if (!ka_on)
+               continue;
+          now = shim_now_ms();
+          {
+               const struct controller *c =
+                    controllers_by_hint(midi_surface_name());
+
+               /* `last_ka` moves only when the message actually went out, so a
+                * tick that finds no route is retried on the next one instead of
+                * waiting out a period that was never used. That costs nothing
+                * when there is no route -- midi_sysex_out() returns without a
+                * syscall -- and it is why the per-send line is gated on
+                * KNOB_VERBOSE: unplugged, this arm runs every 20 ms forever. */
+               if (controller_keepalive_due(c, now, last_ka) &&
+                   midi_sysex_out(c->keepalive, c->keepalive_len)) {
+                    last_ka = now;
+                    if (!ka_announced) {
+                         ka_announced = 1;
+                         klog("knobshim2: keepalive: '%s' %u byte(s) every %u ms "
+                              "to '%s'\n", c->name, c->keepalive_len,
+                              c->keepalive_ms, midi_surface_name());
+                    } else if (verbose) {
+                         klog("knobshim2: keepalive sent\n");
+                    }
+               }
+          }
      }
      return NULL;
 }
 
 /* Stub out Pioneer PowerManager callbacks.
- * Prime GO lacks Pioneer's power manager hardware, so [UsbStorageManager+80] is NULL.
+ * rbp's power-manager object is not present on this rig, so [UsbStorageManager+80] is NULL.
  * When a USB drive mounts/unmounts, rbp calls notifyPermissionChanged(NULL), etc. which segfaults. */
 __attribute__((visibility("default"))) void _ZN3uif13IPowerManager23notifyPermissionChangedEv(void *this) { (void)this; }
 __attribute__((visibility("default"))) void _ZN3uif13IPowerManager23notifyPreparedToStandbyEi(void *this, int a) { (void)this; (void)a; }
@@ -379,42 +449,179 @@ __attribute__((visibility("default"))) void _ZN3uif13IPowerManager15removePermit
 __attribute__((visibility("default"))) void _ZN3uif13IPowerManager12reqStandbyOnEv(void *this) { (void)this; }
 __attribute__((visibility("default"))) void _ZN3uif13IPowerManager16prepareToStandyEv(void *this) { (void)this; }
 
-/* USB stick auto-detection watcher thread.
- * On the Denon Prime GO there is only ONE rear USB-A port, but the Pioneer RX3
- * firmware has 2 USB ports: USB1 (kind 2 in UI, device 3) and USB2 (kind 3 in UI, device 2).
- * Pioneer's internal engine (Total_MainUsbMessageProc) writes to kind 3 (USB2), which causes
- * the UI to display a blank/phantom "USB2" and hides the USB1 stick label.
- * This thread continuously:
- *   1. Monitors for mounted Rekordbox stick (/media/usb1/sda1/PIONEER/rekordbox/export.pdb).
- *   2. Automatically redirects any kind 3 (USB2) detect flags and property info into kind 2 (USB1).
- *   3. Keeps kind 3 cleared to 0 so phantom USB2 is NEVER reported.
- *   4. Ensures USB1 detect flag = 2, uiConnectedMedia = 2 (USB1 only), browseDevice = 3 (USB1).
- *   5. Opens the Source menu on fresh attach, and clears state on detach.
+/* USB stick watcher thread.
+ *
+ * rbp has TWO media slots and this port now feeds both of them: slot 1 from
+ * /tmp/udev_usb1 -> /media/usb1/sda1 and slot 2 from /tmp/udev_usb2 ->
+ * /media/usb2/sda1 (usb-watch.sh assigns them; the first stick is slot 1).
+ * rbp holds all four udev FIFOs open from startup, so the second slot needs
+ * nothing new on that side.
+ *
+ * The words below are rbp's device LIST for the UI: USB1 is kind 2 with UI
+ * device number 3, USB2 is kind 3 with device number 2. The engine
+ * (Total_MainUsbMessageProc) writes kind 3 by itself, so on a build with only
+ * slot 1 populated the UI draws a blank second device and USB1's stick label is
+ * hidden. That is the whole reason this thread exists: while slot 2 is EMPTY it
+ * keeps kind 3 cleared. Slot 1's treatment is unchanged from the single-slot
+ * port, write for write.
+ *
+ * With a stick actually in slot 2 the suppression is lifted -- the second device
+ * is real, and rbp's own two UsbStorageManager objects already report it (that is
+ * what the USB STOP chooser reads). Measured 2026-10-07: feeding /tmp/udev_usb2
+ * takes manager 2 from media=0 to media=2 with slot 1 untouched, so rbp needs no
+ * help accepting the device.
+ *
+ * THE NAME OF THE DEVICE. rbp draws each row's DEVICE NAME from the 64-byte
+ * UTF-16 name field at the HEAD of that device's property record (its
+ * ConvertBrowseUi2Gui calls GetMountInfo_DevicePropertyInfo(0, kind) and copies
+ * the whole field, or -- when the field's first UTF-16 unit is zero, which is
+ * every stock run -- falls back to the literals "USB1"/"USB2"). So the operator's
+ * own question, "can you display the USB label name instead of USB1 USB2?", is
+ * answered by putting the stick's volume label in that field, which is what
+ * usb_label_apply() below does.
+ *
+ * The label itself is read by usb-watch.sh, on the host, from blkid -- the same
+ * string `lsblk -f` prints, and the only reader here that knows FAT12/16 from
+ * FAT32 (where the volume label sits at a different offset in the boot sector;
+ * hand-parsing it in C was tried and landed on the wrong byte). It is left at
+ * /tmp/udev_usb<slot>.label, beside that slot's FIFO and for the same reason:
+ * the chroot's /tmp is the host's, which is why /tmp/udev_usb1 reaches rbp at all.
+ *
+ * This thread is the only writer. rbp repopulates and clears these records on
+ * mount events (~9 Clr callers), so the write is not one-shot: the field is
+ * compared every tick and rewritten only when it differs.
  */
+#define USB_LABEL_FILE1  "/tmp/udev_usb1.label"
+#define USB_LABEL_FILE2  "/tmp/udev_usb2.label"
+
+/* The two name fields: 4 bytes past the detect word this thread already writes
+ * (kind 2 / USB1 -> 0x03256888, kind 3 / USB2 -> 0x03256944). Measured live
+ * 2026-10-07 by writing "AAAA1111"/"BBBB2222222" into them and reading both back
+ * off the SOURCE screen, in full and with no corruption of the other row. They
+ * are ordinary writable .bss -- no mprotect, and no code patched to reach them. */
+#define USB1_NAME_FIELD  0x0325688Cu
+#define USB2_NAME_FIELD  0x03256948u
+
+/* One label file, read whole. Answers its length -- 0 when the file is absent,
+ * empty or unreadable -- and always NUL-terminates. The raw syscall is not
+ * optional: rbp's own open/read are interposed by fbshim in this same process. */
+static int label_file_read(const char *path, char *buf, int max)
+{
+     int fd, n;
+
+     if (max <= 0)
+          return 0;
+     fd = real_open(path, O_RDONLY, 0);
+     if (fd < 0)
+          return 0;
+     n = (int)real_read(fd, buf, (size_t)(max - 1));
+     real_close(fd);
+     if (n < 0)
+          return 0;
+     buf[n] = '\0';
+     return n;
+}
+
+/* Put one slot's label where rbp will draw it, or hand rbp's own name back.
+ *
+ * `present` is whether the slot holds a stick at all; `owned` is this thread's
+ * memory of whether it has ever written this field. A field the shim has never
+ * named is left COMPLETELY alone -- not even cleared -- which is what keeps a
+ * unit running an older usb-watch.sh (one that writes no label files) byte-for-
+ * byte the shim it was before this existed. Once the shim has owned the field it
+ * keeps it equal to the label, empty included, so a stick that goes takes its
+ * name with it.
+ *
+ * The whole 64 bytes are compared and rewritten only on a difference: rbp
+ * repopulates these records itself, and a blind store every 100 ms would fight it
+ * for the field on every tick. */
+static void usb_label_apply(unsigned long addr, const char *path, int present,
+                            int *owned)
+{
+     volatile unsigned char *field = (volatile unsigned char *)(uintptr_t)addr;
+     unsigned char want[USB_LABEL_FIELD];
+     char raw[USB_LABEL_FIELD];
+     char text[USB_LABEL_MAX + 1];
+     int n, i;
+
+     n = 0;
+     if (present) {
+          n = label_file_read(path, raw, (int)sizeof raw);
+          n = usb_label_sanitize(raw, n, text, USB_LABEL_MAX);
+     }
+
+     /* No stick, or a stick with no label of its own: rbp's "USB1"/"USB2" is the
+      * right answer, and if the field was never ours there is nothing to undo. */
+     if (n == 0 && !*owned)
+          return;
+
+     if (n > 0)
+          usb_label_pack(text, want, USB_LABEL_FIELD);
+     else
+          memset(want, 0, sizeof want);
+
+     for (i = 0; i < USB_LABEL_FIELD; i++)
+          if (field[i] != want[i])
+               break;
+     if (i < USB_LABEL_FIELD) {
+          for (i = 0; i < USB_LABEL_FIELD; i++)
+               field[i] = want[i];
+          /* The rows are cached; without this the column keeps drawing the old
+           * name until something else happens to make it repaint. */
+          *(volatile uint32_t *)0x326e128 = 1;
+          klog("knobshim2: device name 0x%08lx <- '%s'\n", addr,
+               n > 0 ? text : "(rbp's own)");
+     }
+
+     *owned = (n > 0);
+}
+
 static void *usb_auto_thread(void *arg)
 {
      (void)arg;
-     int last_mounted = 0;
+     int last_mounted = 0, last_mounted2 = 0;
+     int label1_owned = 0, label2_owned = 0;
      for (;;) {
           usleep(100000); /* 100 ms */
           if (!get_key_manager())
                continue;
 
-          int mounted = access("/media/usb1/sda1/PIONEER/rekordbox/export.pdb", F_OK) == 0;
-          if (mounted) {
-               volatile uint32_t *p_det_usb1 = (volatile uint32_t *)0x03256888;
-               volatile uint32_t *p_det_usb2 = (volatile uint32_t *)0x03256944;
-               volatile uint32_t *p_media    = (volatile uint32_t *)0x326f8b4;
-               volatile uint32_t *p_mode     = (volatile uint32_t *)0x326f8b8;
-               volatile uint32_t *p_dev      = (volatile uint32_t *)0x326f8bc;
-               volatile uint32_t *p_refresh  = (volatile uint32_t *)0x326e128;
+          int mounted  = access("/media/usb1/sda1/PIONEER/rekordbox/export.pdb", F_OK) == 0;
+          int mounted2 = access("/media/usb2/sda1/PIONEER/rekordbox/export.pdb", F_OK) == 0;
 
-               /* Suppress phantom USB2 (kind 3) on Prime GO since it has only 1 physical port */
-               if (*p_det_usb2 != 0) {
-                    *p_det_usb2 = 0;
-                    *p_refresh = 1;
+          /* Before the early-out below, on purpose: a stick that left has to
+           * have given its name up as well. */
+          usb_label_apply(USB1_NAME_FIELD, USB_LABEL_FILE1, mounted, &label1_owned);
+          usb_label_apply(USB2_NAME_FIELD, USB_LABEL_FILE2, mounted2, &label2_owned);
+
+          if (!mounted && !mounted2) {
+               if (last_mounted || last_mounted2) {
+                    /* Both slots empty: clear the whole device list. */
+                    *(volatile uint32_t *)0x03256888 = 0;
+                    *(volatile uint32_t *)0x03256944 = 0;
+                    *(volatile uint32_t *)0x326f8b4 = 0;
+                    *(volatile uint32_t *)0x326e128 = 1;
+                    klog("knobshim2: USB removed\n");
                }
+               last_mounted = last_mounted2 = 0;
+               continue;
+          }
 
+          volatile uint32_t *p_det_usb1 = (volatile uint32_t *)0x03256888;
+          volatile uint32_t *p_det_usb2 = (volatile uint32_t *)0x03256944;
+          volatile uint32_t *p_media    = (volatile uint32_t *)0x326f8b4;
+          volatile uint32_t *p_mode     = (volatile uint32_t *)0x326f8b8;
+          volatile uint32_t *p_dev      = (volatile uint32_t *)0x326f8bc;
+          volatile uint32_t *p_refresh  = (volatile uint32_t *)0x326e128;
+
+          /* Keep kind 3 cleared ONLY while slot 2 holds no stick: an empty
+           * second device is the phantom, a populated one is a device. */
+          if (!mounted2 && *p_det_usb2 != 0) {
+               *p_det_usb2 = 0;
+               *p_refresh = 1;
+          }
+
+          if (mounted) {
                /* When USB1 is ready (kind2=2), ensure UI knows media 2 is connected */
                if (*p_det_usb1 == 2) {
                     if (*p_media != 2) {
@@ -430,7 +637,6 @@ static void *usb_auto_thread(void *arg)
 
                if (!last_mounted) {
                     *p_det_usb1 = 2;
-                    *p_det_usb2 = 0;
                     *p_media = 2;
                     *p_dev = 3;   /* Device 3 = USB 1 */
                     *p_refresh = 1;
@@ -442,14 +648,29 @@ static void *usb_auto_thread(void *arg)
                     *p_refresh = 1;
                }
           } else if (last_mounted) {
-               /* Stick unplugged: clear detect flags */
-               *(volatile uint32_t *)0x03256888 = 0;
-               *(volatile uint32_t *)0x03256944 = 0;
-               *(volatile uint32_t *)0x326f8b4 = 0;
-               *(volatile uint32_t *)0x326e128 = 1;
-               klog("knobshim2: USB removed\n");
+               /* Slot 1 emptied while slot 2 still holds a stick: drop slot 1
+                * alone. Nothing about slot 2 is touched here. */
+               *p_det_usb1 = 0;
+               *p_media = 0;
+               *p_refresh = 1;
           }
+
+          /* Slot 2 is a device in its own right, on its own kind and its own UI
+           * device number (2). Its detect word is the only thing forced. */
+          if (mounted2) {
+               if (*p_det_usb2 != 2) {
+                    *p_det_usb2 = 2;
+                    *p_refresh = 1;
+               }
+               if (!last_mounted2)
+                    klog("knobshim2: USB2 detected -> registered (dev=2)\n");
+          } else if (last_mounted2) {
+               *p_det_usb2 = 0;
+               *p_refresh = 1;
+          }
+
           last_mounted = mounted;
+          last_mounted2 = mounted2;
      }
      return NULL;
 }

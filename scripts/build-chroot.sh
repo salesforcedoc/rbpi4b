@@ -1,7 +1,7 @@
 #!/bin/bash
 # build-chroot.sh — assemble the soft-float XDJ-RX3 chroot for the Raspberry Pi 4.
 #
-# Run on a Linux host (WSL is fine). Produces work/rblive4-pi4.tgz, which holds
+# Run on a Linux host (WSL is fine). Produces work/rbpi4b-pi4.tgz, which holds
 # the complete deploy root, ready for the Pi's install.sh to untar into
 # /opt/rblive4:
 #
@@ -198,10 +198,30 @@ find "$CHROOT/root/gui" -name '.DS_Store' -type f -delete 2>/dev/null || true
 ls -d "$CHROOT/root/gui"/*/ | sed 's/^/    /'
 
 # 3. patched player -> /root/pdj/rbp  (shared patches + the SC Live 4
-#    getPcController() NULL-deref fix; see scripts/patch-rbp-nopc.py)
-echo "[3/7] patching + installing rbp..."
+#    getPcController() NULL-deref fix + the layer pixel format; see
+#    scripts/patch-rbp-nopc.py and scripts/patch-rbp-depth.py)
+#
+# The depth stage is not optional and not independent: the player's
+# DS_HW_Core_Layer_Create format word and the shim's FBIOGET_VSCREENINFO lie must
+# say the same thing, and the lie is read from the rb.conf this build embeds. So
+# the value is taken from that same file rather than assumed, and the pair cannot
+# disagree in a tarball. `RB_FB_LIE_BPP=16 scripts/build-chroot.sh` still produces
+# the whole 16-bpp unit -- it is the same command with the one variable moved.
+if [ ! -f "$CONF" ]; then
+  echo "build-chroot: rb.conf not found at $CONF (set CONF=)" >&2
+  exit 1
+fi
+RB_FB_LIE_BPP="$(. "$CONF"; printf '%s' "${RB_FB_LIE_BPP:-32}")"
+case "$RB_FB_LIE_BPP" in
+  32|16) ;;
+  *) echo "build-chroot: RB_FB_LIE_BPP must be 16 or 32, not '$RB_FB_LIE_BPP'" >&2
+     exit 1;;
+esac
+echo "[3/7] patching + installing rbp (RB_FB_LIE_BPP=$RB_FB_LIE_BPP)..."
 mkdir -p "$CHROOT/root/pdj"
 "${PYTHON:-python3}" "$HERE/patch-rbp-nopc.py" "$RBPAUDIO" -o "$CHROOT/root/pdj/rbp"
+"${PYTHON:-python3}" "$HERE/patch-rbp-depth.py" "$CHROOT/root/pdj/rbp" \
+                    --bpp "$RB_FB_LIE_BPP"
 
 # 4. shims -> usr/lib (LD_PRELOAD names) and root/pdj
 echo "[4/7] installing shims..."
@@ -213,6 +233,13 @@ cp "$SHIMS/audioshim.so"   "$CHROOT/root/pdj/audioshim.so"
 cp "$SHIMS/knobshim.so"    "$CHROOT/root/pdj/knobshim.so"
 if [ -f "$SHIMS/crashcatch.so" ]; then
   cp "$SHIMS/crashcatch.so" "$CHROOT/usr/lib/crashcatch.so"
+fi
+# The network alias. SECOND in RB_LD_PRELOAD, before fbshim.so: both define
+# ioctl and the first one loaded wins (netshim.c's header has the argument).
+# It ships switched OFF -- RB_NETALIAS defaults to 0 -- so a unit that never opts
+# in behaves exactly as it did before this file existed.
+if [ -f "$SHIMS/netshim.so" ]; then
+  cp "$SHIMS/netshim.so" "$CHROOT/usr/lib/netshim.so"
 fi
 
 # 5. DirectFB 1.4.16 core (soft-float, .so.0 sonames) over the stock 1.4.0 core,
@@ -333,11 +360,11 @@ if command -v file >/dev/null 2>&1; then
   file "$CHROOT/lib/ld-2.13.so" "$CHROOT/bin/busybox" "$CHROOT/root/pdj/rbp" | sed 's#.*: #  #'
 fi
 
-echo "== tar -> $OUT/rblive4-pi4.tgz =="
+echo "== tar -> $OUT/rbpi4b-pi4.tgz =="
 mkdir -p "$OUT"
-tar -C "$STAGE" -czf "$OUT/rblive4-pi4.tgz" .
-echo "== done: $(du -h "$OUT/rblive4-pi4.tgz" | cut -f1) =="
+tar -C "$STAGE" -czf "$OUT/rbpi4b-pi4.tgz" .
+echo "== done: $(du -h "$OUT/rbpi4b-pi4.tgz" | cut -f1) =="
 echo
 echo "deploy on the Pi:"
-echo "  scp $OUT/rblive4-pi4.tgz pi@<host>:/tmp/"
-echo "  ssh pi@<host> 'sudo sh /path/to/install.sh /tmp/rblive4-pi4.tgz'"
+echo "  scp $OUT/rbpi4b-pi4.tgz pi@<host>:/tmp/"
+echo "  ssh pi@<host> 'sudo sh /path/to/install.sh /tmp/rbpi4b-pi4.tgz'"

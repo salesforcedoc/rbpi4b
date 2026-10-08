@@ -9,8 +9,8 @@
  *
  * These helpers encode the contract once, so no shim has to remember it.
  */
-#ifndef RBLIVE4_ENVUTIL_H
-#define RBLIVE4_ENVUTIL_H
+#ifndef RBPI4B_ENVUTIL_H
+#define RBPI4B_ENVUTIL_H
 
 #include <stdlib.h>
 #include <string.h>
@@ -64,4 +64,4 @@ static inline const char *env_str(const char *name, const char *dflt)
     return v;
 }
 
-#endif /* RBLIVE4_ENVUTIL_H */
+#endif /* RBPI4B_ENVUTIL_H */

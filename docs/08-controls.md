@@ -25,8 +25,10 @@ small set of modules built into `knobshim.so`:
 | `mididump.c` / `.h` | the dump format: record a surface, replay it with no hardware |
 | `rbp_bridge.c` / `.h` | **everything about rbp**: `is_rbp_process()`, the key manager and `send_rx_key()`, the mixer-engine `me_*()` cue helpers, the PlayEngine probes, the `/proc/self/maps` PlayerInnards scan, the LedManager walk, the direct global writes, the `IPowerManager` stubs, `install_meter_hook()`. Every address and offset lives in `rbp_abi.h`. |
 | `rbp_led.c` / `.h` | the LED mirror: rbp's LedStat table and engine state → panel notes, blink, the LED logging |
+| `led_table.c` / `.h` | the **pure** half of the mirror: the settled-table merge (the torn-read filter), the (id, channel) lookup, and the blink phase. No address of rbp's appears in it, so it is tested without a Pi (`test_led_table`). |
 | `rbp_vu.c` / `.h` | the meter bit maths and the segment rescale |
-| `midi_io.c` / `.h` | the sequencer in, and the surface's LED/meter port out |
+| `midi_io.c` / `.h` | the sequencer in, and the surface's LED/meter port out (Note On/Off, CC, and one whole SysEx) |
+| `controllers.c` / `.h` | **the controller table**: one row per surface — its map, port-name hint, card id, USB id, init and keepalive SysEx. Pure: no I/O, no globals, no clock, so `test_controllers` links it and runs it on the host. `controllers_cli.c` is the same table with a `main()` for shell callers |
 | `shimutil.c` / `.h` | `klog()`, the clock, and the environment helpers |
 | `shmstate.c` / `.h` | the globals the audio shim reads, and the contract that guards them |
 | `map_flx4.c` | the DDJ-FLX4's tables — written and fixture-tested, tables **unverified** until a dump from the unit, see [15](15-flx4-midi.md) |
@@ -97,6 +99,33 @@ variable was wrong — with two selections the bad value alone no longer says.
 keyboard only", which is what operators wrote before the second selection existed,
 and `EVDEV_MAP=none` is how to ask for a controller with no keyboard at all. The
 previous target's map is one word away (`MIDI_MAP=jp21`).
+
+### One table per controller
+
+A surface's four names are written down **once**, in `controllers.c`: the
+`MIDI_MAP` value that selects its map, the ALSA sequencer port-name substring it
+is detected by, its ALSA card id, and its USB id. `rb.conf` ships all four
+*empty*, and empty means "the table's row for the selected controller" — so
+selecting `jp21` moves the map, the port hint and the audio card together. They
+did not move together before: `RB_MIDI_IN_MATCH` said `FLX4` and `RB_AUDIO_DEV`
+named `DDJFLX4` while `RB_MIDI_MAP` chose the surface, in three files that never
+referenced each other, and the audio card had nothing to do with the surface at
+all. Setting any of the four in `rb.conf` still wins, and is how a device the
+table does not name is used; `doctor.sh` reports when a setting and the table
+disagree.
+
+`controllers_cli` is that table asked from a shell — `detect` (what is *plugged
+in*, by USB id; the shim itself matches the sequencer port name, not USB),
+`names`, `usbids`, `card-id <id>`, `match <id>` — and it is what `doctor.sh` and
+`install.sh` read, so no shell script keeps its own copy of a surface's name.
+`kbd` and `none` are **maps**, not controllers: they have no device behind them
+and are deliberately not rows.
+
+The table also carries two messages rather than names, because a message belongs
+beside the surface it is for: an **init** SysEx sent once (the JP21's
+absolute-control query, and `NULL` for the FLX4) and a repeating **keepalive**
+(the FLX4's 12-byte vendor SysEx every 200 ms — see `CTRL_KEEPALIVE` below and
+[15](15-flx4-midi.md)).
 
 ## The keyboard map (`RB_EVDEV_MAP=kbd`, or `RB_MIDI_MAP=kbd` alone)
 
@@ -280,7 +309,9 @@ claim to trust ([16](16-input-and-hotplug.md)).
 Input is never hardcoded to a device node. The shim walks the ALSA sequencer's
 client and port lists with `SNDRV_SEQ_IOCTL_QUERY_NEXT_CLIENT` /
 `SNDRV_SEQ_IOCTL_QUERY_NEXT_PORT`, matches the port name against
-`RB_MIDI_IN_MATCH` (a case-insensitive substring, default `FLX4`), requires the
+`RB_MIDI_IN_MATCH` (a case-insensitive substring; empty — the shipped default —
+means the selected controller's own hint from the table, which is `FLX4` for the
+FLX4), requires the
 port's capabilities to include `CAP_READ | SUBS_READ`, excludes its own client,
 and subscribes — **in a retry loop**, because the shim starts before the
 controller is necessarily enumerated and plugging it in late has to work. A
@@ -406,6 +437,7 @@ The flags:
 | `VU_TEST=1` / `VU_DEBUG=1` | meter sweep / raw hooked bitmask logging |
 | `BEATLOOP=1` | enable the experimental beat-loop knob (below) |
 | `KBD_DEV=/dev/input/eventN` | the keyboard map's reader reads this one node instead of scanning (a path, not a flag: empty discovers; with it set the mouse is not read) |
+| `CTRL_KEEPALIVE=0` | stop sending the attached surface's keepalive SysEx. It ships `1`, and it is the only thing in this port that sends one — the FLX4's row carries a 12-byte vendor message every 200 ms ([15](15-flx4-midi.md)). Set it to `0` to run the control, and read the log rather than the glass: the send is logged |
 
 `RB_VERBOSE=1` sets the verbose family together: `RB_KNOB_VERBOSE`,
 `RB_JOG_VERBOSE`, `RB_TEMPO_VERBOSE` and `RB_LED_VERBOSE` each default to it in
@@ -561,6 +593,74 @@ sends them (-1 = halve, +1 = double). SHIFT + TIME works too.
 ```
 
 so they are sent with **OP_PRESS**.
+
+#### The ladder and the level, read back off the unit (2026-10-07)
+
+The four wire forms above were **sent on the unit and read back** out of
+`/proc/<pid>/mem`, through rbp's `BeatEffect` object
+([07](07-touch.md#rbps-own-values-read-not-inferred)):
+
+```
+K_DEPTH  OP_VALUE  CH_GLOBAL  v  v/1023.0f
+  cc 100 -> BeatEffect+0x20 = 0.7879   (806/1023)      <- ABSOLUTE
+  cc  20 -> BeatEffect+0x20 = 0.1574   (161/1023)          one send lands it,
+                                                           one send restores it
+
+K_BEATNEXT (0x4491) / K_BEATPREV (0x4490)  OP_PRESS  d = +1 / -1
+  rung +0x44:  5 -> 6 -> 7   and   7 -> 6              <- direction MEASURED,
+                                                          one rung per press
+```
+
+**`K_DEPTH` is an absolute 10-bit value, not a delta** — the whole `0..1023`
+comes down the one arg, so no cursor and no feedback loop. **`K_BEAT*` is
+`OP_PRESS`-only and a step** — see the gate above; it is a single rung, so a
+held button needs one send per rung.
+
+The fourth wire form, `K_BFX`, is the odd one out and is deliberately **not** in
+that table: it is a **toggle**, not a value and not a step, so there is no
+value to send and no way to ask for a state. A caller that needs the effect to
+be *on* -- the momentary pad does, because a level moved on a switched-off
+effect is inaudible -- must therefore **read the effect's state back and ask
+again while it disagrees**, bounded, rather than latch what it asked for. That
+distinction is the whole of the fix in
+[07](07-touch.md#the-press-that-did-not-trigger-and-the-loop-it-bought); a
+one-shot toggle and no toggle are the same thing from the caller's side, and
+the operator's *"it doesn't seem to remember to trigger when i press until i
+turn it on off"* is what told the two apart.
+
+**And the state to read back is TWO words, because one of them lies.** Measured
+on the unit 2026-10-07, after the operator's second report that the pad *"doesn't
+engage"* on a freshly switched effect:
+
+```
+BeatEffectManager +0x50            +0x08 -> BeatEffect*      +0x3c
+  getBeatEffectType() @0x89acc       the current object       isBeatEffectOn() @0x89964
+  ldr r0,[r0,#80]                    (null-checked)           ldrb r0,[r3,#60]
+     0   = the Off state                 BeatEffectPingPong        0   <- a real class, off
+     0   = the Off state                 BeatEffectOff            1   <- NOT RUNNING
+  after ONE FX SELECT press while the effect is off:
+     0                                   BeatEffectOff            1
+```
+
+`BeatEffectOff` has every control the pad drives compiled out --
+`changeEffectStatusToOn` @0x8b0b8, `changeEffectStatusToOff` @0x8b0b4,
+`changeLevelDepthValue` @0x8b0ac and `changeTimeValue` @0x8b0b0 are each a bare
+`bx lr` -- so nothing maintains its `+0x3c` and it reads **1** on an effect that
+is doing nothing. The pad believed the flag, agreed with itself and sent
+nothing at all, which is *"it doesn't engage"*. The fix is the **conjunction**
+`+0x50 != 0 && +0x3c != 0` (`fxpad_zone.c`'s `live_on()`); the wire is unchanged.
+Note it is a conjunction and not an equivalence: a **cold-started rbp** also
+reads type 0, but with a stale *real* object at `+0x08` whose own class maintains
+the flag, and that row correctly reads 0. `rbp_abi.h` carries the table.
+
+`+0x44` is an **index into a halving/doubling ladder**, not a count:
+`5 = "1 BEAT"`, `6 = "2 BEAT"`, `7 = "4 BEAT"`, with `+0x48`/`+0x4c` = 9/0 the
+ends. **rbp recomputes the millisecond figure itself** — the same cell went
+`480 msec / 1 BEAT → 960 / 2 BEAT → 1920 / 4 BEAT` at 125.0 BPM — so `+0x24`
+is rbp's own derived value and anything drawn over that cell must copy it
+rather than compute a second copy. The index is also **not** the position the
+hardware button shows: a real BEAT button and an injected key move the same
+rung, and the panel repaints from the struct either way.
 
 ### Beat-loop knob — experimental
 
@@ -725,7 +825,7 @@ LED thread therefore polls rbp's own engine state at 20 Hz through the
 |---|---|---|
 | SYNC | `n_sync` | **rbp LedStat id 4** (off / solid / blink) |
 | CUE | `n_cue` | loaded && !playing |
-| PLAY | `n_play` | `isPlaying` → solid; loaded && !playing → blink; else off |
+| PLAY | `n_play` | `isPlaying` → solid; loaded && !playing → blink (at rbp's own period when its LedStat entry carries one, else the 800 ms fallback); else off |
 | KEY LOCK | `n_keylock` | `PlayEngine::isMasterTempo(ch)` |
 | VINYL | `n_vinyl` | `PlayEngine::isVinylMode(ch)` |
 | SLIP | `n_slip` | `PlayEngine::isSlipModeOn(ch)` |
@@ -788,10 +888,42 @@ rbp keeps all LEDs in one table, so a shim can mirror it directly:
   `dd if=/proc/<rbp>/mem bs=1 skip=$((ledstat)) count=16 | od -An -tx4`.
 * `LedStat`: `+4` u16 = entry count, `+8` = `Led*` array, `+14` u16 = stride.
   Each `Led` entry is `0x2c` bytes: **`+0` u32 id, `+4` u32 channel,
-  `+16` u32 State**.
+  `+16` u32 State, `+20` u32 dim/unassigned, `+28` u32 blink period in ms,
+  `+40..42` RGB**.
 
 State values: `0` = off, `1` = solid, `2` = blink, `3` = slip-mode dimming
 applied to whole groups.
+
+**`+28` is rbp's own blink period, and it is the cadence the shim uses — measured
+2026-10-06.** Reading the whole table live out of `/proc/<pid>/mem` (51 entries),
+`+28` came back `0` for the 48 entries whose State is not 2, and non-zero for
+exactly the three that are 2: **deck 1 PLAY 500 ms, deck 2 PLAY 250 ms, CfxFilter
+(id 41) 250 ms**. So the state word says *that* an LED blinks and `+28` says *how
+fast*, and a shim that renders a blink needs both. Three things the reading
+settled: it is a **full cycle** (half duty is `(now % p) < p / 2`, and the
+boundary belongs to the off half); rbp does **not** toggle State to produce the
+blink (a 6 s watch showed State-2 entries never change, and an entry caught
+starting to blink went `0` → `300` in the same rebuild that set State 2); and the
+sibling port decodes the same offset with the same unit, independently
+(`Rx3-flx4`, `rx3-handoff/control-shim.c:29` — whose `+20 brightness (0 full,
+1 dim)` is the other end of the same fact as this tree's "dim/unassigned", not a
+disagreement). The shim's fallback for a blink rbp did *not* ask for is 800 ms
+(400 on / 400 off), which is the cadence the hand-rolled `led_tick & 8` used to
+give — so only the LEDs rbp actually asks to blink changed speed. Record:
+`work/blinkprobe.py`; see also the torn-read filter below. **Confirmed at the wire
+2026-10-06**: with a track cued on each deck, the FLX4's deck-1 PLAY note
+alternated at a 244.9 ms half-period and deck 2's at 121.6 ms — the same LedStat
+id on two decks at two different rates, each matching its own `+28`, which no
+single global fallback could produce.
+
+**The table is read twice, 1.5 ms apart, and only entries that agree are used.**
+rbp rebuilds `LedStat` every 20 ms, so a single read can straddle a rebuild and
+show a State from after with a colour from before. An entry that disagrees with
+itself carries the value it had in the previous settled table (matched by
+(id, channel), not by position); an entry in flux with no history is absent for
+that tick. The read sits behind the `led_disabled || !midi_out_ready()` guard, so
+it costs its 1.5 ms only when there is a panel to light, and it logs under
+`LED_VERBOSE` when the disagreement count changes.
 
 **`3` is not only that, though — measured 2026-10-01, and it is worth knowing
 before reading `3` as slip anything.** On the **pads**, `3` marks the *engaged*
@@ -958,7 +1090,7 @@ into `IPlayerSetting` — and that last call is what repaints the widget. The
 engine-only route (the first one considered) does the audio half and leaves the
 screen showing the old state, so the operator's next look at the box would lie.
 Sending the key runs rbp's own path on the same channel numbering a hardware
-press uses — 1-based, as `map_flx4.c:385`'s `ch + 1` — so the two are the same
+press uses — 1-based, as `map_flx4.c:401`'s `ch + 1` — so the two are the same
 gesture. A second consequence of that: it is a *toggle* rbp computes from its own
 state, so nothing in the shim tries to track the value.
 
@@ -1002,7 +1134,7 @@ pull the USB as it might continue to corrupt the USB stick"*.
 
 | | |
 |---|---|
-| **Keycode** | `0x8002` `K_USBSTOP`, `CH_GLOBAL` (channel 1) |
+| **Keycode** | `0x8002` `K_USBSTOP` — `CH_GLOBAL` is USB 1's number (1) by coincidence; the chooser sends the **chosen device's own channel**, because the handler drops a key whose channel is not its own |
 | **Reached by** | `UsbStorageManager::onKey` (entry **[2]** of the live handler table) → `ui::UsbStorageManager::onUsbStopKey` @ `0x325788` |
 | **Sent as** | **press + repeat + release**, back to back |
 
@@ -1089,6 +1221,100 @@ bit 7 of `[+0x3d0]`), not to the fd table.
 not a caveat about the implementation, it is the feature — it exists so the operator
 never has to pull live media — but it is worth saying plainly in the docs because
 every other column of that panel is safe to press.
+
+**And since 2026-10-05 the column does not send the stop at all.** It *raises a
+chooser* ([07](07-touch.md#the-seventh-column-raises-a-chooser-prompt_zonec-prompt_paintc)),
+and the eject leaves on the **chosen device's own channel** — `usb_stop_send(ch)` in
+`pointsrc.c`, channel 1 for USB 1 and 2 for USB 2. That channel is not decoration:
+`UsbStorageManager::onKey` @ `0x3259f4` drops a key whose channel is not its own, so the
+old `CH_GLOBAL` spelling could only ever have reached the first device.
+**Since 2026-10-07 it also takes a three-second hold** — the box puts up `HOLD USB 1` and
+`HOLD USB 2` (or the stick's own volume label in place of the number, since that day —
+[10](10-usb.md)), lit for a device rbp reports present; the press flashes the button, a hold
+of 3000 ms or more stops that device, and a release before the third second does **nothing
+at all**. So the two `menu 'USB STOP' tapped (button 7) -> key 0x8002` lines above are the
+pre-2026-10-05 build; the log reads `pointsrc: menu 'USB STOP' -> the USB STOP chooser
+(usb 1 ready 'HOLD RBOX USB', …)` when the box comes up, and then on a completed hold
+`pointsrc: usb stop chooser -> usb 1 held 3120 ms (hold is 3000 ms) -> eject (channel 1)`.
+Everything else in this section — the three edges, the press-mutes/repeat-ejects split,
+the `20 s` replug cycle, and that the button stops rbp's media without releasing the host
+mount — is unchanged and still the reason the column exists
+([10](10-usb.md#notes)).
+
+## The edge drawers' transports, sync, nudge and fader — keycodes rbp already has
+
+The side drawers (`07-touch.md`) send five keycodes, and none of them needs a map, a
+controller or a byte of MIDI:
+
+| Drawer control | Sends | Notes |
+|---|---|---|
+| **SYNC** | `K_SYNC 0x4112`, press + release | on the side's channel: 1 = left/deck 1, 2 = right/deck 2 |
+| **−/+ nudge** | `K_JOG_ROT 0x4305` with **`OP_ROTATE`** and a signed rev/s | see below — the *only* bend mechanism rbp has |
+| **CUE** | `K_CUE 0x4102`, press + release | same channel argument |
+| **PLAY** | `K_PLAY 0x4101`, press + release | same channel argument |
+| **fader** | `K_FADER 0x501e` via `send_rx_key_f(..., OP_VALUE, ch, v, v/1023.0f)` | **absolute**, `v` 0..1023, top = full |
+
+SYNC, CUE and PLAY are plain press/release with **no `usleep`** — unlike the band's own
+buttons, they never enter the synthesized-hold path, because rbp wants an edge and not
+a dwell.
+
+### SYNC, CUE and PLAY are drawn from rbp's own state, lit and flashing
+
+The three are not just buttons. Each also carries the **deck's real transport state**,
+so a machine with no controller attached — the machine these drawers exist for — still
+shows what both decks are doing. They are drawn from `rbp_led_transport()`
+(`rbp_led.h`), which is the *same reading* the DDJ-FLX4's own SYNC/CUE/PLAY notes are
+sent: one decoder, two surfaces, so the drawer and the hardware cannot drift apart.
+
+| Drawer button | Where the state comes from | Lit when |
+|---|---|---|
+| **SYNC** | `rbp LedStat` **id 4** on the deck's channel, the same three states as the FLX4 (table above) | rbp says solid (locked); **flashes** when rbp says blink — synced but nudged off beat — at *rbp's* period |
+| **CUE** | `loaded && !playing` | a track is loaded and the deck is paused on its cue |
+| **PLAY** | `isPlaying` → solid; `loaded && !playing` → **flashes**; else dark | the deck is playing; the flash is the paused-on-a-loaded-track state, at rbp's own period (500 ms deck 1 / 250 ms deck 2) |
+
+**A flash is not a third appearance, and nothing here keeps a clock.** rbp does not
+toggle a blinking LED's `State` — it sets `State = 2` and leaves it, with the period in
+the same entry — so `rbp_led.c` resolves the phase against rbp's own period *at the
+instant of the read*, once per 20 Hz LED tick, and publishes one packed int. The drawer
+therefore flashes at rbp's cadence and **on the very same value the controller is sent**;
+the note goes out and the drawer's repaint picks it up within a tick, at most 50 ms
+behind. Handing two painters a "blinking" flag instead would flash them at the same rate
+and at whatever phase each one's own clock happened to be in — the two would agree about
+the rate and disagree about the moment.
+
+That packed int is part of the drawer's repaint gate beside the pressed control and the
+fader value, so **a blink repaints and a steady state does not** — an idle drawer still
+costs nothing, which is what keeps the single-buffered plane from tearing.
+
+A **finger on a lit button still wins**: the press's own accent is drawn over the state,
+because a touch surface's feedback is the one thing a state must never swallow.
+
+The three travel from `rbp_led.c` whether or not a controller is attached, so a unit
+with no FLX4 is not dark just where it matters — and `LED_DISABLE`, which names the
+*panel*, no longer stops that read (`rbp_led.c`).
+
+**The nudge is not a keycode and there is no macro that would make it one.** `0x4305` is
+the jog's rotation, reached through `send_rx_key_fl(K_JOG_ROT, OP_ROTATE, ch, 0,
+speed /*rev/s, clamped to ±8*/, (long)vpos)`, and it is the same call the FLX4's own jog
+makes (CC `0x11`/`0x31`, above). Two properties decide the whole design:
+
+* **rbp keeps bending at the last speed until it is told zero.** So the drawer sends the
+  speed once on the down edge — the hold time *is* the bend — and a **stop** (speed
+  `0.00`) on every path where the finger leaves, including the two where no release
+  report arrives at all: the device going away, and `POINT_MENU=0` at startup. A missing
+  stop is a track that runs away, which is why `side_nudging()` derives the truth from
+  the press state rather than trusting an edge to arrive.
+* **The speed is a rate, not a step**, so a tap nudges by however long it was held.
+  Default `0.35` rev/s, exposed as `SIDE_NUDGE_SPEED` for calibration on the glass.
+
+The fader is the same call the FLX4's own fader makes, so a two-deck machine with no
+controller attached has a working channel fader again — and, since rbp builds its
+channel faders at **zero**, a way to open a channel at all. It is ten bits rather than
+the FLX4's 128 steps.
+
+`g_fader[ch]` / `g_fader_seen[ch]` (defined once in `fader_state.c`, shared by both
+shims — see `07-touch.md` for why that matters) are written on every send, so the
+absolute-control query below stops seeding a channel the moment a drawer touches it.
 
 ## Keycode → rbp, and the absolute-control query
 

@@ -13,7 +13,7 @@ every client that has the device open.
 
 Find the node a virtual keyboard landed on with:
 
-    grep -l rblive4-vkeyd /sys/class/input/event*/device/name
+    grep -l rbpi4b-vkeyd /sys/class/input/event*/device/name
 """
 import os
 import struct

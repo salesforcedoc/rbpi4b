@@ -1,11 +1,11 @@
-# rblive4 shim build environment.
+# rbpi4b shim build environment.
 #
 # The shims must be soft-float EABI5 ARM32 linked against the XDJ-RX3 glibc 2.13,
 # so the cross toolchain here is arm-linux-gnueabi (armel/soft-float) -- NOT
 # arm-linux-gnueabihf. Build once, then use it for `make -C scripts/shims`:
 #
-#   docker build -t rblive4-build tools/build-toolchain/
-#   docker run --rm -v "$PWD:/src" -w /src rblive4-build \
+#   docker build -t rbpi4b-build tools/build-toolchain/
+#   docker run --rm -v "$PWD:/src" -w /src rbpi4b-build \
 #     make -C scripts/shims RX3=extracted/XDJRX3-rootfs test
 #
 # It is committed on purpose, and this file is the only copy: the tutorial offers

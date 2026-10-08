@@ -3,13 +3,13 @@
 rbp_patch.py - apply the interoperability patches to a stock
 XDJ-RX3 `rbp` binary.
 
-rblive4 does NOT ship Pioneer/AlphaTheta binaries. You must supply your own
+rbpi4b does NOT ship Pioneer/AlphaTheta binaries. You must supply your own
 extracted XDJ-RX3 `pdj/rbp` (see docs/04-firmware-assets.md) and run this
 script against it.
 
 The table below is the *complete* set of instruction-level changes that
 turn the stock `rbp` from firmware v1.20 into the "rbp-audio" build used
-by rblive4 (display, touch, controls, USB and audio all working).
+by rbpi4b (display, touch, controls, USB and audio all working).
 
 Usage:
     python3 rbp_patch.py <stock-rbp> [-o rbp-audio] [--check]
@@ -83,9 +83,7 @@ PATCHES = [
     (0x32E728, 0xE92D45F8, 0xE12FFF1E, "pm: USB/power notification helper -> bx lr"),
     (0x3871D0, 0xE1A00006, 0xE3A00000, "pm: notification helper -> mov r0,#0"),
 
-    # --- display: middle scrolling waveform enabled unconditionally ---
-    (0x24FC88, 0x1A000004, 0xE1A07004, "display: waveform gate (1/2)"),
-    (0x24FC8C, 0xE5943070, 0xEA00007E, "display: waveform gate -> always render"),
+    # --- display: the section-6 waveform gate is REMOVED (see PATCHES.md §6) ---
 
     # --- touch: caution gate + playlist drag-scroll deadlock ---
     (0x2DC228, 0xE1A07000, 0xE3A07000, "touch: solveCoordToKey ignores caution id"),

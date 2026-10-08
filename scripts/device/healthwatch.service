@@ -1,0 +1,23 @@
+[Unit]
+Description=rblive4 health watchdog (records why the unit wedges)
+Documentation=file:/opt/rblive4/log/health.log
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /opt/rblive4/healthwatch.sh
+Restart=always
+RestartSec=5
+
+# The point of this service is to keep recording while everything else is starved,
+# so it must win the CPU against whatever is starving the box -- and stay out of
+# the way the rest of the time (it sleeps between rounds).
+Nice=-10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+
+# Its own log must not be the thing that fills the disk.
+LogRateLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

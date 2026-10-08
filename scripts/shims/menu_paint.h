@@ -64,8 +64,8 @@
  * logical (where the finger is); the two disagree by at most a pixel on a scaled
  * panel, which is invisible and documented rather than papered over.
  */
-#ifndef RBLIVE4_MENU_PAINT_H
-#define RBLIVE4_MENU_PAINT_H
+#ifndef RBPI4B_MENU_PAINT_H
+#define RBPI4B_MENU_PAINT_H
 
 /* For MZ_COLS, which sizes struct menu_layout's arrays. The dependency runs one way
  * -- menu_zone.h is pure geometry with no includes of its own -- and it is the honest
@@ -73,17 +73,55 @@
  * rather than carrying a second copy of the column count. */
 #include "menu_zone.h"
 
+/* HOW A BUTTON SITS IN ITS COLUMN, in framebuffer pixels, and the two numbers the
+ * 2026-10-06 restyle turned on. The operator, having seen the band with a frame round
+ * the whole bar:
+ *
+ *     "the drop down doesn't need the white border around the endire thing, it only
+ *      needs a thin white border around each button with some padding in between and
+ *      a black background. model it this way for the USB stop menu as well"
+ *
+ * So a button is its column, inset by MENU_BTN_PAD_PX at each end, wearing a
+ * MENU_BTN_BORDER_PX ring of MENU_BORDER, and everything outside it is the black bed
+ * -- which is what the bar's old two-pixel frame and its one-pixel MENU_DIV seam
+ * both became. The COLUMN is still the hit target (menu_zone.c did not move): the
+ * 8 px gap between two buttons is not a control, and a finger that lands in one is
+ * aiming at a button.
+ *
+ * In framebuffer pixels and not logical, like the frame constant they replace (and
+ * unlike menu_zone.h, which is logical by its own rule): a border is a mark on the
+ * glass, and a hairline that scaled with the panel would vanish on a small one. */
+#define MENU_BTN_BORDER_PX 1
+#define MENU_BTN_PAD_PX    4
+
 /* The panel, in the classes a pixel can be. The palette is a pure function of
  * (bpp, class) -- menu_pixel() -- exactly as cursor_pixel() is. */
 enum {
     MENU_NONE = 0,      /* not the panel's pixel at all */
-    MENU_FILL,          /* the bar's background, between the border and a button */
-    MENU_BORDER,        /* the frame around the whole bar */
-    MENU_DIV,           /* the one-pixel seam between two columns */
+    MENU_FILL,          /* the bar's bed: BLACK, above, below and between the buttons */
+    MENU_BORDER,        /* a button's one-pixel outline (it was the bar's frame) */
+    MENU_DIV,           /* not this bar's any more -- the drawers and the box use it */
     MENU_BTN,           /* a button's background */
     MENU_BTN_PRESSED,   /* ...while a finger is on it */
     MENU_LABEL,         /* a glyph on a button */
-    MENU_LABEL_PRESSED  /* ...on the pressed button (dark on the accent) */
+    MENU_LABEL_PRESSED, /* ...on the pressed button (dark on the accent) */
+    /* THE TWO OFF CLASSES, and the band never draws them. They are here rather than
+     * in prompt_paint.c for the reason side_paint.c gives for its own colours: the
+     * palette is PUBLIC and in ONE place, so the band, the two drawers, the window and
+     * now the USB STOP chooser cannot drift apart about what "a button" looks like.
+     * prompt_paint.c is the only caller -- a row whose device rbp reports absent
+     * (prompt_zone.h) -- and menu_paint.c's own classifier can never return one. */
+    MENU_BTN_OFF,       /* a button that cannot be pressed */
+    MENU_LABEL_OFF,     /* ...and its label */
+    /* THE TWO COLOURS THE BEAT FX PICKER BORROWS FROM RBP HIMSELF. The picker is rbp's
+     * own BEAT FX plate mirrored to the left of the decks (fx_zone.h), and the operator
+     * asked for it to "look visually similar (size, color, font)" -- so these are two
+     * pixels SAMPLED OFF THE LIVE PANEL on 2026-10-06 rather than chosen, and they live
+     * here for the reason the OFF pair does: the palette is in one place or it is not a
+     * palette. Its black cell and its white ink need no class of their own -- MENU_FILL
+     * is (0,0,0) exactly, and MENU_LABEL is a hair off white. */
+    MENU_FX_PLATE,      /* rbp's BEAT FX plate (32,32,32): the picker's bed */
+    MENU_FX_SEL         /* the colour rbp fills a SELECTED box with (0,125,222) */
 };
 
 /* Everything the painter needs to know about the framebuffer, measured by the
@@ -119,6 +157,9 @@ struct menu_layout {
     int lx1[MZ_COLS];            /* ...and where it ends, inclusive */
     int ly;                      /* the top of the line box, shared by every label */
     int ln[MZ_COLS];             /* label length, so the per-pixel path does no strlen */
+    /* The seven column rects above tile the whole panel: MZ_BTN_W is MZ_LOGICAL_W
+     * since the menu's eighth cell went (menu_zone.h's block). There is no cell
+     * geometry beyond them. */
 };
 
 /* Sanity: the view can be drawn into at all. Callers check this once rather than
@@ -174,8 +215,8 @@ void menu_witness_point(const struct menu_view *v, int i, int *fx, int *fy);
 void menu_paint(const struct menu_view *v, int pressed);
 
 /* Draw only the columns whose bit is set in `mask` -- bit i is button i+1, so
- * (1u << MZ_COLS) - 1 is the whole panel and 0 writes nothing. THE REST OF THE PANEL
- * IS LEFT ALONE, and that is the point of it.
+ * (1u << MZ_COLS) - 1 covers all seven, which is the whole band, and 0 writes
+ * nothing. THE REST OF THE PANEL IS LEFT ALONE, and that is the point of it.
  *
  * The only pixels whose value depends on `pressed` are inside the pressed button's own
  * column: class_in_layout() reaches its pressed test only after the column's x range
@@ -186,8 +227,8 @@ void menu_paint(const struct menu_view *v, int pressed);
  * one button to the next. test_menu.c pins that identity pixel for pixel, at four
  * panel sizes, for every (old, new) pair.
  *
- * Columns tile the panel exactly, so a full mask is a full paint and no column can be
- * addressed twice or missed. Bits above MZ_COLS-1 are ignored. */
+ * The columns and the web cell tile the panel exactly, so a full mask is a full paint and
+ * no cell can be addressed twice or missed. Bits above MZ_COLS are ignored. */
 void menu_paint_cols(const struct menu_view *v, int pressed, unsigned int mask);
 
 /* One framebuffer pixel, as menu_paint() would read it. Exposed for the damage
@@ -201,4 +242,4 @@ unsigned int menu_get(const struct menu_view *v, int fx, int fy);
  * an unknown depth is treated as 16 bpp, which is what this port's panel is. */
 unsigned int menu_pixel(int bpp, int cls);
 
-#endif /* RBLIVE4_MENU_PAINT_H */
+#endif /* RBPI4B_MENU_PAINT_H */

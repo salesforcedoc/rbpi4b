@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aseqdump2dump.py - turn an `aseqdump` capture into a rblive4 MIDI dump, and
+aseqdump2dump.py - turn an `aseqdump` capture into a rbpi4b MIDI dump, and
 print the inventory a map is written from.
 
 The shim records what a control surface actually sends as a mididump
@@ -65,7 +65,7 @@ import re
 import sys
 from collections import Counter
 
-DUMP_HEADER = "# rblive4 midi dump v1 -- t is seconds since the first event"
+DUMP_HEADER = "# rbpi4b midi dump v1 -- t is seconds since the first event"
 
 # aseqdump's own chatter, which is not an event and must not be reported as one
 # it failed to convert. A real event line always starts with CLIENT:PORT.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# lib.sh — shared pieces of the rblive4 device scripts.
+# lib.sh — shared pieces of the rbpi4b device scripts.
 #
 # Sourced by fix-dev.sh, start-rb.sh, usb-watch.sh and display-watch.sh. Worth a
 # file of its own

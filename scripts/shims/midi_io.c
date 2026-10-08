@@ -18,10 +18,14 @@
  *        rawmidi    a device node, opened when the sequencer route cannot be
  *                   established. This is the fallback, and on the JP21/SC Live 4
  *                   it is the route that is actually used, because the match
- *                   name (MIDI_IN_MATCH, default FLX4) does not match it.
+ *                   name (MIDI_IN_MATCH, default is the controller table's) does
+ *                   not match it.
  *
  * The out side is small and dumb on purpose: midi_note()/midi_cc() build three
  * bytes and never interpret, and the LED and VU modules decide what to send.
+ * midi_sysex_out() is the one exception -- a variable-length message cannot go
+ * through the three-byte builder, and it is what carries the JP21's absolute
+ * query and the FLX4's keepalive.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -39,6 +43,7 @@
 #include "shimutil.h"
 #include "midi_io.h"
 #include "ctrl_map.h"    /* ctrl_abs_invalidate() */
+#include "controllers.h" /* the surface's own facts: hint, card, SysEx */
 
 /* ---- ALSA sequencer, in ---- */
 #define SEQ_DEV       "/dev/snd/seq"
@@ -50,10 +55,39 @@ static int seq_client = -1;
 static int in_port = -1;         /* our receive port (the surface sends to it) */
 static int out_port = -1;        /* our send port (the surface receives from it) */
 
-/* Defaults live here, not only in rb.conf: the shim has to work when it is run
- * by hand with no environment at all. */
-static const char *in_match  = "FLX4";
-static const char *out_match = "FLX4";
+/* The port-name substring the surface is looked for by. Resolved in seq_setup()
+ * from the controller table (controllers.c), which is where "which surface" and
+ * "what it is called" are now the same fact -- they used to be an "FLX4" literal
+ * here and a MIDI_MAP selection in ctrlshim.c that never referenced each other. */
+static const char *in_match;
+static const char *out_match;
+
+/* The hint to match on, from the controller the environment selects.
+ *
+ * MIDI_IN_MATCH/MIDI_OUT_MATCH still win, so an operator can point this at a
+ * surface the table does not name -- that is the documented knob, and docs/15
+ * tells them to use it. With nothing set the answer comes from the table:
+ *
+ *   MIDI_MAP=flx4   -> the FLX4's "FLX4" hint. The shipped default.
+ *   MIDI_MAP=kbd    -> no row at all (a keyboard is not a controller), so the
+ *                      default controller's hint is used. That is deliberate and
+ *                      is today's behaviour: under MIDI_MAP=kbd the FLX4 is
+ *                      still found, it just has nothing on the other end of it.
+ *   MIDI_MAP=jp21   -> a row, but its alsa_hint is NULL: that surface is not
+ *                      named in the sequencer list, which is exactly why it
+ *                      comes up on the rawmidi route. The empty string is not a
+ *                      substitute for NULL here -- name_has() refuses both, so
+ *                      nothing is matched by name and the raw route takes over,
+ *                      which is what a JP21 needs. */
+static const char *surface_hint(const char *env_name)
+{
+     const struct controller *c =
+          controllers_find(env_text("MIDI_MAP", CONTROLLERS_DEFAULT_ID));
+
+     if (!c)
+          c = controllers_default();
+     return env_text(env_name, c->alsa_hint ? c->alsa_hint : "");
+}
 
 /* The surface ports we are subscribed to, -1 when we are not. Kept so a surface
  * that goes away and comes back (new client number) is re-subscribed, and so the
@@ -139,7 +173,18 @@ static int find_surface(int *in_c, int *in_p, int *out_c, int *out_p,
      return found_in;
 }
 
-static int subscribe_in(int c, int p)
+/* What one subscribe attempt found.
+ *
+ * SUB_ALREADY is not a failure and is the whole point of this being three-valued.
+ * The kernel refuses a second identical subscription with EBUSY, so a subscribe
+ * call is also a *question* -- "is the subscription I believe I have still
+ * there?" -- and that question is the one the cached client:port cannot answer.
+ * Measured on the unit 2026-10-06: a duplicate subscribe returns EBUSY and leaves
+ * the existing connection untouched (`aconnect` reports "Connection is already
+ * subscribed"). */
+enum sub_result { SUB_FAILED = 0, SUB_ALREADY, SUB_NEW };
+
+static enum sub_result subscribe_in(int c, int p)
 {
      struct snd_seq_port_subscribe sub;
 
@@ -149,15 +194,16 @@ static int subscribe_in(int c, int p)
      sub.dest.client = seq_client;
      sub.dest.port = in_port;
      sub.queue = SNDRV_SEQ_QUEUE_DIRECT;
-     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) < 0) {
-          klog("knobshim2: subscribe %d:%d -> %d:%d (input) failed: %s\n",
-               c, p, seq_client, in_port, strerror(errno));
-          return -1;
-     }
-     return 0;
+     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) == 0)
+          return SUB_NEW;
+     if (errno == EBUSY)
+          return SUB_ALREADY;
+     klog("knobshim2: subscribe %d:%d -> %d:%d (input) failed: %s\n",
+          c, p, seq_client, in_port, strerror(errno));
+     return SUB_FAILED;
 }
 
-static int subscribe_out(int c, int p)
+static enum sub_result subscribe_out(int c, int p)
 {
      struct snd_seq_port_subscribe sub;
 
@@ -167,13 +213,22 @@ static int subscribe_out(int c, int p)
      sub.dest.client = c;
      sub.dest.port = p;
      sub.queue = SNDRV_SEQ_QUEUE_DIRECT;
-     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) < 0) {
-          klog("knobshim2: subscribe %d:%d -> %d:%d (output) failed: %s\n",
-               seq_client, out_port, c, p, strerror(errno));
-          return -1;
-     }
-     return 0;
+     if (real_ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) == 0)
+          return SUB_NEW;
+     if (errno == EBUSY)
+          return SUB_ALREADY;
+     klog("knobshim2: subscribe %d:%d -> %d:%d (output) failed: %s\n",
+          seq_client, out_port, c, p, strerror(errno));
+     return SUB_FAILED;
 }
+
+/* The port name of the surface we are subscribed to, or "" when there is none.
+ * Written where the out subscription is made (route_sequencer) and cleared where
+ * it is dropped, so it answers "what is on the other end RIGHT NOW" rather than
+ * "what we were configured to look for". That distinction is the whole reason it
+ * exists: the keepalive belongs to the surface physically attached, and
+ * controllers_by_hint() is what turns this name back into a table row. */
+static char surface_name[64];
 
 static void route_sequencer(const char *name)
 {
@@ -182,6 +237,7 @@ static void route_sequencer(const char *name)
           led_fd = -1;
      }
      out_route = ROUTE_SEQ;
+     snprintf(surface_name, sizeof surface_name, "%s", name);
      klog("knobshim2: LED/meter output route: sequencer %d:%d -> %d:%d '%s'\n",
           seq_client, out_port, sub_out_client, sub_out_port, name);
 }
@@ -210,13 +266,29 @@ static void open_raw_out(void)
           "no rawmidi node)\n");
 }
 
-/* One attempt at connecting to the surface. Cheap and idempotent: it does
- * nothing when nothing changed, which is what lets the read loop call it once a
- * second forever. */
+/* One attempt at connecting to the surface. Cheap and idempotent: on a healthy
+ * system both calls come back SUB_ALREADY and nothing changes, which is what lets
+ * the read loop call it once a second forever.
+ *
+ * It is called whenever the surface is *found*, and deliberately not only when
+ * its client:port numbers changed. Those numbers cannot tell a live subscription
+ * from one the kernel has already torn down: ALSA hands out the lowest free client
+ * id, so a controller that leaves and comes back -- a re-enumeration, a cable
+ * glitch -- is handed 28:0 again, the cache still matches, no subscribe is issued,
+ * and the shim goes on believing it is connected while the kernel has destroyed
+ * the subscription with the old client. Every LED and meter write then goes into
+ * a port nobody is listening on, and `midi_out_ready()` still says yes, so nothing
+ * says so. Measured on the unit 2026-10-06: two sub-second re-enumerations left the
+ * controller deaf until rbp was restarted, while a 33-minute absence recovered by
+ * itself -- the long one is sampled absent at least once, the short one is not.
+ *
+ * So the subscribe call is issued every time and EBUSY is read as the answer to
+ * "is it still there?" rather than as an error. */
 static void midi_connect_try(void)
 {
      int in_c, in_p, out_c, out_p;
      char in_name[64], out_name[64];
+     enum sub_result r;
 
      if (!find_surface(&in_c, &in_p, &out_c, &out_p, in_name, out_name)) {
           if (sub_in_client >= 0) {
@@ -224,24 +296,39 @@ static void midi_connect_try(void)
                     "(unplugged?); waiting for it to come back\n", in_match);
                sub_in_client = sub_in_port = -1;
                sub_out_client = sub_out_port = -1;
+               surface_name[0] = '\0';
                if (out_route == ROUTE_SEQ)
                     out_route = ROUTE_NONE;
           }
           return;
      }
-     if (in_c != sub_in_client || in_p != sub_in_port) {
-          if (subscribe_in(in_c, in_p) < 0)
-               return;
+
+     r = subscribe_in(in_c, in_p);
+     if (r == SUB_FAILED)
+          return;
+     if (r == SUB_NEW) {
+          if (sub_in_client >= 0)
+               klog("knobshim2: control surface: RE-subscribed to %d:%d '%s' -- "
+                    "the old subscription was gone\n", in_c, in_p, in_name);
+          else
+               klog("knobshim2: control surface: subscribed to %d:%d '%s' "
+                    "(match '%s')\n", in_c, in_p, in_name, in_match);
           sub_in_client = in_c;
           sub_in_port = in_p;
-          klog("knobshim2: control surface: subscribed to %d:%d '%s' "
-               "(match '%s')\n", in_c, in_p, in_name, in_match);
      }
-     if (out_c >= 0 && (out_c != sub_out_client || out_p != sub_out_port) &&
-         subscribe_out(out_c, out_p) == 0) {
-          sub_out_client = out_c;
-          sub_out_port = out_p;
-          route_sequencer(out_name);
+
+     if (out_c >= 0) {
+          r = subscribe_out(out_c, out_p);
+          /* SUB_ALREADY with the route not on the sequencer is not "nothing to
+           * do": the subscription is live but we are talking to a rawmidi node,
+           * or to nothing at all. The sequencer route is the preferred one, so
+           * take it. Repeating this is stable -- route_sequencer() leaves
+           * out_route at ROUTE_SEQ, and the next round then finds nothing to do. */
+          if (r == SUB_NEW || (r == SUB_ALREADY && out_route != ROUTE_SEQ)) {
+               sub_out_client = out_c;
+               sub_out_port = out_p;
+               route_sequencer(out_name);
+          }
      }
 }
 
@@ -303,8 +390,8 @@ void seq_setup(void)
      }
      out_port = pinfo.addr.port;
 
-     in_match = env_text("MIDI_IN_MATCH", "FLX4");
-     out_match = env_text("MIDI_OUT_MATCH", "FLX4");
+     in_match  = surface_hint("MIDI_IN_MATCH");
+     out_match = surface_hint("MIDI_OUT_MATCH");
      klog("knobshim2: seq ok client=%d ports=%d/%d, looking for '%s'\n",
           seq_client, in_port, out_port, in_match);
 
@@ -375,6 +462,13 @@ int midi_out_ready(void)
      return out_route != ROUTE_NONE;
 }
 
+/* Never NULL: "" when no surface is subscribed. controllers_by_hint() refuses an
+ * empty name, so "nothing attached" cannot be mistaken for a row. */
+const char *midi_surface_name(void)
+{
+     return surface_name;
+}
+
 /* Write one three-byte MIDI message, over whichever route is up. */
 static int out_write(const unsigned char *m)
 {
@@ -415,6 +509,73 @@ static int out_write(const unsigned char *m)
           e.dest.client = sub_out_client;
           e.dest.port = sub_out_port;
           return write(seq_fd, &e, sizeof(e)) == (ssize_t)sizeof(e);
+     }
+     return 0;
+}
+
+/* The largest SysEx this shim will send. The kernel's own ceiling is
+ * SNDRV_SEQ_MAX_EVENT_LEN (256) and every payload in the controller table is
+ * twelve bytes or fewer, so this is the table's ceiling with room to spare
+ * rather than a second, tighter limit a newer surface could trip over. */
+#define MIDI_SYSEX_MAX 256
+
+/* Send one whole SysEx over whichever route is up. 1 when it went out.
+ *
+ * Not out_write(): that builds the three-byte messages the panel route carries
+ * and returns 0 for anything else, which is why led_query_absolute() could only
+ * ever go out on rawmidi before this existed.
+ *
+ * THE SEQUENCER FORM IS NOT THE OBVIOUS ONE, and the wrong choice fails in
+ * silence rather than with an error. Writing to /dev/snd/seq takes the event
+ * header followed by the PAYLOAD INLINE in the same write(): the kernel points
+ * ext.ptr just past the header itself and duplicates the bytes into its own
+ * cells (snd_seq_write()'s SNDRV_SEQ_EVENT_LENGTH_VARIABLE branch, and
+ * check_event_type_and_length() is what accepts SYSEX there). So the flag is
+ * VARIABLE, and the message rides the write.
+ *
+ * SNDRV_SEQ_EVENT_LENGTH_VARUSR is the one that must NOT be used here, however
+ * much it reads like "my data is in my own memory": it is never copied, it is
+ * dispatched immediately with the pointer taken from the event, and the kernel
+ * only ever expects it from a direct-dispatch bulk transfer (a synth's sample
+ * wave). Pointing it at a stack buffer is a kernel-side dereference of memory
+ * that is about to be reused.
+ *
+ * A note for anyone reading a byte count here: `len` is the SYSEX length, and
+ * the write is header + len. The kernel rejects the write outright when the two
+ * do not agree, so a short write is a hard failure and not a truncated message.
+ */
+int midi_sysex_out(const unsigned char *sysex, unsigned len)
+{
+     union {
+          struct snd_seq_event e;
+          unsigned char buf[sizeof(struct snd_seq_event) + MIDI_SYSEX_MAX];
+     } w;
+
+     if (!sysex || len == 0 || len > MIDI_SYSEX_MAX)
+          return 0;
+
+     if (out_route == ROUTE_RAW)
+          return led_fd >= 0 && write(led_fd, sysex, len) == (ssize_t)len;
+
+     if (out_route == ROUTE_SEQ) {
+          if (seq_fd < 0 || sub_out_client < 0)
+               return 0;
+          memset(&w.e, 0, sizeof w.e);
+          w.e.flags = SNDRV_SEQ_EVENT_LENGTH_VARIABLE;
+          w.e.type  = SNDRV_SEQ_EVENT_SYSEX;
+          w.e.queue = SNDRV_SEQ_QUEUE_DIRECT;
+          w.e.source.client = seq_client;
+          w.e.source.port   = out_port;
+          w.e.dest.client   = sub_out_client;
+          w.e.dest.port     = sub_out_port;
+          w.e.data.ext.len  = len;
+          /* The kernel overwrites this with the address of the payload below.
+           * Left NULL rather than pointed at the caller's buffer, so a stale
+           * user pointer can never be what the kernel reads. */
+          w.e.data.ext.ptr  = NULL;
+          memcpy(w.buf + sizeof w.e, sysex, len);
+          return write(seq_fd, w.buf, sizeof w.e + len) ==
+                 (ssize_t)(sizeof w.e + len);
      }
      return 0;
 }
@@ -466,14 +627,24 @@ int midi_cc(int midi_ch, int cc, int val)
  * surface matched by name (the FLX4) has no absolute controls to report and no
  * meters to light, so "not at all" is the correct outcome there.
  *
+ * THE BYTES ARE NO LONGER HERE. They are the JP21 row's `init` in the controller
+ * table (controllers.c), which is the one place a surface's own facts are
+ * written down; this function looked the row up rather than carrying a copy, so
+ * the message and the table cannot drift. The lookup is by id and the id is the
+ * only thing named here, because the raw route IS the answer to "which surface
+ * is on the other end" -- nothing matched it by name.
+ *
+ * This is also the only consumer of `init`, and that is why no surface's init is
+ * sent at startup as well: for the FLX4 it is NULL, and for the JP21 a second
+ * sender would put this query on whatever route happened to be up, which with a
+ * FLX4 attached and MIDI_MAP=jp21 would be the FLX4's own port.
+ *
  * Returns whether the query went out, which is a different question from
  * whether the panel will answer: rbp_vu.c reads the 0 as "nobody is going to
  * tell rbp where the faders are", which is the case it has to seed them for. */
 int led_query_absolute(void)
 {
-     static const unsigned char sysex[10] = {
-          0xF0, 0x00, 0x02, 0x0B, 0x7F, 0x12, 0x04, 0x00, 0x00, 0xF7
-     };
+     const struct controller *jp = controllers_find(JP21_CONTROLLER_ID);
      static int told;
 
      /* Invalidate the CC cache even when the query cannot be sent: the cache is
@@ -488,6 +659,18 @@ int led_query_absolute(void)
           }
           return 0;
      }
-     (void)write(led_fd, sysex, sizeof(sysex));
-     return 1;
+     if (!jp || !jp->init || jp->init_len == 0) {
+          /* Unreachable in a build that passes its tests (test_controllers.c
+           * pins the row and its ten bytes), and logged rather than silent
+           * because the symptom otherwise is a mixer that starts at zero with
+           * no line saying why. */
+          if (!told) {
+               told = 1;
+               klog("knobshim2: absolute-value query not sent: the controller "
+                    "table's '%s' row is missing or carries no SysEx\n",
+                    JP21_CONTROLLER_ID);
+          }
+          return 0;
+     }
+     return midi_sysex_out(jp->init, jp->init_len);
 }

@@ -25,8 +25,8 @@
  * It is two assignments inside rbp's per-frame loop, not a decision, and it is
  * covered by the drill in docs/13-raspberrypi4.md rather than by a unit test.
  */
-#ifndef RBLIVE4_MIRROR_POLICY_H
-#define RBLIVE4_MIRROR_POLICY_H
+#ifndef RBPI4B_MIRROR_POLICY_H
+#define RBPI4B_MIRROR_POLICY_H
 
 /* One ALSA device name. Shorter than audioshim.c's DEV_MAX for the master: these
  * come from a list written by hand in rb.conf, not from a probe. */
@@ -181,4 +181,4 @@ unsigned long mirror_hold_fill(const unsigned char *frame, unsigned frame_bytes,
  * value it was given. */
 double mirror_boost_gain(double db);
 
-#endif /* RBLIVE4_MIRROR_POLICY_H */
+#endif /* RBPI4B_MIRROR_POLICY_H */

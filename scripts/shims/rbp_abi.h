@@ -10,8 +10,8 @@
  * Note what is *not* here: the SC Live 4's own note numbers and CCs, which
  * belong to the controller map, not to rbp, and are still in rbp_led.c.
  */
-#ifndef RBLIVE4_RBP_ABI_H
-#define RBLIVE4_RBP_ABI_H
+#ifndef RBPI4B_RBP_ABI_H
+#define RBPI4B_RBP_ABI_H
 
 #define UI_OBJ_MGR_GLOBAL 0x2685f2cUL
 #define KEY_MANAGER_OFF   100
@@ -111,6 +111,128 @@
 #define K_SHORTCUT   0x0210
 #define K_TRACKFILTER 0x420f
 
+/* THE BROWSE MODE NUMBER -- which screen rbp's browse is showing. The two above
+ * are what a key turns INTO a mode ("browse mode 10", "browse mode 8"); this is
+ * the number itself, and the one screen the shim has to recognise by it is
+ * UTILITY.
+ *
+ * Where it lives: `uiBrowse` @ 0x0326f8b8, FIRST WORD -- getBrowseMode() @0x1126d0
+ * loads that address from its own pc-relative literal and nothing else. uiBrowse
+ * is a plain .bss singleton, so this is one read at a fixed address with no
+ * pointer chase and no structure built at start-up to guard against, which is why
+ * it is safe to read from the shim's input thread (contrast the guarded walks
+ * UI_PADMODE_HOLDER_GLOBAL needs, further down).
+ *
+ * UTILITY is 7, and rbp's OWN DISPATCHER gates on that literal, which is what
+ * makes == 7 the honest test and not a guess: UiBrowse_SetDispUtilityList
+ * @0x13cfc8 opens the screen with setBrowseMode(7); setBackColor(9), and
+ * Ui_BrowseCommTask @0x1351a8 compares the mode against 7 at 0x139124, 0x139180,
+ * 0x1391a4 and 0x1391bc -- the four branches into UiBrowse_FinishUtilityEdit,
+ * UiBrowse_ChangeUtilityItem and UiBrowse_StartUtilityEdit. Confirmed against the
+ * glass 2026-10-05: the live mode read 7 while rbp's UTILITY list was on screen.
+ *
+ * The four accessors all share this base -- getBrowseMode @0x1126d0, getCursorNo
+ * @0x1127e4, getItemNum @0x1127c4, getInitialNo @0x1128bc. getUiBrowseListPointer
+ * @0x1125c4 is the odd one out at 0x0326fc68, and that literal is the LINE-POINTER
+ * array: reading itemNum/initialNo from it returns 0 while its neighbour four
+ * hundred bytes on reads the true 33. */
+#define BROWSE_MODE_UTILITY 7
+
+/* uiBrowse's fields, as the accessors above read them. `list` is 0 or 1 (the two
+ * browsable lists); CURSOR is indexed by list and the other two stride by
+ * LIST_STRIDE. All four are `int`.
+ *
+ * cursorClamped: rbp's own setCursor @0x113c24 clamps to 0..11 -- twelve, which is
+ * exactly the number of rows it draws -- so a cursor here is always a row on the
+ * glass. */
+#define UIBROWSE_GLOBAL      0x0326f8b8UL   /* nm: uiBrowse (B) */
+#define UIBROWSE_OFF_MODE    0x00     /* int, getBrowseMode()       @0x1126d0 */
+#define UIBROWSE_OFF_DEVICE  0x04     /* int, getBrowseDevice()     @0x1126e0 */
+#define UIBROWSE_OFF_ACTIVE_LIST 0x14 /* int, getActiveList()       @0x112748 -- 0
+                                       * while navigating, NON-ZERO while EDITING,
+                                       * which is the state a rotation must not be
+                                       * sent in (it would edit the value) */
+#define UIBROWSE_OFF_CURSOR  0x6c     /* int[2], getCursorNo(list)  @0x1127e4 */
+#define UIBROWSE_OFF_ITEMNUM 0x3b8    /* int, getItemNum(list)      @0x1127c4 */
+#define UIBROWSE_OFF_INITIAL 0x3bc    /* int, getInitialNo(list)    @0x1128bc */
+#define UIBROWSE_LIST_STRIDE 0x1ce4   /* between list 0's and list 1's blocks */
+
+/* The calibration sub-screen, and it is NOT a mode: IsUtilityCalibrationOn()
+ * @0x112e80 is `return [uiBrowse+0xac] != 0 && [uiBrowse+0xb8] != 0` -- two words
+ * of uiBrowse itself, no pointer and nothing to guard. rbp draws its own touch
+ * marks on that sub-screen and reads touches on it itself, so the shim's UTILITY
+ * gesture has to stand down there even though the browse mode is unchanged. */
+#define UIBROWSE_OFF_CALIB_A 0xac
+#define UIBROWSE_OFF_CALIB_B 0xb8
+
+/* ---------------------------------------------------------------------------
+ * THE PERFORMANCE SCREEN AND ITS WAVEFORM ZOOM -- what a synthesized selector
+ * rotation turns into there, read out of rbp 2026-10-05 for the waveform
+ * swipe (wave_zone.c, and the pinch it replaced).
+ *
+ * BROWSE_MODE_PLAY is 1, and that is rbp's own number rather than a guess:
+ * ComputeCursorMode @0x113084 switches on getBrowseMode() (its literal pool at
+ * 0x1131dc reads .word 0x0326f8b8) with a jump table indexed by `mode - 1`, and
+ * index 0 -- mode 1 -- lands on 0x113140, which is the one branch in the whole
+ * table that can return the wave-zoom cursor mode. Measured at the same time:
+ * the live mode read 1 with the operator's performance screen on the glass and 5
+ * while INFO was over it.
+ *
+ * RB_WAVE_ZOOM_OK() below is that branch, in the shim. On mode 1 rbp computes:
+ *
+ *     if (uiBrowse[0x18] == 1)                 return 0;   // 0x113140
+ *     if (getPlayModeWaveDispMode() != 1)      return 5;   // CursorWaveZoom
+ *     else                                     return 6;   // CursorGridAdjust
+ *
+ * -- and BrowseEncoderRotate @0x1212a4 dispatches table index 5 to CursorWaveZoom
+ * @0x102720 and 6 to CursorGridAdjust @0x1027ec. So a selector rotation on this
+ * screen either ZOOMS THE WAVEFORM or MOVES THE BEAT GRID, and the shim must be
+ * able to tell which before it sends one.
+ *
+ * The flag that decides it is GRID_ADJUST_FLG -- CmnFunc_CmnInfo_GetGridAdjustModeFlg
+ * @0x17f8a0, which is `movw r3,#0x3564; movt r3,#0x325; ldr r0,[r3,#0x1538]`, so
+ * the word is 0x03253564 + 0x1538 = 0x03254a9c and its setter @0x17f88c writes the
+ * same one. ChangePlayModeGrideAdjustMode @0x13366c is what toggles it (it is also
+ * what UiKey_ZoomGrid @0x11a4d4 ends up in, despite the name).
+ *
+ * READ THAT WORD, NOT 0x0216BAD0. getPlayModeWaveDispMode @0x13364c caches this
+ * same flag at 0x0216bac8 + 8 = 0x0216bad0, but only when it is CALLED -- and it is
+ * called only from the mode-1 branch above, i.e. only when a rotation has just
+ * happened. The cached word is therefore stale between rotations: press rbp's
+ * ZOOM GRID control and it stays 0 until the next encoder click, which is exactly
+ * the window a swipe would arrive in. 0x03254a9c is always current.
+ *
+ * THE WAVE SCALE is one word, 0x0216bac8, written by setPlayModeWaveScale @0x133734
+ * (`movw r3,#0xbac8; movt r3,#0x216; str r0,[r3]`) and read by getPlayModeWaveScale
+ * @0x1336e0. Measured range 0..4, and it is a ladder, not a wrap: CursorWaveZoom
+ * builds `{max=5, min=0, ..., cur}` and hands it to ComputeCursorMove.part.0
+ * @0x1002fc, which clamps at both ends and returns 0 (no move) at either. Zooming
+ * with the selector on the live unit walked 2 -> 3 -> 4 and stopped; rotating back
+ * walked 4 -> 3 -> 2 -> 1 -> 0.
+ *
+ * ...AND A BIGGER SCALE IS ZOOMED *IN*. calcParticularWave @0x123014 picks its
+ * samples-per-screen constant out of a table at 0x0043d670 + 32, which reads
+ * {1600, 800, 400, 200} for scales 0..3 and 100 above them -- a doubling ladder
+ * where the smallest number is the tightest view. Confirmed on the glass: at scale
+ * 4 the waveform shows a handful of beats spread wide, at scale 2 a dense run of
+ * them. So a selector STEP OF +1 ZOOMS IN and -1 ZOOMS OUT, which is what makes a
+ * swipe UP a positive step. */
+#define BROWSE_MODE_PLAY     1
+#define UIBROWSE_OFF_PLAY_SUBGATE 0x18  /* int, the mode-1 branch's first test: 1
+                                         * means rbp returns cursor mode 0 and a
+                                         * rotation does nothing at all */
+#define WAVE_SCALE_GLOBAL    0x0216bac8UL
+#define WAVE_SCALE_MIN       0
+#define WAVE_SCALE_MAX       4
+#define GRID_ADJUST_FLG_GLOBAL 0x03254a9cUL  /* CmnFunc_CmnInfo_GetGridAdjustModeFlg */
+
+/* The branch above, as a macro over three values the caller has already read, so
+ * the rule lives in one place and test_wave.c can pin it against this file rather
+ * than against a paraphrase. True means: on this screen, at this moment, a
+ * selector rotation reaches CursorWaveZoom and nothing else. */
+#define RB_WAVE_ZOOM_OK(mode, play_subgate, grid_adjust_flg) \
+    ((mode) == BROWSE_MODE_PLAY && (play_subgate) != 1 && (grid_adjust_flg) == 0)
+
 /* 0x8002, CH_GLOBAL  the safe eject -- rbp's own name for it is "UsbStop", and it
  *                    is the one key in this file that needs OP_REPEAT *and* a
  *                    plain press: the press and the repeat each do a different
@@ -154,6 +276,48 @@
  * NOTE the contrast with K_TRACKFILTER, which needs the repeat *instead of* a
  * usable press. Here the press is load-bearing. */
 #define K_USBSTOP    0x8002
+
+/* THE TWO UsbStorageManager OBJECTS, and how to reach them -- what the USB STOP
+ * chooser's two device rows are lit from (prompt_zone.c, pointsrc.c).
+ *
+ * ui::IUiObjManager::getUsbStorageManager(Channel) @0x31dfc8 is four instructions
+ * and they are all here:
+ *
+ *     31dfc8: ldr  r3, [pc, #28]      @ the literal below: 0x026866b0
+ *     31dfcc: sub  r0, r0, #1
+ *     31dfd0: ldr  r3, [r3, #272]     @ 0x110 -- and 0x026866b0 + 0x110 ==
+ *                                    @ UI_OBJ_MGR_HOLDER above, so this is
+ *                                    @ `uobjmgr = *(0x026867c0)`
+ *     31dfd4: ldr  r2, [r3, #204]     @ 0xcc -- the manager COUNT
+ *     31dfd8: cmp  r0, r2
+ *     31dfdc: ldrcc r3, [r3, #196]    @ 0xc4 -- the manager ARRAY
+ *     31dfe4: ldrcc r0, [r3, r0, lsl #2]
+ *
+ * getPlayer @0x31e018 is the same walk with a different pair (+0x48/+0x40), which is
+ * what pins the reading: two callers, one shape. The channel is `ch - 1` and rbp
+ * bounds-checks it, so a caller must too.
+ *
+ * `regUsbManager()` in ui::BrowseUiIfDpl::regUsbManager() @0x33b924 (which stores at
+ * browse_ui+0x64 for ch1 and +0x68 for ch2, refusing any channel outside {1,2}) is
+ * what fixes the count at two. Measured live 2026-10-05: exactly two, ch=1 media=2
+ * (the operator's stick) and ch=2 media=0. */
+#define UIOBJMGR_OFF_MGRNUM  0xcc    /* int, the count                */
+#define UIOBJMGR_OFF_MGRARR  0xc4    /* ulong*, the array             */
+
+/* And the manager's own fields, as ui::UsbStorageManager::onKey @0x3259f4 and
+ * onUsbStopKey @0x325788 read them.
+ *
+ * CHANNEL is a WORD (325a30: `ldr r3,[r5,#132]`, compared against the key's channel
+ * byte at 325a2c and dropped when they differ) -- so a key for USB 2 has to go out on
+ * channel 2 to reach the second manager at all. CH_GLOBAL is 1, which is USB 1's own
+ * number, and that is the whole reason the single-column binding ever worked on the
+ * first device and could never have reached the second.
+ *
+ * MEDIA == MEDIA_READY is the press branch's own first test at 0x325788, so it is the
+ * honest liveness answer rather than an inference from anything else. */
+#define USB_MGR_OFF_CHANNEL  0x84    /* int   */
+#define USB_MGR_OFF_MEDIA    0x88    /* int   */
+#define USB_MGR_MEDIA_READY  2       /* media present and ready */
 
 #define K_BACK       0x420d    /* RX3 BACK key */
 #define K_LOAD       0x4311
@@ -292,6 +456,143 @@
 static const signed char bfx_type_to_pos[15] = {
      -1, 5, 9, 10, 6, 1, 0, 3, 12, 7, 8, 13, 11, 2, 4
 };
+
+/* ---- the Beat FX's own VALUES, for the momentary X/Y pad (fxpad_zone.c) ---
+ * Everything above is about reaching rbp's effect SELECTOR; this block is the
+ * effect itself -- which is what the BPM detail cell's momentary pad has to read
+ * before it moves anything, and put back after the finger leaves.
+ *
+ * Disassembled off extracted/XDJRX3/pdj/rbp on 2026-10-07 and then READ LIVE
+ * through /proc/16934/mem, with two of the numbers checked against the screen's
+ * own text (which is the check that makes the rest of the chase trustworthy):
+ *
+ *   DjEngineIF::getBeatEffectLevelDepth @0x89904 -> ME_SINGLETON
+ *     -> MixerEngine   (a plain .bss word: ME_SINGLETON above)
+ *       +0x58 -> BeatEffectManager
+ *         +0x00  int   select channel       read 5       (screen: MASTER)
+ *         +0x08  ptr   the CURRENT BeatEffect*
+ *           +0x20  float level / depth      read 0.409, later 0.5044
+ *           +0x24  long  time, msec         read 480     (screen: "480 msec")
+ *           +0x28  long  time max           4000
+ *           +0x2c  long  time min           1
+ *           +0x3c  byte  effect ON/OFF      read 0, later 1  (isBeatEffectOn)
+ *           +0x44  long  beat button rung   read 5       (screen: "1 BEAT")
+ *           +0x48  long  beat button max    9
+ *           +0x4c  long  beat button min    0
+ *
+ * Every accessor behind those is a two-instruction load -- `ldr r0,[pc]` then
+ * `ldr r0,[r0]` -- so this is a plain pointer chase with NO call into rbp, the
+ * same shape and the same risk as pointsrc.c's fx_ch_read(). The two interior
+ * pointers must be NULL-checked by the walker: a half-built or torn-down engine
+ * answers a null, not a fault. A NULL read is also the ONLY honest answer when
+ * any link is missing -- a guessed state would make the pad restore to a
+ * position rbp never had. (Every field above is live and the unit is mid-set:
+ * the two readings above differ, which is exactly why nothing here is a
+ * constant.)
+ *
+ * WHAT THE WIRE DOES TO THEM -- measured on the unit 2026-10-07 through the
+ * shim's own sequencer port (seqinject2), which runs map_flx4.c's real handlers,
+ * so the last hop is byte-identical to what the pad sends. Read back out of
+ * /proc/<rbp>/mem after each send:
+ *
+ *   K_DEPTH 0x448f OP_VALUE, v, v/1023.0f    cc 100 -> +0x20 = 0.7879 (=806/1023)
+ *                                            cc  20 -> +0x20 = 0.1574 (=161/1023)
+ *     -> ABSOLUTE and exact. One send lands the level; one send restores it.
+ *        The 7-bit CC is scaled to 10 bits first, so the round trip through the
+ *        FLX4's knob is 7-bit and the pad's own is 10-bit -- the pad is FINER.
+ *
+ *   K_BEATNEXT 0x4491 OP_PRESS, +1           rung 5 -> 6 -> 7
+ *   K_BEATPREV 0x4490 OP_PRESS, -1           rung 7 -> 6
+ *     -> the direction is MEASURED, not inferred from the arrow's name, and the
+ *        rung moves exactly one per press. OP_PRESS is required: asEventCode
+ *        gates both keys on (op & 0xf) == 0.
+ *
+ *   K_BFX 0x448d PRESS then RELEASE         toggles +0x3c
+ *     -> NOT re-measured here: it is the audible one and it is already proven
+ *        by the operator's own hand. +0x3c read 1 throughout the run above, so
+ *        on this unit the effect was ENGAGED while those levels moved.
+ *
+ * rbp REPAINTS THE CELL ITSELF while all of this happens: at 125.0 BPM the same
+ * cell went "480 msec / 1 BEAT" -> "960 / 2 BEAT" -> "1920 / 4 BEAT", tracking
+ * +0x24 and +0x44 exactly. So +0x24 is rbp's OWN recomputation and not a second
+ * copy of the rung: the panel is a live readout of this struct, which is why the
+ * pad's HUD (fxpad_paint) must copy rbp's pixels and annotate them rather than
+ * cover them.
+ *
+ * THE BEAT LADDER IS NOT UNIFORMLY SPACED (the rungs halve and double), so
+ * +0x44 is a POSITION and not a value: 5 reads "1 BEAT", 6 "2 BEAT", 7 "4 BEAT",
+ * and a caller that wants four beats has to climb there one K_BEATNEXT/
+ * K_BEATPREV at a time on rbp's own answer. The full-scale of the level is the
+ * same 0..1023 the FLX4's own DEPTH knob is scaled to -- see map_flx4.c's
+ * cc_to_10bit and K_DEPTH's wire form (a float of that number over 1023).
+ *
+ * ---- AND ONE FIELD THAT CANNOT BE READ ALONE: +0x3c LIES ON A SWITCHED-OFF
+ * EFFECT. +0x50 is rbp's own effect type -- `MixerEngine::getBeatEffectType`
+ * @0x57284 tail-calls `BeatEffectManager::getBeatEffectType` @0x89acc, which is
+ * `ldr r0,[r0,#80]`, i.e. 0x50; `setBeatEffectType` @0x89ac4 is `str r1,[r0,#80]`
+ * and writes NOTHING ELSE -- and TYPE 0 IS THE OFF STATE (it is the one entry of
+ * the 14-position SW_BFX_TYPE table that maps to no position). `+0x08` is then the
+ * manager's `BeatEffectOff`, held in its own slot at +0x0c (its siblings, the 14
+ * real types, sit at +0x14..+0x48 and `switchNextBeatEffect` @0x8a07c picks between
+ * them off a 15-entry jump table). That class is almost entirely compiled out:
+ *
+ *     BeatEffectOff::changeEffectStatusToOn  @0x8b0b8   bx lr
+ *     BeatEffectOff::changeEffectStatusToOff @0x8b0b4   bx lr
+ *     BeatEffectOff::changeLevelDepthValue   @0x8b0ac   bx lr
+ *     BeatEffectOff::changeTimeValue         @0x8b0b0   bx lr
+ *
+ * -- so nothing maintains ITS +0x3c, and on a switched-off effect it reads 1, which
+ * is also why rbp's own `setBeatEffectOnOff` @0x89940 (`ldrb r3,[r0,#60]; cmp r3,r1;
+ * popeq`) sees "already on" and returns without doing anything.
+ * Measured on the unit 2026-10-07 with a read-only /proc/<rbp>/mem walk:
+ *
+ *     type(+0x50)  +0x3c   object vt[9] (+0x24)        the object IS
+ *        0           0     0x00097b50                  BeatEffectPingPong -- and OFF
+ *        0           1     0x0008b0b8  bx lr          BeatEffectOff
+ *        4           1     0x000b79d8                  a real effect, on
+ *       10           1     0x0009368c                  a real effect, on
+ *        2           1     0x000913c8                  a real effect, on
+ *
+ * -- and the two type-0 rows SAY DIFFERENT THINGS, which is the whole trap and the
+ * reason "type 0 <=> BeatEffectOff" would be a false claim. The first row is a
+ * freshly started rbp that has never had its Beat FX touched: type is 0 because the
+ * word is still zero, +0x08 is whatever the constructor left there (a real
+ * PingPong), and its own class maintains the flag, so it reads 0 and is right. The
+ * `bx lr` rows appear as soon as the manager is driven -- MEASURED: moving the
+ * effect selector ONE POSITION while the effect is off left +0x50 at 0 AND swapped
+ * +0x08 to the BeatEffectOff, flipping +0x3c from 0 to 1 on an effect that was not
+ * running. (That is the operator's own repro: see the row below it, and
+ * fxpad_zone.c's `test_flag_lies_on_a_switched_off_effect`.)
+ *
+ * So the rule is a CONJUNCTION and not an equivalence: **+0x3c is only meaningful
+ * when +0x50 is non-zero, and +0x50 == 0 is the honest "the effect is off" whether
+ * the object beside it is the Off class or a stale one.** Pressing rbp's own ON/OFF
+ * button re-points +0x08 at the selected type's real object, where +0x3c IS
+ * maintained -- which is why "turn it on/off" is the operator's workaround, and why
+ * the pad, reading the Off object's +0x3c by itself, believed a dead effect was live
+ * and sent no toggle at all. */
+#define BEM_IN_MIXER        0x58   /* MixerEngine*        -> BeatEffectManager* */
+#define BEM_OFF_SELECT_CH   0x00   /* BeatEffectManager*  -> the select channel  */
+#define BEM_OFF_EFFECT      0x08   /* BeatEffectManager*  -> the current BeatEffect* */
+#define BEM_OFF_TYPE        0x50   /* BeatEffectManager*  -> the active effect type */
+#define BE_OFF_DEPTH        0x20   /* BeatEffect* -> float level / depth (0..1)  */
+#define BE_OFF_TIME         0x24   /* BeatEffect* -> long  time, msec            */
+#define BE_OFF_ON           0x3c   /* BeatEffect* -> byte  effect ON/OFF         */
+#define BE_OFF_BEAT         0x44   /* BeatEffect* -> long  beat button (rung)    */
+#define BE_OFF_BEAT_MAX     0x48
+#define BE_OFF_BEAT_MIN     0x4c
+
+/* djengine::EnBeatEffectType's first member, and the one the SW_BFX_TYPE switch
+ * cannot reach (the 14 positions map onto types 1..14 -- see the table above).
+ * It is the Off STATE: rbp keeps a `BeatEffectOff` in the manager's +0x0c slot for
+ * it, and BEM_OFF_TYPE reading it is the only honest "off" there is. Which object
+ * +0x08 happens to be holding is beside the point -- see the conjunction above. */
+#define BFX_TYPE_OFF        0
+
+/* The level's full scale, which is rbp's 10-bit convention and not ours: K_DEPTH
+ * carries `v` as an int and `v / 1023.0f` as its float, exactly as the FLX4's
+ * DEPTH knob does. fxpad_zone.h names the same number for the pad's own axis. */
+#define BFX_DEPTH_FULL      1023
 
 /* ---- Beat-loop knob -------------------------------------------------------
  * The RX3 has no beat-loop knob: it triggers loops from its pads in the AUTO
@@ -490,6 +791,29 @@ static const signed char bfx_type_to_pos[15] = {
 #define LEDSTAT_OFF          0x30
 #define LED_ENTRY_SIZE       0x2c
 #define LED_DUMP_MAX         256
+#define LED_ENTRY_OFF_STATE  16
+/* rbp's own BLINK PERIOD, in milliseconds, or 0 when rbp is not asking for a
+ * blink. MEASURED on the unit, 2026-10-06, reading the whole table live out of
+ * /proc/pid/mem (work/blinkprobe.py): of 51 entries, the 48 whose State is
+ * anything but 2 all read 0 here, and the THREE whose State is 2 -- deck 1 PLAY
+ * 500 ms, deck 2 PLAY 250 ms, and CfxFilter (id 41) 250 ms -- are the only
+ * non-zero ones. The correlation is not the whole reading: an entry caught
+ * starting to blink mid-watch went 0 -> 300 in the same rebuild that moved its
+ * State to 2, so the field is written *with* the blink request and not merely
+ * near it.
+ *
+ * It is a full CYCLE, and the state word does NOT toggle: rbp tells a panel to
+ * blink and leaves State at 2 for as long as it wants one, which a 6 s watch
+ * confirms -- State 2 entries never changed, they were 2 the whole time. That is
+ * why the panel side has to time the blink itself, and why this field is the
+ * only thing that says how fast.
+ *
+ * The offset and the meaning are also stated by the sibling port, whose decode
+ * this tree read before measuring: "+16 state (1 lit, 2 blinking), +20
+ * brightness (0 full, 1 dim), +28 blink period in ms" (Rx3-flx4,
+ * rx3-handoff/control-shim.c:29). The two readings agree on the offset and the
+ * unit, arrived at independently. */
+#define LED_ENTRY_OFF_PERIOD 28
 
 /* "rbp has assigned this pad nothing": the u32 at entry +20, which is 1 for an
  * empty performance pad and 0 for one that has been given a colour. rbp's own
@@ -506,7 +830,14 @@ static const signed char bfx_type_to_pos[15] = {
  * carry 0, rbp having coloured every one of them ff8c00. So a surface can use
  * this to dark a pad that holds nothing without a per-mode table -- which is
  * what the FLX4 needs, because State alone lights all eight white pads in HOT
- * CUE and the operator's panel showed exactly that. */
+ * CUE and the operator's panel showed exactly that.
+ *
+ * The sibling port reads the same word and calls it BRIGHTNESS -- "0 full, 1
+ * dim" (Rx3-flx4, control-shim.c:29) -- which is not a disagreement, it is the
+ * other end of the same fact: what rbp does to an unassigned pad is draw it dim.
+ * Named from the pad side here because that is the side this tree measured
+ * (cues being set flipped it 1 -> 0 as they landed), and because "may I dark
+ * this pad" is the question the reader has. */
 #define LED_ENTRY_OFF_UNASSIGNED 20
 
 
@@ -550,4 +881,51 @@ static const signed char bfx_type_to_pos[15] = {
 
 #define RBP_METER_SEGMENTS 11
 
-#endif /* RBLIVE4_RBP_ABI_H */
+
+/* ---- Pro DJ Link bring-up: NetworkManager::operateConnectNetwork ---------
+ * rbp carries Pioneer's whole Link stack and, on this unit, never commands it up.
+ * The one entry point is NetworkManager::operateConnectNetwork(bool) @0x38f830: it
+ * reads NetworkMonitor's address out of the object, hands a "+24 == 2" message
+ * to ProDjLink::operate, and lands in SystemManager::operateMessage ->
+ * UdpServer::start() @0x393c88, which is what binds UDP 50000.
+ *
+ * THIS COMMENT USED TO SAY IT HAS NO CALLER. THAT IS WRONG. It is virtual, so
+ * reaching it leaves no `bl` to find in a scan, and that absence was mistaken for
+ * an absent caller. NetworkMonitor::timerCallback @0x392160 calls it through the
+ * NetworkMonitor subobject's vtable slot +12 (vptr address point 0x4e107c), and
+ * main's NetworkManager::initialize() starts that timer unconditionally at 1000 ms
+ * (NetworkMonitor::startMonitoring @0x391f58). What the tick tests first is
+ * ui::PcController::isUsbBConnected() -- the byte at PcController+0x72, whose only
+ * writer is ui::PcController::handleUsbMountMessage @0x2e9700 on EnUsbMountMessage
+ * 3. rbp raises that itself from the word `connect` on /tmp/udev_usb1 (see
+ * read_sf_rbp @0x3785b4 and UsbMountManager::run @0x320a28), which is the in-band
+ * route and the one to prefer. The call below is the out-of-band alternative.
+ *
+ * rbp is non-PIE, so these are absolute and identical in every process, the
+ * same fact the meter hook above relies on. Both were read off the stock v1.20
+ * binary; docs/18-prodjlink.md carries the disassembly.
+ *
+ * [+0x24] is NetworkMonitor's copy of the interface address, filled by
+ * NetworkMonitor::checkNetworkConnectionChange @0x392084 through the "eth0"
+ * literal — the field netshim's name substitution exists to make non-zero, and
+ * operateConnectNetwork returns at its first compare while it is zero. It is zero
+ * only while [+0x72] is, and that check runs only on the connected branch.
+ * [+0xc4] is the bool main passed to initialize(): 0 when rbp runs with -a, as
+ * this unit's launcher does, which is also why the Autoip object at [+0xc0] is
+ * NULL and is never dereferenced. */
+#define NM_SINGLETON       0x026873d8UL  /* NetworkManager::_singletonInstance */
+#define NM_FN_CONNECT      0x0038f830UL  /* NetworkManager::operateConnectNetwork(bool) */
+#define NM_OFF_IP          0x24          /* NetworkMonitor's IPv4 address */
+#define NM_OFF_CONNECT_FLG 0xc4          /* initialize()'s bool: 0 with -a */
+
+/* The player's own file name, for the "am I the player?" test. rbp is non-PIE,
+ * so what makes NM_SINGLETON and NM_FN_CONNECT valid is that they are inside the
+ * rw and rx LOAD segments of THIS binary's image — its rw MemSiz is 0x56480b8,
+ * reaching 0x5b5acd4, which is why the singleton at 0x26873d8 is legitimately in
+ * the .bss (and shows in /proc/self/maps under the anonymous tail, labelled
+ * [heap], rather than under the file). In any other process those addresses are
+ * unmapped or somebody else's heap. rbp's rw segment is file-backed by a file of
+ * this name, so its executable segment is what tells the two apart. */
+#define RBP_BIN_NAME       "rbp"
+
+#endif /* RBPI4B_RBP_ABI_H */

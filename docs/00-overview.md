@@ -1,6 +1,6 @@
 # 00 — Overview
 
-rblive4 runs the **Pioneer DJ XDJ-RX3 standalone rekordbox player** (`rbp`,
+rbpi4b runs the **Pioneer DJ XDJ-RX3 standalone rekordbox player** (`rbp`,
 called `rb` internally) on a **Raspberry Pi 4B**. The XDJ-RX3 firmware builds
 its player as **soft-float ARM32**; a Pi executes soft-float EABI ELF natively —
 the same arrangement the Prime GO and SC Live 4 ports relied on. What that needs
@@ -28,10 +28,11 @@ of the whole thing.
 │  │  soft-float glibc 2.13 + RX3 libs + DirectFB 1.4              ││
 │  │                                                               ││
 │  │   rbp-audio  ──  the XDJ-RX3 rekordbox player                 ││
-│  │      ▲  ▲  ▲                                                  ││
-│  │      │  │  └── knobshim.so    DDJ-FLX4 MIDI → RX3 keycodes    ││
-│  │      │  └───── audioshim.so   JUCE/ALSA → FLX4 USB audio      ││
-│  │      └──────── fbshim.so      fb ioctl + evdev → tsc2007      ││
+│  │      ▲  ▲  ▲  ▲                                               ││
+│  │      │  │  │  └── netshim.so    eth0-name introspection → wlan0││
+│  │      │  │  └───── knobshim.so   DDJ-FLX4 MIDI → RX3 keycodes  ││
+│  │      │  └──────── audioshim.so  JUCE/ALSA → FLX4 USB audio    ││
+│  │      └─────────── fbshim.so     fb ioctl + evdev → tsc2007    ││
 │  │                                                               ││
 │  │   libdirectfb_fbdev.so (rebuilt) ── the present path          ││
 │  └────────────────────────────────────────────────────────────────┘│
@@ -52,6 +53,7 @@ of the whole thing.
 | Audio | 3× discrete CS4344 DACs | the FLX4's 4-channel USB audio | `audioshim.so` maps rbp's streams onto the FLX4's output pairs |
 | USB | 2 host ports + sub-MCU | USB-A host ports | `usb-watch.sh` + native DeviceSQL import |
 | Music DB | internal EDB daemon | — | RX3 `edb_streamd` runs in the chroot |
+| Networking | `eth0` with a Pro DJ Link peer on the LAN | `eth0` **down**, WiFi up | `netshim.so` rewrites the interface *name* in rbp's whitelisted `eth0` introspection — **built and host-verified, off by default, not deployed** ([18](18-prodjlink.md)) |
 
 Every row above is a *device* difference. Nothing in the list touches the
 binary, which is why the `rbp` patch table and the shims' hardcoded `rbp`
@@ -70,6 +72,12 @@ stick → kernel usb-storage → usb-watch.sh mounts /opt/rblive4/media/usb1/sda
       → DeviceSQL scans export.pdb → detect flag = 2
       → source list shows the drive, categories populate natively
 ```
+
+A **second** stick takes the same route a slot over: the first candidate in
+`/sys/block` order that actually carries an export is USB 1, the next is USB 2,
+onto `/opt/rblive4/media/usb2/sda1` → `/media/usb2/sda1` → `/tmp/udev_usb2`. rbp
+holds one `ui::UsbStorageManager` per channel, so both are separate devices and
+the band's USB STOP chooser can eject either one on its own channel.
 
 **Loading + playing a track**
 

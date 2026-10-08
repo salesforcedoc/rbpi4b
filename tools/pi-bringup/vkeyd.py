@@ -61,7 +61,7 @@ fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
 for k in KEYS:
     fcntl.ioctl(fd, UI_SET_KEYBIT, k)
 fcntl.ioctl(fd, UI_DEV_SETUP,
-            struct.pack("HHHH80sI", 0x03, 0x1234, 0x5678, 1, b"rblive4-vkeyd", 0))
+            struct.pack("HHHH80sI", 0x03, 0x1234, 0x5678, 1, b"rbpi4b-vkeyd", 0))
 fcntl.ioctl(fd, UI_DEV_CREATE)
 print("vkeyd up, keys=%s" % KEYS, flush=True)
 

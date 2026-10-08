@@ -36,8 +36,8 @@
  *    would wipe the other surface's bindings, and map_kbd.c's leaves them empty
  *    on purpose. See the note on ctrl_bindings_reset() below.
  */
-#ifndef RBLIVE4_CTRL_MAP_H
-#define RBLIVE4_CTRL_MAP_H
+#ifndef RBPI4B_CTRL_MAP_H
+#define RBPI4B_CTRL_MAP_H
 
 #include <sound/asequencer.h>   /* struct snd_seq_event */
 
@@ -365,4 +365,4 @@ const struct led_notes *ctrl_sel_leds(void);
  * comment at the call site in rbp_vu.c). */
 int ctrl_sel_ready(void);
 
-#endif /* RBLIVE4_CTRL_MAP_H */
+#endif /* RBPI4B_CTRL_MAP_H */

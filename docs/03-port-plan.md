@@ -214,6 +214,7 @@ ssh pi@<host>
 # getPcController() no-op stage
 #   python3 tools/patch-rbp/rbp_patch.py extracted/XDJRX3/pdj/rbp -o extracted/rbp-audio
 #   python3 scripts/patch-rbp-nopc.py extracted/rbp-audio
+#   python3 scripts/patch-rbp-depth.py <that output>   # 32 bpp, matching rb.conf
 
 # build shims (host, or the repo's Docker image)
 #   make -C scripts/shims RX3="$PWD/extracted/XDJRX3-rootfs"
@@ -222,8 +223,8 @@ ssh pi@<host>
 #   see tools/build-directfb/README.md
 
 # assemble the chroot, deploy, launch
-#   scripts/build-chroot.sh            # -> work/rblive4-pi4.tgz
-#   ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rblive4-pi4.tgz'
+#   scripts/build-chroot.sh            # -> work/rbpi4b-pi4.tgz
+#   ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rbpi4b-pi4.tgz'
 #   ssh pi@<host> 'sudo sh /opt/rblive4/start-rb.sh'
 ```
 

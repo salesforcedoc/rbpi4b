@@ -4,6 +4,22 @@ Symptom → cause → fix. Rows are grouped by subsystem; the ones marked
 **(previous target)** are kept because they explain a design decision in this
 port, even though the hardware that produced them is gone.
 
+**Start here.** Before working down any table, run the unit's own check:
+
+```sh
+sh /opt/rblive4/doctor.sh
+```
+
+It changes nothing — no write, no mount, no module load, no `systemctl` call; the
+one thing it executes is a chroot'd `busybox echo` — and it reports what it found
+plus a single paste-ready fix block. Its most valuable row is the one this port
+has most often got wrong: **each shim's deployed build against the copy `rbp` is
+actually loading**, read out of the running process's `/proc/<pid>/maps`. That
+answers "my new build made no difference" before you start debugging the build
+itself ([17](17-rx3-flx4-comparison.md), where the idea came from). Every path it
+tests comes from `rb.conf` and `lib.sh`, so it cannot drift from the scripts it
+is checking.
+
 ## Nothing works at all
 
 | Symptom | Cause | Fix |
@@ -23,7 +39,7 @@ port, even though the hardware that produced them is gone.
 |---|---|---|
 | No UI at all, but rbp is running | a framebuffer-memory shortfall, not a mode-set refusal — and on the measured Pi it is **fixed in the patch**, so a recurrence means the fix is not in the running tree (a stale `libdirectfb_fbdev.so`, or a chroot rebuilt before it). The fb has **one page** (`yres_virtual == yres`, `smem_len == 2560 × 800`); the stock driver forced `DLBM_TRIPLE` and its guard against a non-pannable fb tests `ypanstep == 0`, which this fb does not report, so `yres_virtual` tripled and the primary region test failed on `need_mem` 6,144,000 > `smem_len` 2,048,000. The patched driver decides the buffer mode from the **page count** instead, which is a `FRONTONLY` layer here. **If this appears after a different monitor was plugged in, it is not this defect** — a smaller fb fails the same `need_mem` check for a different reason; see [A monitor that is not 1280×800](#a-monitor-that-is-not-1280800) | read the `PRESENT:` line in `/tmp/dfbdig9.log`: `pages=1 pan=0` says the page decision was taken from the real geometry. `pages=3 pan=1` says the module is the old one — verify the sha256 in the chroot against `work/dfb/lib/directfb-1.4-6/systems/libdirectfb_fbdev.so` and re-deploy. For the arithmetic itself, add `debug=FBDev/Mode` to `usr/etc/directfbrc` and read `log/rbp.log` (the `=` and the slash are load-bearing: the parser splits options only at `=`, and the domain's declared name is `FBDev/Mode`, so `debug FBDev_Mode` is rejected as invalid and then ignored); `fbdump` says what the fb really is ([06](06-display.md), [13](13-raspberrypi4.md)) |
 | rbp exits ~1 s after start, **`crash.log` shows `addr=0x30 r00=0x00000000`** (not the `[NULL+0x9c]` row above) | `DirectFBCreate()` failed, so it returned a NULL `IDirectFB*` — and rbp then dereferences it instead of stopping. `init_Resource()`'s error path prints a bare `DS_HW_Glib3_DFB.c <293>:` (the format string is literally `'%s <%d>:\n\t'`, with no body to lose) and then falls through into the success continuation, loading the NULL pointer and taking `vtable+0x30`. The **reason** `DirectFBCreate` failed is almost always that no module loaded at all | check the modules first, not the crash: `chroot /opt/rblive4/rbx3-run /usr/bin/arm-none-linux-gnueabi-dfbinfo` — `No system found!` means it. Then `cat /tmp/dfbdig4.log`: it names each directory searched and `opendir failed` on a miss. If the directory is `/lib/directfb-1.4-6/...` and does not exist, `module-dir` is missing from `usr/etc/directfbrc` — the build's `MODULEDIR` is `/lib/...` while the modules are staged at `/usr/lib/...` ([06](06-display.md#required-directfbrc)). Do **not** chase the NULL deref: it is a second, latent bug in rbp that a working DirectFB never reaches |
-| `Unable to dlopen '…/._libdirectfb_fbdev.so'` and the same for the other modules | AppleDouble files from a macOS build host, left in the module directories. They are not inert: DirectFB walks each module dir and tries to dlopen every entry, so each one logs an error and the directory looks broken | `find /opt/rblive4 -xdev -name '._*' -type f -delete`. A re-deploy alone will **not** clear them — untar upgrades in place and never deletes — which is why `install.sh` and `build-chroot.sh` now both sweep them. If they are back after a fresh install, the tarball itself is carrying them: `tar -tzf work/rblive4-pi4.tgz \| grep '\._'` |
+| `Unable to dlopen '…/._libdirectfb_fbdev.so'` and the same for the other modules | AppleDouble files from a macOS build host, left in the module directories. They are not inert: DirectFB walks each module dir and tries to dlopen every entry, so each one logs an error and the directory looks broken | `find /opt/rblive4 -xdev -name '._*' -type f -delete`. A re-deploy alone will **not** clear them — untar upgrades in place and never deletes — which is why `install.sh` and `build-chroot.sh` now both sweep them. If they are back after a fresh install, the tarball itself is carrying them: `tar -tzf work/rbpi4b-pi4.tgz \| grep '\._'` |
 | `dmesg` shows `No compatible format found` | the mode was forced with a depth suffix | drop the `-16`/`-32` from the `video=` token; the 16 bpp default is the one we want ([13](13-raspberrypi4.md#the-hdmi-mode)) |
 | Kernel text, a cursor, or boot messages over the UI | `fbcon=map:1` / `vt.global_cursor_default=0` not applied | `cat /proc/cmdline` — the tokens must be on the single existing line in `/boot/firmware/cmdline.txt` |
 | Screen blanked mid-session | `consoleblank` unset | add `consoleblank=0`; a blank panel is a diagnostic red herring, not a crash |
@@ -126,7 +142,10 @@ the rectangle that was actually drawn into.
 |---|---|---|
 | `cannot find libpthread_nonshared.a` | the RX3 rootfs lacks the dev archive | `scripts/shims/Makefile` creates empty stubs in `compat/` |
 | `GLIBC_2.17`/`GLIBC_2.34` in a shim | linked against host glibc | link the RX3 libs; `make check` fails on `GLIBC > 2.7` and on `Tag_ABI_VFP_args` (a hard-float shim would never load) |
-| A shim loads but a global is missing | wrong `LD_PRELOAD` order | `fbshim:knobshim:audioshim` — the audio shim reads globals the controls shim defines, and `SHMSTATE_STRICT=1` makes a mismatch fail loudly ([11](11-runtime-launcher.md)) |
+| A shim loads but a global is missing | wrong `LD_PRELOAD` order | `…:knobshim:audioshim` — the audio shim reads globals the controls shim defines, and `SHMSTATE_STRICT=1` makes a mismatch fail loudly ([11](11-runtime-launcher.md)) |
+| `netshim.so` is loaded but the network rewrite does nothing | it is **after** `fbshim.so`, and `fbshim`'s `ioctl` won | both define `ioctl` and the first preload that does wins; `netshim.so` must be **second, before `fbshim.so`**. `doctor.sh` checks the order ([18](18-prodjlink.md)) |
+| rbp still behaves as if it has no network | `RB_NETALIAS` is not `1` | the shim ships **off**; every hook is an identity pass-through until `RB_NETALIAS=1` in `rb.local.conf` ([18](18-prodjlink.md)) |
+| Pro DJ Link finds nothing on a network you can ping | the AP filters station-to-station traffic | discovery is broadcast-based; no shim fixes it. The test is a capture showing replies from a peer ([18](18-prodjlink.md)) |
 | A shim does nothing, no error | loaded by the host loader instead of the chroot's | `LD_PRELOAD` is set inside the chroot by the launcher, never exported ([11](11-runtime-launcher.md)) |
 | A flag in `rb.conf` has no effect | read by presence, and exported empty (see [11](11-runtime-launcher.md)) | the workaround lines in `start-rb.sh` cover the affected names |
 | Exec bits lost on `/bin/*` | Windows/WSL extraction | `scripts/build-chroot.sh` restores them (or `chmod -R 755`) |
@@ -135,6 +154,7 @@ the rectangle that was actually drawn into.
 
 | Tool | What it tells you |
 |---|---|
+| **`doctor.sh`** | The first thing to run on a unit whose behaviour does not match its build. Read-only by construction: it checks the layout, `rb.conf`'s schema, every shim's **deployed** build against the copy `rbp` is **actually loading** (from `/proc/<pid>/maps`) and each one's absence from the load list, **which of the five known player builds** is installed — Pioneer's stock binary, our stage-1 `rbp-audio`, the superseded stub, or the final one *at either of the two depths* ([04](04-firmware-assets.md)) — and, for a final one, whether that depth is the one `RB_FB_LIE_BPP` asks for — and whether a deploy-root override is about to overwrite it at the next launch, whether `crashcatch.so` is first in `RB_LD_PRELOAD`, the chroot's ability to execute a 32-bit binary, `/dev/fb0` + `/dev/snd/seq` + `/dev/input`, `/dev/mem`'s mode, the four binds, the device stubs and FIFOs, `paudiog0`'s **absence**, the `etc/mtab` symlink, the unit's mode and enablement, the two media mounts, and whether `rbp` is running at all. Prints one paste-ready fix block; exits 1 if anything failed. Reachable as `sh install.sh doctor` ([13](13-raspberrypi4.md)) |
 | `tools/fbdump` | `/dev/fb0`'s real geometry, format, pan step — the present path's inputs ([06](06-display.md)) |
 | `tools/evdevdump --list` | every input device's name, caps and absinfo, plus a ready-to-paste `POINT_KIND`/`POINT_DEV` verdict ([07](07-touch.md)) |
 | `crashcatch.so` | SIGSEGV `pc`/`lr` → `/tmp/crash.log`. Load it when bringing a target up |

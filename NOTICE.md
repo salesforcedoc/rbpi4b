@@ -1,6 +1,6 @@
 # Notice, copyright and legal
 
-**rblive4** is an independent interoperability/preservation project. It is
+**rbpi4b** is an independent interoperability/preservation project. It is
 **not affiliated with, endorsed by, or sponsored by** Pioneer DJ, AlphaTheta
 Corporation, Denon DJ, inMusic, Raspberry Pi Ltd, or any of their subsidiaries.
 

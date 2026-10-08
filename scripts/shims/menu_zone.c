@@ -8,6 +8,9 @@
  * has two halves.
  */
 #include "menu_zone.h"
+#include "side_zone.h"    /* side_any_open(): the band must not arm while a drawer
+                           * owns the overlay plane -- see the closed-entry arm in
+                           * menu_feed() below, and side_zone.h's ONE SURFACE note */
 
 /* In column order, one per menu_key[] slot in pointsrc.c -- the two tables are read
  * together and are the same length by construction. "USB STOP" is the seventh and
@@ -46,13 +49,19 @@ static int iabs(int v)
     return v < 0 ? -v : v;
 }
 
+/* The seven labelled columns tile the whole logical width -- MZ_BTN_W is
+ * MZ_LOGICAL_W since the web cell went (menu_zone.h's block). 1280 does not divide by
+ * 7, so the widths are 182/184 and NOT equal; what is exact is the tiling, each column
+ * starting one past the last one's end with no gap and no overlap. That is the
+ * property menu_button_at() and menu_paint_cols() both rest on, and test_menu.c
+ * asserts it at every column rather than asserting a width. */
 int menu_button_x0(int i)
 {
     if (i < 0)
         i = 0;
     if (i > MZ_COLS - 1)
         i = MZ_COLS - 1;
-    return (i * MZ_LOGICAL_W) / MZ_COLS;
+    return (i * MZ_BTN_W) / MZ_COLS;
 }
 
 int menu_button_x1(int i)
@@ -61,7 +70,7 @@ int menu_button_x1(int i)
         i = 0;
     if (i > MZ_COLS - 1)
         i = MZ_COLS - 1;
-    return ((i + 1) * MZ_LOGICAL_W) / MZ_COLS - 1;
+    return ((i + 1) * MZ_BTN_W) / MZ_COLS - 1;
 }
 
 const char *menu_label(int button)
@@ -101,6 +110,38 @@ int menu_hold_fires(int held_ms, int threshold_ms)
     if (held_ms < 0)
         return 0;              /* no measurement for this press: not a hold */
     return held_ms >= threshold_ms;
+}
+
+int menu_hold_pending(int held_ms, int threshold_ms)
+{
+    int btn;
+
+    /* Only a press this module owns, on the panel it owns, still down, and not
+     * already answered. `press_btn` is non-zero exactly for a press that began with
+     * the panel open AND landed on a button -- so the swipe that opened the panel
+     * and a press on the panel's own background are both excluded, which is what
+     * keeps "a finger is on the glass" from being the same question as "a finger is
+     * holding a button". `cur_btn == press_btn` is the slide-off rule the release
+     * path has, applied one press earlier: a finger that drifted onto the next
+     * column is not holding the button it started on. */
+    if (!open_state || !swallow || !press_btn || cur_btn != press_btn)
+        return 0;
+    if (!menu_hold_fires(held_ms, threshold_ms))
+        return 0;
+
+    btn = press_btn;
+
+    /* Close the panel HERE rather than leaving it for the caller: the whole point
+     * is that the panel is gone at this moment and not at the release. It is also
+     * what makes a second call a no-op -- with open_state clear the guard above
+     * cannot pass again -- and what makes the release still to come the silent
+     * swallow it already was: `started_open` finds a closed panel and no button, so
+     * menu_feed()'s release arm fires nothing and returns MZ_FEED_TAKEN. The press
+     * stays swallowed to its end, so rbp hears neither edge. */
+    open_state = 0;
+    press_btn = 0;
+    cur_btn = 0;
+    return btn;
 }
 
 void menu_tap_point(int *x, int *y)
@@ -187,13 +228,23 @@ int menu_feed(int down, int x, int y, int *button)
             armed = 0;
             press_btn = menu_button_at(x, y);
             cur_btn = press_btn;
-        } else if (y <= MZ_STRIP_Y1 && MZ_ENTRY_IN(x)) {
+        } else if (y <= MZ_STRIP_Y1 && MZ_ENTRY_IN(x) && !side_any_open()) {
             /* The entry zone, and it is the ONLY arm the x bounds apply to.
              * Everything below (a press that started outside) and everything above
              * (a press that started with the panel open) is decided by y alone.
              * The open arm must stay full width: the panel's own leftmost and
              * rightmost columns are SOURCE and MENU, and a press on either of them
-             * that fell through to rbp instead would be a dead button. */
+             * that fell through to rbp instead would be a dead button.
+             *
+             * `!side_any_open()` is the one gate, and it is not tidiness: the band
+             * and a drawer cannot both hold the single overlay plane, so while a
+             * drawer is out the band is not on the glass and arming a swipe here
+             * would be arming a gesture at an invisible panel -- and it would take
+             * the press the drawer needs to dismiss itself. The mirror of this gate
+             * is in side_zone.c's own closed-entry arm (which refuses while the band
+             * is open) and in pointsrc.c's funnel (which refuses while the window
+             * is open). One surface at a time, enforced in all three places the
+             * question can be asked. */
             swallow = 1;
             armed = 1;
             press_btn = 0;

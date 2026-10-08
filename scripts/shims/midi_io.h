@@ -16,8 +16,8 @@
  * The absolute-control dedupe cache used to live here (as `struct abs_ctrl
  * abs_map[]`); it is in ctrl_map.h now, with the binding tables it belongs to.
  */
-#ifndef RBLIVE4_MIDI_IO_H
-#define RBLIVE4_MIDI_IO_H
+#ifndef RBPI4B_MIDI_IO_H
+#define RBPI4B_MIDI_IO_H
 
 #include <sound/asequencer.h>   /* struct snd_seq_event */
 
@@ -55,9 +55,29 @@ int midi_cc(int midi_ch, int cc, int val);
  * until something seeds them -- see rbp_vu.c's vu_thread. */
 int led_query_absolute(void);
 
+/* One whole SysEx, over whichever route is up. 1 when it went out.
+ *
+ * The three-byte builder above cannot carry this: the panel route's events are
+ * the two note kinds and CC, and anything else is dropped by out_write(). This
+ * is what sends the JP21's absolute query and the FLX4's keepalive, and it is
+ * the only way a SysEx reaches a surface that is on the SEQUENCER route -- the
+ * FLX4's. Callers hand it bytes from the controller table (controllers.c)
+ * rather than writing their own, which is what keeps a message and the surface
+ * it belongs to in one place. */
+int midi_sysex_out(const unsigned char *sysex, unsigned len);
+
 /* 1 once some route to the surface exists. The LED and meter threads wait for
  * this instead of for a device node, because which device (if any) is the route
  * is decided here. */
 int midi_out_ready(void);
 
-#endif /* RBLIVE4_MIDI_IO_H */
+/* The ALSA port name of the surface we are subscribed to, or "" when there is
+ * none -- never NULL, so a caller can pass it to controllers_by_hint() without a
+ * guard. It describes what is ATTACHED, not what MIDI_IN_MATCH was set to: it is
+ * cleared when the surface is unplugged and set again when one is found, which is
+ * what the controller keepalive has to know. On the rawmidi route there is no
+ * name to report, so this stays "" -- the raw route is the JP21's, and a JP21
+ * wants no keepalive anyway. */
+const char *midi_surface_name(void);
+
+#endif /* RBPI4B_MIDI_IO_H */

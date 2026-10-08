@@ -69,8 +69,8 @@
  * block counter, i.e. state, which would cost this file the property that makes
  * it testable.
  */
-#ifndef RBLIVE4_S24PACK_H
-#define RBLIVE4_S24PACK_H
+#ifndef RBPI4B_S24PACK_H
+#define RBPI4B_S24PACK_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -150,4 +150,4 @@ static inline unsigned s24pack_worst(unsigned frames, unsigned ch)
     return frames * ch * (unsigned)sizeof(int32_t);
 }
 
-#endif /* RBLIVE4_S24PACK_H */
+#endif /* RBPI4B_S24PACK_H */

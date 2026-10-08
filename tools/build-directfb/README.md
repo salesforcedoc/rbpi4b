@@ -122,7 +122,7 @@ cd ../directfb
 #    reads like a bad diff rather than a stale tree. Re-running over an
 #    already-patched tree needs them removed first.
 rm -f lib/direct/compat_shim.c systems/fbdev/compat_shim.c
-patch -p1 < /path/to/rblive4/tools/build-directfb/directfb-full.diff
+patch -p1 < /path/to/rbpi4b/tools/build-directfb/directfb-full.diff
 
 # 4. configure against the RX3 sysroot so everything references only
 #    GLIBC_2.4/2.7 symbols (glibc 2.13 target).
@@ -300,8 +300,8 @@ The build harness runs all of this, with the counts and two
 `fstat`-is-defined assertions that cannot pass while skipping an object:
 
 ```bash
-docker build -t rblive4-dfb -f work/build-dfb.Dockerfile work/
-docker run --rm -v "$PWD:/w" -w /w rblive4-dfb sh work/dfb-build.sh
+docker build -t rbpi4b-dfb -f work/build-dfb.Dockerfile work/
+docker run --rm -v "$PWD:/w" -w /w rbpi4b-dfb sh work/dfb-build.sh
 ```
 
 `work/` is not committed (see [work/README.md](../../work/README.md)); the
@@ -370,7 +370,7 @@ Every SONAME must be `.so.0`, and no NEEDED entry may still say `.so.6`.
   [06's present path](../../docs/06-display.md#a-mismatch-selects-the-rung-by-itself).
 * The framebuffer path can come from `FB_DEV` as well: `dfb_config->fb_device`
   (the `fbdev=` option) still wins, then `FB_DEV`, then `FRAMEBUFFER`, then
-  `/dev/fb0`. rblive4 exports it from `rb.conf`'s `RB_FB_DEV`.
+  `/dev/fb0`. rbpi4b exports it from `rb.conf`'s `RB_FB_DEV`.
 * `fluxcomp: command not found`, reported by `make` as `Error 127` — the flux
   package is missing. It is needed for a git build only, and the failure never
   says so; see step 2. (`Error 127` is the shell's "command not found", so a

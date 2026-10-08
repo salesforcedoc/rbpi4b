@@ -507,6 +507,109 @@ per module directory per process, three lines at most, all at startup. Keep it;
 if a future change makes module loading fail again, this file is where to look
 first.
 
+## Watching the page: whose pixels are those?
+
+When something looks wrong on the glass, the first question is **who drew it**,
+and there are only three candidates on this port:
+
+| writer | what it can leave behind |
+|---|---|
+| `rbp` | everything, and a real RX3 draws the same picture |
+| the pointer arrow (`fb_cursor.c`) | a small saved-under rectangle at the pointer's last position, restored after rbp repainted over it |
+| the swipe menu (`menu_draw.c`) | a stale band in rows 0..55, the region it saves and repairs |
+| the **overlay plane** (`drmband.c`) | nothing in `/dev/fb0` at all — it is a separate plane composited *above* rbp's page, so a screenshot cannot see it |
+
+**The overlay plane is a fourth writer and it is not in the page.** When the band, the
+browser window, a side drawer or the USB STOP chooser is up, the shim owns a `vc4`
+overlay plane on `card1` and composites it over rbp's primary.
+
+**The UTILITY gesture is the one shim surface with no pixels at all.** It is input-side
+only: it sits on a band of *rbp's own* UTILITY screen, swallows the reports it claims and
+answers them with `K_SELECTOR` keycodes, so it neither owns a plane nor writes a row of
+the page — and unlike the three above, nothing in `/dev/fb0` or in the plane list will
+ever show it working. Its gate, geometry and rules are in [07](07-touch.md) § *Touch in
+rbp's own UTILITY screen*; for a capture to prove anything there, rbp's own frame has to
+move, which is why that drill is a frame diff and not a screenshot.
+
+**The device is shared; the plane is not.** DRM master is one per open **file**, so a
+second `drm_band_setup()` in a process was once refused `EBUSY` and the band, the window
+and the drawer had to pass one plane between them. `drmband.c` now opens the card
+**once** and refcounts the fd and the master (`dev_acquire()` / `dev_release()`), so each
+band is only a buffer, a framebuffer and a plane of its own, and `pick_plane()` skips any
+plane whose `crtc_id != 0` so two bands cannot land on one. That is what lets **both edge
+drawers be out at the same time** — request 1, and the reason the two of them no longer
+exclude each other.
+
+The **band's** plane is still mutually exclusive with the drawers', and the reason has
+changed from "one master" to the compositor itself: the band and a drawer overlap on the
+glass at the top corners, and two overlays cannot share a `zpos`. Opening a drawer
+therefore tears the band's plane down, and closing gives it back and re-reads the live
+page so the strip is not a stale image. This is a property of the plane, not a bug, and
+it is stated where the operator will meet it (`07-touch.md`).
+
+Which surface owns which plane is legible from the log without any pixels at all,
+because `drm_band_setup()` prints the geometry it was asked for: `1280x56` is the band,
+`180x800` is a drawer, `560x127` is the USB STOP chooser's box (it was `560x271`
+until the box went to two buttons on 2026-10-07), and the browser window
+has its own size. A handover prints the old surface's teardown, the new one's setup, and
+a line naming the direction (`side: a drawer is out -- the plane is handed over from the
+band`). Measured on the unit with both drawers out: **two distinct plane ids on the same
+crtc**, `plane 127` and `plane 138`, both `180x800`, neither reusing the other's. The
+box takes whichever plane is free when it opens — measured on 2026-10-05 as `plane 138`,
+the id a drawer had used a moment before, which is the freed plane being picked up again
+rather than a collision.
+
+**The box's own picture cannot be screenshotted either, and has its own reader.**
+`work/boxshot2.py` fetches it the way any DRM client would — open `card1`, ask for the
+framebuffer **by the id the shim logs**, map its dumb buffer and read it. That exists
+because the obvious route does not work here and the failure looks like a bug in the thing
+being measured: vc4's dumb buffers are `PFNMAP`-style mappings and `get_user_pages()`
+refuses them, so `/proc/pid/mem` at a perfectly live plane address returns `EIO` — for the
+band's plane exactly as much as the box's (measured on both, 2026-10-05). Reading by fb id
+from a second client touches nothing: no `SetCrtc`, no master, no auth, and the plane rbp
+is scanning out is never written.
+
+On the `MENU_PLANE=0` fallback there is no overlay plane and the same drawings go into
+rbp's own page and are repaired through the degraded path (`menu_blit()`), where they
+shimmer exactly as the band's fallback does — and only on machines where the plane
+cannot be had. A **drawer** on that route is copied from its off-lock image into the
+page **every tick**, per row (the page's stride is not the image's), because rbp repaints
+over it and there is no damage witness for a region this big; the paint is still
+change-gated, only the copy is per-tick. The drawer's image pair and the reason the build
+sits off the lock are in [07](07-touch.md) § *The fader's flicker*.
+
+**The present path is not a candidate on the measured panel.** `RB_DFB_PRESENT`
+defaults to `off` (`rb.conf:94`), and the upgrade to `scale` only fires when the
+real fb disagrees with 1280×800 (`:107`) — and [`PRESENT:` records that it does
+not](06-display.md). Under `off` the layer surface *is* the fb page, so rbp's
+pixels reach the glass with nothing in between: no resample, no bars, no crop.
+A symptom that looks like a scaling artifact cannot be one here.
+
+`tools/fbwatch.py` answers the question by catching the frames instead of
+asking:
+
+```
+python3 tools/fbwatch.py              # 120 s at 1 fps, then pull and convert
+python3 tools/fbwatch.py --secs 60 --fps 2
+```
+
+It runs a loop **on the unit** that reads `/dev/fb0` into a RAM ring and prints a
+line for every frame that *differs* from the one before it, with the range of
+rows that differ — the 2 MB comparison is a single big-integer XOR, so it costs
+nothing. The operator loads the track when it prints `GO`; the loop is
+continuous, so the moment is caught rather than synchronised with, which is the
+rule every on-glass probe on this port follows. At the end it writes the ring to
+`/tmp/fbseq` on the unit, pulls only the changed frames plus the two before
+each, and converts them to `work/fbseq/*.png` for the eye to settle. Reading the
+row ranges first is what makes the pictures cheap: a span at 0..55 is the menu, a
+small box at the pointer's last position is the arrow, and anything large and
+structured across a deck is rbp's own redraw and belongs to the vendor.
+
+`Ctrl-C` kills the remote loop by the pid it writes to `/tmp/fbwatch.pid` — not
+by a pattern match, because a `pkill` pattern that also matches the caller's own
+command line is how an ssh session kills itself on this rig. The frames land in
+`/tmp` on the unit, which is tmpfs: pull them before rebooting, or lose them.
+
 ## Artifacts
 
 All supplied by the DirectFB build (see

@@ -118,7 +118,7 @@ enumeration lines fell from 96 to 20 for the same session.
 ## 1. Up and down are inverted
 
 `map_kbd.c` sent `KEY_UP` as `+1` and `KEY_DOWN` as `-1` on `K_SELECTOR`
-(0x420c), with the wheel at `+1` ([map_kbd.c:174-177](../scripts/shims/map_kbd.c)).
+(0x420c), with the wheel at `+1` ([map_kbd.c:170-173](../scripts/shims/map_kbd.c)).
 The sign has never been measured: the table's own comment says so
 ("the sign against rbp's list has never been observed"), and the operator's
 report is the first evidence either way.
@@ -216,7 +216,7 @@ running. The reader's own line now carries the millisecond it happened at, so
 this is a duration rather than "within a second":
 
 ```
-knobshim2: evdev[41302] /dev/input/event11 'rblive4-vkeyd' appeared; adding it
+knobshim2: evdev[41302] /dev/input/event11 'rbpi4b-vkeyd' appeared; adding it
 ```
 
 Before the fix the device was never seen and every test had to begin with

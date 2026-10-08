@@ -1484,10 +1484,12 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
       /* Is panning supported? */
       if (source->w != mode->xres && shared->fix.xpanstep == 0)
            return DFB_UNSUPPORTED;
-@@ -1898,6 +2895,37 @@ dfb_fbdev_test_mode( const VideoMode             *mode
+@@ -1898,9 +2895,63 @@ dfb_fbdev_test_mode( const VideoMode             *mode
       if (ret)
            return ret;
  
+-     need_mem = DFB_BYTES_PER_LINE( config->format, var.xres_virtual ) *
+-                DFB_PLANE_MULTIPLY( config->format, var.yres_virtual );
 +     /* PATCH (rockchipdrmfb/vc4): force the request to the real fb format so the
 +      * region test (and hence window creation) succeeds on a fixed-format fb.
 +      * Also force the geometry to the REAL fb size whenever the layer's geometry
@@ -1519,10 +1521,36 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
 +          }
 +     }
 +
-      need_mem = DFB_BYTES_PER_LINE( config->format, var.xres_virtual ) *
-                 DFB_PLANE_MULTIPLY( config->format, var.yres_virtual );
++     /* PATCH: and the memory check has to be sized from the depth the TEST
++      * modeset will really ask for -- the real fb's, forced in just above -- and
++      * not from the logical format the caller asked for.  Under a present mode
++      * those two differ ON PURPOSE: a 32-bpp layer presenting to a 16-bpp panel
++      * keeps its buffers in system memory (rot_surface, sized for three), and the
++      * fb only ever has to hold the blit's destination -- exactly what the
++      * DLBM_BACKVIDEO note above depends on.
++      *
++      * Sizing from config->format instead asks this 16-bpp panel to hold a 32-bpp
++      * frame: 4,096,000 bytes against a real smem_len of 2,048,000, so the check
++      * below fails with DFB_LIMITEXCEEDED.  primaryTestRegion() reports any
++      * failure of this function as DFB_UNSUPPORTED, and that reaches rbp as a
++      * misleading "out of memory" at layer_context.c:257 -- from a windowstack
++      * allocation that in fact SUCCEEDED, which is what made this look like a
++      * pool-exhaustion bug.  The first real refusal is here, one level down.
++      *
++      * primarySetRegion() resolves the same logical-vs-real conflict by swapping
++      * shared->real_var in wholesale; this function copies the real var field by
++      * field, so the depth has to be taken from that copy.  var is the
++      * authoritative description of the modeset at this point, so size from var.
++      * (DFB_PLANE_MULTIPLY is 1 for every packed format this driver accepts --
++      * dfb_fbdev_mode_to_var() handles no planar one -- so bytes-per-line times
++      * rows is the whole frame.) */
++     need_mem = (unsigned int)(var.xres_virtual * ((var.bits_per_pixel + 7) >> 3)) *
++                var.yres_virtual;
       if (shared->fix.smem_len < need_mem) {
-@@ -2012,14 +3040,33 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
+           D_DEBUG_AT( FBDev_Mode, "  => not enough framebuffer memory (%u < %u)!\n",
+                       shared->fix.smem_len, need_mem );
+ 
+@@ -2012,14 +3091,33 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
            return ret;
       }
  
@@ -1560,7 +1588,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
       }
  
       if (FBDEV_IOCTL( FBIOGET_VSCREENINFO, &var2 )) {
-@@ -2032,17 +3079,28 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
+@@ -2032,17 +3130,28 @@ dfb_fbdev_set_mode( const VideoMode         *mode,
       if (var.xres != var2.xres || var.xres_virtual != var2.xres_virtual ||
           var.yres != var2.yres || var.yres_virtual != var2.yres_virtual)
       {
@@ -1596,7 +1624,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
  
       shared->current_var = var;
       dfb_fbdev_var_to_mode( &var, &shared->current_mode );
-@@ -2391,6 +3449,14 @@ dfb_fbdev_set_rgb332_palette( void )
+@@ -2391,6 +3500,14 @@ dfb_fbdev_set_rgb332_palette( void )
       return ret;
  }
  
@@ -1611,7 +1639,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
  static FusionCallHandlerResult
  fbdev_ioctl_call_handler( int           caller,
                            int           call_arg,
-@@ -2403,6 +3469,8 @@ fbdev_ioctl_call_handler( int           caller,
+@@ -2403,6 +3520,8 @@ fbdev_ioctl_call_handler( int           caller,
       const char cursoroff_str[] = "\033[?1;0;0c";
       const char blankoff_str[] = "\033[9;0]";
  
@@ -1620,7 +1648,7 @@ diff --git a/systems/fbdev/fbdev.c b/systems/fbdev/fbdev.c
       if (dfb_config->vt && !dfb_config->kd_graphics && call_arg == FBIOPUT_VSCREENINFO)
            ioctl( dfb_fbdev->vt->fd, KDSETMODE, KD_GRAPHICS );
  
-@@ -2416,6 +3484,8 @@ fbdev_ioctl_call_handler( int           caller,
+@@ -2416,6 +3535,8 @@ fbdev_ioctl_call_handler( int           caller,
            write( dfb_fbdev->vt->fd, blankoff_str, strlen(blankoff_str) );
       }
  

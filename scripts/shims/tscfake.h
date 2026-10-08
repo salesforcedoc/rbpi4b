@@ -21,8 +21,8 @@
  * calibration, and rbp applies its own (patched) calibration to the raw values,
  * so the two are deliberately not the same scale.
  */
-#ifndef RBLIVE4_TSCFAKE_H
-#define RBLIVE4_TSCFAKE_H
+#ifndef RBPI4B_TSCFAKE_H
+#define RBPI4B_TSCFAKE_H
 
 #include <sys/types.h>
 
@@ -87,4 +87,4 @@ void tscfake_record(int down, int x, int y, unsigned char out[TSC_RECORD_LEN]);
  */
 void tscfake_emit(int down, int x, int y);
 
-#endif /* RBLIVE4_TSCFAKE_H */
+#endif /* RBPI4B_TSCFAKE_H */

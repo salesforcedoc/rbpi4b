@@ -41,10 +41,18 @@ code:
 ## Choosing the device: `AUDIO_DEV`
 
 ```
-RB_AUDIO_DEV=hw:CARD=DDJFLX4,DEV=0
+RB_AUDIO_DEV=                 # empty -> hw:CARD=<the selected controller's card>,DEV=0
 ```
 
-`hw:`, **not** `plughw:` — and this is a measurement, not a preference. The reason
+The card is **not** written down in `rb.conf` any more. An empty value means the
+ALSA card of whichever controller `MIDI_MAP` selects, read from that surface's
+row in `controllers.c` (`DDJFLX4` for the FLX4), so a bench that switches surface
+switches its audio card with it — it used to be independent, and selecting `jp21`
+left audio pointed at an FLX4. Setting it here still wins, which is how a card
+the table does not name is used; `doctor.sh` reports when the two disagree.
+
+That resolved value is `hw:CARD=DDJFLX4,DEV=0`, and it is `hw:`, **not**
+`plughw:` — and this is a measurement, not a preference. The reason
 is the section after next: `AUDIO_MAP` names *hardware* channel indices, so the
 shim has to learn the card's real channel count, and a `plughw` device cannot tell
 it. The plug layer's whole job is to make the logical channel count arbitrary, and
@@ -687,7 +695,20 @@ override:
   level is re-asserted in;
 * only for a channel whose own control has not reported yet (`g_fader_seen[m]`).
   The moment the physical fader moves, the map's value takes over and the seed
-  stops being re-sent, so a fader that is physically down is *not* fought.
+  stops being re-sent, so a fader that is physically down is *not* fought. A
+  **side drawer's fader** (`07-touch.md`) counts as that control reporting: it
+  writes `g_fader[ch]` and `g_fader_seen[ch]`, so on a machine with no FLX4 the
+  drawer is the writer and the seed stops for that channel at the first touch.
+
+Those two arrays are defined **once**, in `fader_state.c`, with default visibility,
+and that object is linked into both `fbshim.so` and `knobshim.so` — because the seed
+lives in knobshim and the drawer's send lives in fbshim. A second copy would be
+invisible to the other shim and the seed would silently overwrite the operator's fader
+for the first 30 s of every run. `07-touch.md` shows the `R_ARM_GLOB_DAT` relocations
+and the live GOT entries that prove the two bind to one array. Measured in the running
+process after a drawer fader drag: `g_fader = (1023, 0, 1023)`, `g_fader_seen =
+(0, 1, 0)` — channel 1 claimed by the drawer, seed disarmed for it, and unchanged 35 s
+later.
 
 The consequence to know about: **on a first start, both channels come up at
 unity until their faders are touched once.** A channel fader parked at the
@@ -781,7 +802,7 @@ path takes over, which is how a missing controller turns into `NO OUTPUT DEVICE`
 This paragraph said something else until 2026-09-27: that `plughw:` *and* `default`
 fail too. On this unit `default` did not fail. It opened onto card 0 and refused
 every write, and that is the whole of the defect described in
-[13](13-raspberrypi4.md#s42-no-sound-at-all--written-22-on-every-write).
+[13](13-raspberrypi4.md#bring-up-order) S4.2.
 
 **Two different `-19`s, and only one of them is a startup problem.** The `open()`
 above is the card being absent when the shim starts. The other is `written=-19`
