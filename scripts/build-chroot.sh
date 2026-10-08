@@ -198,10 +198,30 @@ find "$CHROOT/root/gui" -name '.DS_Store' -type f -delete 2>/dev/null || true
 ls -d "$CHROOT/root/gui"/*/ | sed 's/^/    /'
 
 # 3. patched player -> /root/pdj/rbp  (shared patches + the SC Live 4
-#    getPcController() NULL-deref fix; see scripts/patch-rbp-nopc.py)
-echo "[3/7] patching + installing rbp..."
+#    getPcController() NULL-deref fix + the layer pixel format; see
+#    scripts/patch-rbp-nopc.py and scripts/patch-rbp-depth.py)
+#
+# The depth stage is not optional and not independent: the player's
+# DS_HW_Core_Layer_Create format word and the shim's FBIOGET_VSCREENINFO lie must
+# say the same thing, and the lie is read from the rb.conf this build embeds. So
+# the value is taken from that same file rather than assumed, and the pair cannot
+# disagree in a tarball. `RB_FB_LIE_BPP=16 scripts/build-chroot.sh` still produces
+# the whole 16-bpp unit -- it is the same command with the one variable moved.
+if [ ! -f "$CONF" ]; then
+  echo "build-chroot: rb.conf not found at $CONF (set CONF=)" >&2
+  exit 1
+fi
+RB_FB_LIE_BPP="$(. "$CONF"; printf '%s' "${RB_FB_LIE_BPP:-32}")"
+case "$RB_FB_LIE_BPP" in
+  32|16) ;;
+  *) echo "build-chroot: RB_FB_LIE_BPP must be 16 or 32, not '$RB_FB_LIE_BPP'" >&2
+     exit 1;;
+esac
+echo "[3/7] patching + installing rbp (RB_FB_LIE_BPP=$RB_FB_LIE_BPP)..."
 mkdir -p "$CHROOT/root/pdj"
 "${PYTHON:-python3}" "$HERE/patch-rbp-nopc.py" "$RBPAUDIO" -o "$CHROOT/root/pdj/rbp"
+"${PYTHON:-python3}" "$HERE/patch-rbp-depth.py" "$CHROOT/root/pdj/rbp" \
+                    --bpp "$RB_FB_LIE_BPP"
 
 # 4. shims -> usr/lib (LD_PRELOAD names) and root/pdj
 echo "[4/7] installing shims..."

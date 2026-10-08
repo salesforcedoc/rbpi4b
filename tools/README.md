@@ -32,7 +32,12 @@ python3 tools/patch-rbp/rbp_patch.py /path/to/stock/rbp -o extracted/rbp-audio
 
 The `getPcController()` patch is applied as a second stage by
 [`scripts/build-chroot.sh`](../scripts/build-chroot.sh) via
-[`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py).
+[`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py), and the layer pixel
+format as a third via [`scripts/patch-rbp-depth.py`](../scripts/patch-rbp-depth.py).
+The third stage is not a fix but a choice — 32 bpp by default, 16 bpp kept — and it
+has a matching half outside the binary, so the build reads `RB_FB_LIE_BPP` out of
+the `rb.conf` it embeds and passes it to the patcher. Moving one half alone leaves
+rbp unable to open its layer: black screen, no log line naming the cause.
 
 ## `build-directfb`
 
