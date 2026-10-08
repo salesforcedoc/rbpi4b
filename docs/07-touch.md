@@ -1855,6 +1855,18 @@ middle is answered `SZ_HIT_BG` — nothing — rather than "whichever way the ar
 rounded", and the hit test loops every lx in the row to prove the two cells never
 answer for each other.
 
+**SYNC, CUE and PLAY are lit and flashing from rbp's own state (2026-10-08).** They used
+to be press highlights and nothing else, which made the drawer's transport silent on
+exactly the machine it was built for — *"CUE, PLAY and the channel faders are otherwise
+reachable only from the FLX4"*, above — because the state it needed was only ever
+computed on the way to a MIDI note. `rbp_led.c` now decides it once (`rbp_led.h`) and
+both surfaces read that one value: the FLX4's SYNC/CUE/PLAY notes and this drawer's three
+buttons. A lit button is a **backlit** one — accent frame and accent label on the
+unchanged dark face, not the filled accent a pressed button uses, so "rbp says this is
+on" and "a finger is on me" stay two different pictures. The full table, where each of
+the three comes from, and why a blink is resolved in the LED thread rather than by each
+painter: `08-controls.md`.
+
 CUE and PLAY are **stacked full-width** rather than side by side: the inner width is
 148 px, and two 74 px cells would put "PLAY" against the atlas's own 65 px worst case
 ("USB STOP") with nothing to spare — a transport button is not where a 9 px margin is

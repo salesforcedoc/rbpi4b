@@ -237,13 +237,13 @@ fi
 # A source that is missing is NOT an error: a clean install from the tarball
 # alone is the supported path and needs none of this. It says so, once, per file.
 #
-# AND rbp-audio IS DELIBERATELY NOT IN THIS LIST. It is stage 1 of a two-stage
+# AND rbp-audio IS DELIBERATELY NOT IN THIS LIST. It is stage 1 of a three-stage
 # patch to the player, and it is the name start-rb.sh copies over the installed
 # player at every launch -- so installing it would put back the getPcController()
 # NULL-deref that kills rbp about a second in, with no display and no log. A file
 # of that name at the deploy root does not sit there; it wins. If one is present
 # this script says so rather than removing it, because the person who put it there
-# may be mid-investigation (doctor.sh hashes it against all three stages).
+# may be mid-investigation (doctor.sh names it against all five builds).
 
 SHIM_SRC="${RB_ARTIFACT_DIR:-$HERE/../shims}"
 DFB_SRC="${RB_ARTIFACT_DIR:-$HERE/../../work/dfb/lib/directfb-1.4-6/systems}"

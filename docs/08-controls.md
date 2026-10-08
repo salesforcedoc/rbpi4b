@@ -1258,6 +1258,41 @@ SYNC, CUE and PLAY are plain press/release with **no `usleep`** — unlike the b
 buttons, they never enter the synthesized-hold path, because rbp wants an edge and not
 a dwell.
 
+### SYNC, CUE and PLAY are drawn from rbp's own state, lit and flashing
+
+The three are not just buttons. Each also carries the **deck's real transport state**,
+so a machine with no controller attached — the machine these drawers exist for — still
+shows what both decks are doing. They are drawn from `rbp_led_transport()`
+(`rbp_led.h`), which is the *same reading* the DDJ-FLX4's own SYNC/CUE/PLAY notes are
+sent: one decoder, two surfaces, so the drawer and the hardware cannot drift apart.
+
+| Drawer button | Where the state comes from | Lit when |
+|---|---|---|
+| **SYNC** | `rbp LedStat` **id 4** on the deck's channel, the same three states as the FLX4 (table above) | rbp says solid (locked); **flashes** when rbp says blink — synced but nudged off beat — at *rbp's* period |
+| **CUE** | `loaded && !playing` | a track is loaded and the deck is paused on its cue |
+| **PLAY** | `isPlaying` → solid; `loaded && !playing` → **flashes**; else dark | the deck is playing; the flash is the paused-on-a-loaded-track state, at rbp's own period (500 ms deck 1 / 250 ms deck 2) |
+
+**A flash is not a third appearance, and nothing here keeps a clock.** rbp does not
+toggle a blinking LED's `State` — it sets `State = 2` and leaves it, with the period in
+the same entry — so `rbp_led.c` resolves the phase against rbp's own period *at the
+instant of the read*, once per 20 Hz LED tick, and publishes one packed int. The drawer
+therefore flashes at rbp's cadence and **on the very same value the controller is sent**;
+the note goes out and the drawer's repaint picks it up within a tick, at most 50 ms
+behind. Handing two painters a "blinking" flag instead would flash them at the same rate
+and at whatever phase each one's own clock happened to be in — the two would agree about
+the rate and disagree about the moment.
+
+That packed int is part of the drawer's repaint gate beside the pressed control and the
+fader value, so **a blink repaints and a steady state does not** — an idle drawer still
+costs nothing, which is what keeps the single-buffered plane from tearing.
+
+A **finger on a lit button still wins**: the press's own accent is drawn over the state,
+because a touch surface's feedback is the one thing a state must never swallow.
+
+The three travel from `rbp_led.c` whether or not a controller is attached, so a unit
+with no FLX4 is not dark just where it matters — and `LED_DISABLE`, which names the
+*panel*, no longer stops that read (`rbp_led.c`).
+
 **The nudge is not a keycode and there is no macro that would make it one.** `0x4305` is
 the jog's rotation, reached through `send_rx_key_fl(K_JOG_ROT, OP_ROTATE, ch, 0,
 speed /*rev/s, clamped to ±8*/, (long)vpos)`, and it is the same call the FLX4's own jog

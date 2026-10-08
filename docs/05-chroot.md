@@ -26,8 +26,10 @@ deploy root and tars it to `work/rbpi4b-pi4.tgz`:
    are split across two source roots and are resolved one at a time; see
    [04](04-firmware-assets.md#what-you-need).
 3. **Patched player** → `rbx3-run/root/pdj/rbp` (shared rbp patches + the
-   `getPcController` fix — see
-   [`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py)). The patch is
+   `getPcController` fix + the layer pixel format — see
+   [`scripts/patch-rbp-nopc.py`](../scripts/patch-rbp-nopc.py) and
+   [`scripts/patch-rbp-depth.py`](../scripts/patch-rbp-depth.py); the depth is
+   read from the `rb.conf` being embedded). The `getPcController` patch is
    **not** Denon-specific: it turns a NULL `getPcController()` result into a
    no-op, and the Pi fails the same board check the previous target did.
 4. **Shims** → `rbx3-run/usr/lib/{fbshim,knobshim,audioshim,crashcatch}.so`.

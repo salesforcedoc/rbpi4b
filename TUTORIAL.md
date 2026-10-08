@@ -61,8 +61,9 @@ RX3=/path/to/extracted DFB="$PWD/work/dfb" scripts/build-chroot.sh
 
 It builds the shims from [`scripts/shims/`](scripts/shims/) if needed, applies
 the `getPcController()` no-op patch via
-[`scripts/patch-rbp-nopc.py`](scripts/patch-rbp-nopc.py), and installs the
-DirectFB stack.
+[`scripts/patch-rbp-nopc.py`](scripts/patch-rbp-nopc.py), the layer pixel format
+via [`scripts/patch-rbp-depth.py`](scripts/patch-rbp-depth.py) at the depth
+`rb.conf` asks for, and installs the DirectFB stack.
 
 ## 3. Deploy (Pi)
 

@@ -214,6 +214,7 @@ ssh pi@<host>
 # getPcController() no-op stage
 #   python3 tools/patch-rbp/rbp_patch.py extracted/XDJRX3/pdj/rbp -o extracted/rbp-audio
 #   python3 scripts/patch-rbp-nopc.py extracted/rbp-audio
+#   python3 scripts/patch-rbp-depth.py <that output>   # 32 bpp, matching rb.conf
 
 # build shims (host, or the repo's Docker image)
 #   make -C scripts/shims RX3="$PWD/extracted/XDJRX3-rootfs"

@@ -251,6 +251,7 @@ rbpi4b/
 ├── scripts/
 │   ├── build-chroot.sh       host: assemble the soft-float chroot tarball
 │   ├── patch-rbp-nopc.py     the getPcController() no-op patch
+│   ├── patch-rbp-depth.py    the layer pixel format (the depth pair)
 │   ├── device/               scripts that run on the Pi
 │   └── shims/                LD_PRELOAD shims (soft-float) + Makefile
 ├── tools/

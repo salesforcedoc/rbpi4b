@@ -225,23 +225,29 @@ pair "libdirectfb_fbdev (rot16)" \
 
 # The player itself. Two different questions, and keeping them apart is the
 # point: is a player installed, and is it OURS. build-chroot.sh bakes the patched
-# player into the chroot, with scripts/patch-rbp-nopc.py as its last stage
-# (build-chroot.sh:204), so the chroot copy is the one that runs.
+# player into the chroot, with scripts/patch-rbp-nopc.py and then
+# scripts/patch-rbp-depth.py as its last stages (build-chroot.sh:217-219), so the
+# chroot copy is the one that runs.
 #
-# The three hashes are the three stages of tools/patch-rbp/PATCHES.md, and naming
-# them is what makes a wrong player diagnosable: "differs from what I expected"
-# cannot tell you whether you are looking at Pioneer's stock binary or at our own
-# half-patched stage 1, and those two are not the same problem. It also closes a
-# real trap. The deploy-root override is named `rbp-audio` -- which is STAGE 1 --
-# and start-rb.sh:121 copies it over the installed player at EVERY launch when it
-# exists. So a file of that name at the deploy root does not merely sit there; it
-# wins, and it puts back the getPcController() NULL-deref that kills rbp about a
-# second after start, with no display and no log.
+# The hashes are the stages of tools/patch-rbp/PATCHES.md, and naming them is what
+# makes a wrong player diagnosable: "differs from what I expected" cannot tell you
+# whether you are looking at Pioneer's stock binary or at our own half-patched
+# stage 1, and those two are not the same problem. It also closes a real trap. The
+# deploy-root override is named `rbp-audio` -- which is STAGE 1 -- and start-rb.sh
+# copies it over the installed player at EVERY launch when it exists. So a file of
+# that name at the deploy root does not merely sit there; it wins, and it puts back
+# the getPcController() NULL-deref that kills rbp about a second after start, with
+# no display and no log.
 #
 # Updated 2026-10-08. Dropping the section-6 waveform gate (PATCHES.md §6) changed
 # stage 1's output, and through it the final build, so both hashes moved. The
 # pre-revert pair -- stage 1 `3706c68f`, final `3cecd92a` -- is no longer produced
-# by anything in this tree; a unit carrying either is running history.
+# by anything in this tree; a unit carrying either is running history. On the same
+# day the third stage (PATCHES.md §12) split the final in two: the layer pixel
+# format is 32 bpp by default and 16 is the other half of the pair, so there are
+# now TWO finals and which one is "ours" is exactly what RB_FB_LIE_BPP says. The
+# pair is not a preference -- start-rb.sh:4b refuses to launch a mismatched one,
+# and this script is where you find out why the unit is in that state.
 RB_RBP_STOCK=4f2efcfc0c9e3f539289f863acfddcc6	# Pioneer XDJ-RX3 v1.20, untouched
 RB_RBP_STAGE1=3dda2d4e10187a75bfc16a7b4f16f192	# +66 words; no getPcController() fix
 # Superseded 2026-10-07. This is the WORST of the four to meet in the field, because
@@ -250,7 +256,36 @@ RB_RBP_STAGE1=3dda2d4e10187a75bfc16a7b4f16f192	# +66 words; no getPcController()
 # unimplemented functions -- and it makes the Pro DJ Link gate structurally
 # unreadable, so Link is dead on both routes with nothing on screen to say so.
 RB_RBP_NOPC2=18a64bc4d0ffd1cbd35f3a6ea447fca8	# +2 words; SILENTLY DISABLES Pro DJ Link
-RB_RBP_FINAL=97aa2223c4ca5906b66389420f29d03f	# +12 words; the build that ships
+RB_RBP_FINAL16=97aa2223c4ca5906b66389420f29d03f	# +12 words; DSPF_RGB16 -- the RX3's own depth
+RB_RBP_FINAL32=990404244853a7d613be3d469ad1bc1d	# +12 words; DSPF_RGB32 -- the default
+
+# Which of the two finals this unit's configuration asks for. Both are correct
+# builds; picking one in the report without asking RB_FB_LIE_BPP would call a
+# deliberately-switched unit broken.
+_rbp_final_for_depth() {
+	case "${RB_FB_LIE_BPP:-32}" in
+		16) echo "$RB_RBP_FINAL16";;
+		*)  echo "$RB_RBP_FINAL32";;
+	esac
+}
+
+# The depth a build actually renders at, read from the same two bytes the launcher
+# reads: the low byte of the `movw` and of the `movt` that name DSPF_RGB16
+# (0x00200801) or DSPF_RGB32 (0x00400c03), at file offsets 0x19bab8 and 0x19bac0
+# (scripts/patch-rbp-depth.py's table). Both are read for the launcher's reason:
+# one byte alone would call roughly one file in 128 a build it is not, and this
+# answer decides whether the unit is reported as runnable. `?` is "not a player
+# this tree built".
+_rbp_depth() {
+	command -v od >/dev/null 2>&1 || { echo "?"; return; }
+	_b0=$(od -An -tx1 -j $((0x19BAB8)) -N 1 "$1" 2>/dev/null | tr -d ' \t\n')
+	_b1=$(od -An -tx1 -j $((0x19BAC0)) -N 1 "$1" 2>/dev/null | tr -d ' \t\n')
+	case "$_b0$_b1" in
+		0120) echo 16;;
+		0340) echo 32;;
+		*)    echo "?";;
+	esac
+}
 
 # The full digest, unlike _sum() above which truncates for display: these are
 # compared, not just shown. No md5sum means NO verdict rather than a wrong one,
@@ -264,15 +299,16 @@ _md5() {
 }
 
 # Name a build from its hash, so that both the report and the fix can say which
-# of the three it is instead of only that it is not the one we wanted.
+# of the five it is instead of only that it is not the one we wanted.
 _rbp_build() {
 	case "$1" in
-		"$RB_RBP_FINAL")  echo "final -- stock + all interoperability patches";;
-		"$RB_RBP_NOPC2")  echo "SUPERSEDED -- runs fine, but Pro DJ Link is silently dead";;
-		"$RB_RBP_STAGE1") echo "STAGE 1 ONLY -- missing the getPcController() fix";;
-		"$RB_RBP_STOCK")  echo "Pioneer's stock binary, unpatched";;
-		"?")              echo "unknown (no md5sum on this target)";;
-		*)                echo "not one of the four known builds";;
+		"$RB_RBP_FINAL32") echo "final -- stock + all interoperability patches, renders 32 bpp";;
+		"$RB_RBP_FINAL16") echo "final -- stock + all interoperability patches, renders 16 bpp";;
+		"$RB_RBP_NOPC2")   echo "SUPERSEDED -- runs fine, but Pro DJ Link is silently dead";;
+		"$RB_RBP_STAGE1")  echo "STAGE 1 ONLY -- missing the getPcController() fix";;
+		"$RB_RBP_STOCK")   echo "Pioneer's stock binary, unpatched";;
+		"?")               echo "unknown (no md5sum on this target)";;
+		*)                 echo "not one of the five known builds";;
 	esac
 }
 
@@ -282,19 +318,35 @@ if [ ! -f "$RBP_INSTALLED" ]; then
 	fix "# scripts/build-chroot.sh stages it; or tools/patch-rbp/rbp_patch.py <stock> -o rbp-audio && scripts/patch-rbp-nopc.py rbp-audio -o rbp-nopc"
 else
 	_rbp_sum=$(_md5 "$RBP_INSTALLED")
-	if [ "$_rbp_sum" = "$RB_RBP_FINAL" ]; then
-		ok "player presents as our final build: $_rbp_sum"
+	_rbp_want=$(_rbp_final_for_depth)
+	if [ "$_rbp_sum" = "$_rbp_want" ]; then
+		ok "player presents as our final build for RB_FB_LIE_BPP=${RB_FB_LIE_BPP:-32}: $_rbp_sum"
+	elif [ "$_rbp_sum" = "$RB_RBP_FINAL16" ] || [ "$_rbp_sum" = "$RB_RBP_FINAL32" ]; then
+		# Ours, complete, and at the other depth. This is not a corrupt player, so
+		# it must not be reported as one -- but it is also not runnable: the pair
+		# has to agree, and start-rb.sh refuses this one on purpose.
+		_rbp_d=$(_rbp_depth "$RBP_INSTALLED")
+		bad "the installed player is our final build, but at ${_rbp_d} bpp, and"
+		bad "RB_FB_LIE_BPP=${RB_FB_LIE_BPP:-32} -- start-rb.sh will refuse to launch it"
+		note "$RBP_INSTALLED is $_rbp_sum ($(_rbp_build "$_rbp_sum"))"
+		note "the layer pixel format and the shim's FBIOGET_VSCREENINFO lie must agree;"
+		note "DirectFB's layer plugin refuses a mismatched pair and rbp dies before the"
+		note "panel opens, with nothing in rbp.log that names the depth."
+		fix "# move ONE half of the pair:"
+		fix "#   echo RB_FB_LIE_BPP=$_rbp_d >> $RB_DEPLOY_ROOT/rb.local.conf   # match the lie to the player"
+		fix "#   or install a ${RB_FB_LIE_BPP:-32}-bpp player here (on the host:"
+		fix "#       python3 scripts/patch-rbp-depth.py <player> --bpp ${RB_FB_LIE_BPP:-32})"
 	else
-		# Both of the other known builds are wrong on this hardware, and the
-		# stock one is wrong in a way that reads as "the unit is dead".
+		# Of the remaining builds, the superseded and stock ones are wrong in a way
+		# that reads as "the unit is dead", so they are named rather than counted.
 		if [ "$_rbp_sum" = "?" ]; then
 			warn "player present but unverifiable: $(wc -c < "$RBP_INSTALLED") bytes, no md5sum here"
-			note "expected $RB_RBP_FINAL; compare by hand before trusting this unit."
+			note "expected $_rbp_want; compare by hand before trusting this unit."
 		else
 			bad "the installed player is NOT our build: $_rbp_sum"
 		fi
 		note "$RBP_INSTALLED -- $(_rbp_build "$_rbp_sum")"
-		note "ours is $RB_RBP_FINAL (tools/patch-rbp/PATCHES.md pins all four)"
+		note "ours is $_rbp_want (tools/patch-rbp/PATCHES.md pins all five)"
 		fix "# rebuild into the chroot, or scp a known-good player over $RBP_INSTALLED"
 	fi
 fi
@@ -305,8 +357,18 @@ fi
 # case and is reported as nothing at all.
 if [ -f "$RB_DEPLOY_ROOT/rbp-audio" ]; then
 	_ovr_sum=$(_md5 "$RB_DEPLOY_ROOT/rbp-audio")
-	if [ "$_ovr_sum" = "$RB_RBP_FINAL" ]; then
-		ok "deploy-root override is the final build, and will re-install cleanly"
+	if [ "$_ovr_sum" = "$(_rbp_final_for_depth)" ]; then
+		ok "deploy-root override is the final build for this depth, and will re-install cleanly"
+	elif [ "$_ovr_sum" = "$RB_RBP_FINAL16" ] || [ "$_ovr_sum" = "$RB_RBP_FINAL32" ]; then
+		# A complete player at the wrong depth is the one override that looks
+		# perfect and cannot run: it will be copied in and then refused.
+		_ovr_d=$(_rbp_depth "$RB_DEPLOY_ROOT/rbp-audio")
+		bad "$RB_DEPLOY_ROOT/rbp-audio is our final build at ${_ovr_d} bpp, but"
+		bad "RB_FB_LIE_BPP=${RB_FB_LIE_BPP:-32} -- the next launch will refuse the pair"
+		note "start-rb.sh copies that over the installed player at EVERY launch, and then"
+		note "checks the pair; a matching override is fine, this one is the other depth."
+		fix "# mv $RB_DEPLOY_ROOT/rbp-audio $RB_DEPLOY_ROOT/rbp-audio.${_ovr_d}bpp"
+		fix "#   or: echo RB_FB_LIE_BPP=$_ovr_d >> $RB_DEPLOY_ROOT/rb.local.conf"
 	elif [ "$_ovr_sum" = "$RB_RBP_STAGE1" ] || [ "$_ovr_sum" = "$RB_RBP_STOCK" ] \
 	  || [ "$_ovr_sum" = "$RB_RBP_NOPC2" ]; then
 		bad "$RB_DEPLOY_ROOT/rbp-audio is $(_rbp_build "$_ovr_sum")"
