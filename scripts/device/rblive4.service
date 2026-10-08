@@ -1,6 +1,6 @@
 [Unit]
 Description=rblive4 - XDJ-RX3 rekordbox player (rbp)
-Documentation=https://github.com/andrewsim/rbpi4b/blob/main/docs/11-runtime-launcher.md
+Documentation=https://github.com/salesforcedoc/rbpi4b/blob/main/docs/11-runtime-launcher.md
 After=basic.target
 # Deliberately NOT After=multi-user.target, which is what this unit used to say.
 # Waiting for multi-user added that whole span of pure latency and bought
