@@ -2,7 +2,7 @@
 """Additional interoperability patch for the XDJ-RX3 `rbp` binary.
 
 The base patch set turns the stock XDJ-RX3 v1.20 `rbp` into `rbp-audio`
-(md5 3706c68f7242779d46afa09f35a39acf). On any host with no Pioneer PC-controller
+(md5 3dda2d4e10187a75bfc16a7b4f16f192). On any host with no Pioneer PC-controller
 link -- the SC Live 4, and now the Pi 4 -- one additional, timing-dependent crash
 fires:
 

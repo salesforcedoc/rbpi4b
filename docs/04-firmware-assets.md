@@ -63,11 +63,15 @@ differently:
 | build | md5 | what it is |
 |---|---|---|
 | stock `rbp` | `4f2efcfc0c9e3f539289f863acfddcc6` | Pioneer's XDJ-RX3 v1.20, untouched — deadlocks or aborts on this hardware |
-| `rbp-audio` | `3706c68f7242779d46afa09f35a39acf` | + 68 words of interoperability patches; still has the `getPcController()` NULL-deref |
+| `rbp-audio` | `3dda2d4e10187a75bfc16a7b4f16f192` | + 66 words of interoperability patches; still has the `getPcController()` NULL-deref |
 | `rbp-nopc` (superseded) | `18a64bc4d0ffd1cbd35f3a6ea447fca8` | + 2 words; **runs and plays, but Pro DJ Link is silently dead** — see [PATCHES.md § 11](../tools/patch-rbp/PATCHES.md) |
-| `rbp-nopc` | `3cecd92a02c90962bbaad31b5e1860bd` | + 12 words; **this is what the chroot runs** |
+| `rbp-nopc` | `97aa2223c4ca5906b66389420f29d03f` | + 12 words; **this is what the chroot runs** |
 
-`tools/patch-rbp/PATCHES.md` pins all three and lists every word, and
+Both stage-1 and final hashes moved on **2026-10-08**, when the § 6 waveform gate
+was dropped (it cost the boot logo); the pre-revert pair, `3706c68f` / `3cecd92a`,
+is no longer produced by anything in this tree.
+
+`tools/patch-rbp/PATCHES.md` pins all four and lists every word, and
 `doctor.sh` compares the installed player against them by name rather than only
 reporting that it differs. The names matter past bookkeeping: the deploy-root
 override that `start-rb.sh` copies into the chroot at every launch is called

@@ -237,15 +237,20 @@ pair "libdirectfb_fbdev (rot16)" \
 # exists. So a file of that name at the deploy root does not merely sit there; it
 # wins, and it puts back the getPcController() NULL-deref that kills rbp about a
 # second after start, with no display and no log.
+#
+# Updated 2026-10-08. Dropping the section-6 waveform gate (PATCHES.md §6) changed
+# stage 1's output, and through it the final build, so both hashes moved. The
+# pre-revert pair -- stage 1 `3706c68f`, final `3cecd92a` -- is no longer produced
+# by anything in this tree; a unit carrying either is running history.
 RB_RBP_STOCK=4f2efcfc0c9e3f539289f863acfddcc6	# Pioneer XDJ-RX3 v1.20, untouched
-RB_RBP_STAGE1=3706c68f7242779d46afa09f35a39acf	# +68 words; no getPcController() fix
+RB_RBP_STAGE1=3dda2d4e10187a75bfc16a7b4f16f192	# +66 words; no getPcController() fix
 # Superseded 2026-10-07. This is the WORST of the four to meet in the field, because
 # it looks perfect: rbp starts, paints, plays. Its getPcController() is a permanent
 # `mov r0,#0`, which is byte-identical to the thunks Pioneer ships for its own
 # unimplemented functions -- and it makes the Pro DJ Link gate structurally
 # unreadable, so Link is dead on both routes with nothing on screen to say so.
 RB_RBP_NOPC2=18a64bc4d0ffd1cbd35f3a6ea447fca8	# +2 words; SILENTLY DISABLES Pro DJ Link
-RB_RBP_FINAL=3cecd92a02c90962bbaad31b5e1860bd	# +12 words; the build that ships
+RB_RBP_FINAL=97aa2223c4ca5906b66389420f29d03f	# +12 words; the build that ships
 
 # The full digest, unlike _sum() above which truncates for display: these are
 # compared, not just shown. No md5sum means NO verdict rather than a wrong one,
@@ -289,7 +294,7 @@ else
 			bad "the installed player is NOT our build: $_rbp_sum"
 		fi
 		note "$RBP_INSTALLED -- $(_rbp_build "$_rbp_sum")"
-		note "ours is $RB_RBP_FINAL (tools/patch-rbp/PATCHES.md pins all three)"
+		note "ours is $RB_RBP_FINAL (tools/patch-rbp/PATCHES.md pins all four)"
 		fix "# rebuild into the chroot, or scp a known-good player over $RBP_INSTALLED"
 	fi
 fi
