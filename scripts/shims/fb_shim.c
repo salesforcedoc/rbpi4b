@@ -3,12 +3,14 @@
  *
  * What it still does, and why each one is load-bearing:
  *
- *   FBIOGET_VSCREENINFO -> lies: 1280x800, 16 bpp, RGB565.
+ *   FBIOGET_VSCREENINFO -> lies: 1280x800, XRGB at 32 bpp -- the default, and the
+ *     depth the player itself runs at -- or RGB565 at 16 bpp when FB_LIE_BPP=16.
  *     rbp and DirectFB both size their layers from this. The lie is what makes
  *     the logical geometry 1280x800 regardless of what the panel actually is,
  *     and the DirectFB fbdev driver reads the *real* geometry with a raw
  *     syscall() to bypass it. Do not "fix" this.
- *   FBIOGET_FSCREENINFO -> line_length = 2560 (1280 * 16 bpp / 8).
+ *   FBIOGET_FSCREENINFO -> line_length = 1280 * the lied bpp / 8: 5120 at 32 bpp,
+ *     2560 at 16, because the depth and the pitch must move together.
  *   FBIOPUT_VSCREENINFO -> accepted and ignored: the real mode is the kernel's.
  *   FBIOPAN_DISPLAY -> the frame pacer (see below). Not reached on this unit.
  *   FBIO_WAITFORVSYNC -> the top menu's compositor, before the wait (see below).
@@ -51,6 +53,7 @@
 #include "menu_draw.h"
 #include "syscalls.h"
 #include "envutil.h"
+#include "pointsrc.h"          /* pointsrc_log, for the vsync counter below */
 
 #include <stdarg.h>
 #include <errno.h>
@@ -63,9 +66,33 @@
 #define MAX_GPIO_FDS 256
 static char is_gpio_fd[MAX_GPIO_FDS];
 
-/* 1280 * 16 / 8. Every consumer of FSCREENINFO (DirectFB's pitch, rbp's stride
- * arithmetic) assumes the logical width, not the panel's. */
-#define FB_LOGICAL_LINE_LENGTH 2560
+/* The depth rbp is TOLD the fb is, and the line length that goes with it. 32 is
+ * the DEFAULT, and it is what rbp is actually run at: it is the depth the
+ * rx3-handoff port renders its UI at, and the depth `.239` was measured to need
+ * -- at 16 the deck-1 strip frame's right vertical comes out at 1/4 and 1/8
+ * coverage instead of whole. 32 makes DirectFB's AUTO-FALLBACK pick `convert`:
+ * a bpp-only mismatch at an unchanged geometry (fbdev.c), which is what lets the
+ * layer surface be 32 bpp while the panel stays 16. 16 is kept because it is the
+ * RX3's own framebuffer and the configuration everything else was verified on.
+ *
+ * The fallback here is only reached when the variable is absent ENTIRELY, which
+ * the launcher never does -- rb.conf always sets it and start-rb.sh's SHIM_VARS
+ * always exports it. It is 32 so that it agrees with rb.conf's default: the two
+ * disagreeing is the one way this can run silently wrong, since rbp's own
+ * pixel-format word must say the same thing (its DS_HW driver plugin refuses the
+ * layer otherwise) and nothing here can see that word. Read the shim-side name:
+ * rb.conf's RB_FB_LIE_BPP reaches it through SHIM_VARS. */
+static int fb_lie_bpp(void)
+{
+    return strcmp(env_str("FB_LIE_BPP", "32"), "32") == 0 ? 32 : 16;
+}
+
+/* Every consumer of FSCREENINFO (DirectFB's pitch, rbp's stride arithmetic)
+ * assumes the logical width, not the panel's. The depth must move with it: the
+ * driver tells a format-only mismatch from a geometry one by the PIXEL stride
+ * (pitch / bpp), so 32 bpp with a 2560-byte line reads as 640 px against the
+ * real 1280 and selects `scale` instead of `convert`. */
+#define FB_LOGICAL_LINE_LENGTH (1280 * fb_lie_bpp() / 8)
 
 /* The toolchain's linux/fb.h predates this uapi entry, so it is spelled out here
  * -- and its value is not a guess: _IOW('F', 0x20, __u32) is (1<<30)|(4<<16)|
@@ -89,6 +116,63 @@ static long pan_pacer_ns(void)
             cached = 0;
     }
     return cached;
+}
+
+/* The frame rate, counted where it is cheapest and on the thread that actually
+ * draws it. The FBIO_WAITFORVSYNC case below IS rbp's frame boundary -- that
+ * case documents the measurement: one issue per frame, ~57/s -- so counting the
+ * calls and printing once a second gives the frame rate directly, rather than
+ * inferring it from the process's CPU. That distinction is the whole point of
+ * the instrument: it is the one number that says whether a heavier present path
+ * costs *frames* or only cycles.
+ *
+ * Env-gated by FB_VSYNC_RATE, because the read is a clock_gettime and the print
+ * is a lock plus a write, on rbp's SCHED_FIFO 98 render thread -- cheap, but not
+ * free enough to leave on. Set once and cached: a getenv() in this path is a
+ * lock and a write to the process's environment block from the render thread.
+ *
+ * A DIAGNOSTIC, deliberately, and so it must NOT go into start-rb.sh's
+ * SHIM_VARS: that loop exports every name in its list unconditionally, so an
+ * ad-hoc `FB_VSYNC_RATE=1 sh start-rb.sh` would be overwritten with the empty
+ * string. Set it in the launcher's environment instead -- a systemd drop-in
+ * carrying `Environment=FB_VSYNC_RATE=1` reaches rbp, because nothing in the
+ * launcher uses `env -i`. Same rule as POINT_MENU_MS and MIDI_DUMP's contents.
+ *
+ * The window is held in MILLISECONDS IN A 64-BIT TYPE, and that is not style:
+ * `long` is 4 bytes in this soft-float ARM32 build, so a nanosecond
+ * CLOCK_MONOTONIC held in one wraps every 4.29 s
+ * (rblive4-32bit-long-clock-wrap). */
+static void vsync_rate_tick(void)
+{
+    static int enabled = -1;
+    static unsigned long long window_start_ms;
+    static unsigned int frames;
+    struct timespec now;
+    unsigned long long ms, elapsed;
+
+    if (enabled < 0)
+        enabled = env_flag("FB_VSYNC_RATE", 0);
+    if (!enabled)
+        return;
+
+    frames++;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    ms = (unsigned long long)now.tv_sec * 1000ULL
+       + (unsigned long long)(now.tv_nsec / 1000000);
+    if (window_start_ms == 0) {
+        /* The first call starts the window rather than reporting a partial one:
+         * a line covering the launch's slow first milliseconds would read as a
+         * frame drop that never happened. */
+        window_start_ms = ms;
+        return;
+    }
+    elapsed = ms - window_start_ms;
+    if (elapsed >= 1000ULL) {
+        pointsrc_log("vsync: %u frames in %llu ms = %.1f/s",
+                     frames, elapsed, (double)frames * 1000.0 / (double)elapsed);
+        frames = 0;
+        window_start_ms = ms;
+    }
 }
 
 int open(const char *pathname, int flags, ...)
@@ -204,14 +288,29 @@ int ioctl(int fd, unsigned long request, ...)
         struct fb_var_screeninfo *v = arg;
         int res = real_ioctl(fd, request, v);
         if (res == 0 && v) {
+            int bpp = fb_lie_bpp();
+
             v->xres = 1280; v->yres = 800;
             v->xres_virtual = 1280; v->yres_virtual = 800;
-            v->bits_per_pixel = 16;
+            v->bits_per_pixel = bpp;
             v->grayscale = 0; v->nonstd = 0;
-            v->red.offset = 11; v->red.length = 5; v->red.msb_right = 0;
-            v->green.offset = 5; v->green.length = 6; v->green.msb_right = 0;
-            v->blue.offset = 0; v->blue.length = 5; v->blue.msb_right = 0;
-            v->transp.offset = 0; v->transp.length = 0; v->transp.msb_right = 0;
+            if (bpp == 32) {
+                /* XRGB with no alpha channel, which is DirectFB's DSPF_RGB32 --
+                 * the format rbp's DS_HW_Core_Layer_Create asks for when its
+                 * pixel-format word carries the handoff's 0x00400c03. transp
+                 * stays length 0 on purpose: an 8-bit alpha channel here would
+                 * describe ARGB instead, and the whole point is that this and
+                 * rbp's word agree. */
+                v->red.offset = 16; v->red.length = 8; v->red.msb_right = 0;
+                v->green.offset = 8; v->green.length = 8; v->green.msb_right = 0;
+                v->blue.offset = 0; v->blue.length = 8; v->blue.msb_right = 0;
+                v->transp.offset = 0; v->transp.length = 0; v->transp.msb_right = 0;
+            } else {
+                v->red.offset = 11; v->red.length = 5; v->red.msb_right = 0;
+                v->green.offset = 5; v->green.length = 6; v->green.msb_right = 0;
+                v->blue.offset = 0; v->blue.length = 5; v->blue.msb_right = 0;
+                v->transp.offset = 0; v->transp.length = 0; v->transp.msb_right = 0;
+            }
             v->rotate = 0;
         }
         return res;
@@ -234,7 +333,13 @@ int ioctl(int fd, unsigned long request, ...)
          * immediately after a completed draw, so the panel is composited just
          * after rbp has finished a frame and then has the whole inter-frame gap to
          * itself. Painting after the wait would put it immediately before the next
-         * draw, i.e. under it. menu_draw.c has the rest. */
+         * draw, i.e. under it. menu_draw.c has the rest.
+         *
+         * The counter first, and it is the same frame boundary read as a rate:
+         * with FB_VSYNC_RATE set this prints one "vsync: N frames in M ms" line
+         * per second -- on rbp's own render thread, so the number is the rate
+         * frames arrive at, not a rate inferred from CPU. */
+        vsync_rate_tick();
         menu_frame_tick();
         return real_ioctl(fd, request, arg);
     case FBIOPAN_DISPLAY: {

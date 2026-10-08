@@ -55,6 +55,7 @@
 #include "rbp_bridge.h"
 #include "midi_io.h"
 #include "rbp_led.h"
+#include "rbp_transport.h"   /* the reading the drawers read back (see its header) */
 #include "led_table.h"  /* the settled view of the table, and the blink phase */
 #include "ctrl_map.h"   /* struct led_notes, and ctrl_sel_leds() */
 
@@ -441,19 +442,70 @@ static void led_send(int sch, int note, signed char *last, int on)
  * pads deliberately differ: there state 3 is measured to mean "this is the
  * engaged beat-loop pad" and is blinked, because there is a specific thing to
  * say and no way to say it with brightness.  See ledstat_state's comment. */
-static void led_from_table(int sch, int note, signed char *last, unsigned int id,
-                           int deck, int fallback)
+static int led_from_table_state(unsigned int id, int deck, int fallback)
 {
      int ch = deck + 1;
      int st = ledstat_state(id, (unsigned int)ch);
-     int on;
      if (st < 0)
-          on = fallback;
-     else if (st == 2)
-          on = led_blink_for(id, (unsigned int)ch);   /* rbp's own period */
-     else
-          on = (st != 0);
-     led_send(sch, note, last, on);
+          return fallback;
+     if (st == 2)
+          return led_blink_for(id, (unsigned int)ch);   /* rbp's own period */
+     return (st != 0);
+}
+
+/* ---- the transport LEDs, decided once for two readers ---------------------
+ *
+ * SYNC, CUE and PLAY are the three the edge drawers carry on the glass, and the
+ * three the panel carries as notes. They are decoded HERE and nowhere else, so the
+ * drawer cannot say something the controller is not saying.
+ *
+ * Each is the answer at this instant, blink already resolved (rbp_led.h says why).
+ * The three decisions, and where each comes from:
+ *
+ *   SYNC  rbp's OWN state, id 4 (LEDSTAT_SYNC) on this deck's channel -- the only one
+ *         of the three rbp has a real three-state opinion about: off / solid
+ *         (locked) / blink (synced but nudged off beat), with its own period. Only
+ *         when rbp has no entry at all does the derived isSyncOn() stand in.
+ *   CUE   derived, and deliberately: rbp's cue LED means "a cue point is set and the
+ *         deck is sitting on it", which its play engine answers with loaded && !playing.
+ *   PLAY  derived for the decision, rbp's for the cadence -- solid while playing,
+ *         blinking while paused on a loaded track, dark with nothing loaded, and the
+ *         blink period read out of rbp's own PLAY entry (measured: 500 ms on deck 1,
+ *         250 ms on deck 2).
+ *
+ * The play-engine calls are rbp's own functions and are the ones this thread has
+ * always made; they are made here now whether or not there is a panel, because a
+ * drawer can be out with nothing plugged in. They are made on THIS thread and only
+ * this one -- menu_draw.c reads the result, never rbp. */
+static void led_transport_update(void)
+{
+     void *pe = *(void **)PLAYENGINE_GLOBAL;
+     int i;
+
+     /* Not yet up: say so rather than leave the last tick's reading standing, which
+      * would be this thread reporting a deck from a player that has gone. */
+     if (!pe) {
+          rbp_transport_clear();
+          return;
+     }
+     for (i = 0; i < 2; i++) {
+          unsigned int ch = (unsigned int)i + 1;
+          int playing = ((int (*)(void *, int))PE_ISPLAYING)(pe, i) != 0;
+          int loaded  = ((int (*)(void *, int))PE_ISLOADED)(pe, i) != 0;
+          int sync    = ((int (*)(void *, int))PE_ISSYNCON)(pe, i) != 0;
+          int bits    = 0;
+
+          /* Each is computed into a local and the four are stored ONCE, at the end,
+           * as one word: the readers are another thread and a drawer that read half
+           * of this deck's update would draw a state rbp never had. */
+          if (led_from_table_state(LEDSTAT_SYNC, i, sync))
+               bits |= RBP_TRANSPORT_SYNC;
+          if (loaded && !playing)
+               bits |= RBP_TRANSPORT_CUE;
+          if (playing || (loaded && led_blink_for(LEDSTAT_PLAY, ch)))
+               bits |= RBP_TRANSPORT_PLAY;
+          rbp_transport_set(i, bits);
+     }
 }
 
 /* SC Live 4 pad colour = Note On velocity.  Per the Engine OS Prime LED
@@ -559,21 +611,25 @@ static void led_refresh(void)
      const struct led_notes *n;
      void *pe;
      int blink;
-     /* midi_out_ready() rather than a device descriptor: the output may be the
-      * sequencer, in which case there is no /dev/snd/midiC*D0 open at all. */
-     if (led_disabled || !midi_out_ready())
-          return;
-     /* No panel to light -- MIDI_MAP=kbd/none, or the map is not built yet. Not
-      * an error, and emphatically not a reason to fall back to another surface's
-      * numbers: a selection with no LED table means nothing is transmitted. */
+     /* Is there a controller to light? -- a route AND a table for the selection.
+      * MIDI_MAP=kbd/none, or a map not built yet, means MIDI_MAP_SEL has no LED
+      * rows, and a selection with no LED table means nothing is transmitted: not an
+      * error, and emphatically not a reason to fall back to another surface's
+      * numbers. Computed rather than returned on, because the DRAWERS want the same
+      * reading and do not need a panel (rbp_led.h). */
      n = led_notes_sel();
-     if (!n)
+     int have_panel = !led_disabled && n != NULL && midi_out_ready();
+
+     if (!have_panel && !rbp_transport_wanted())
           return;
-     /* ONE filtered read of rbp's table for the whole tick -- every ledstat_*
-      * call below scans this and not the live array. Before anything is read
-      * from it, and after the guards above, so a disabled bridge or an absent
-      * panel costs no 1.5 ms. */
+     /* ONE filtered read of rbp's table for this tick -- every ledstat_* call below
+      * scans this and not the live array. Before anything is read from it, and after
+      * the guards above, so a tick with no panel AND no drawer out costs no 1.5 ms. */
      led_snapshot();
+     led_transport_update();
+     if (!have_panel)
+          return;
+
      blink = led_blink_on(shim_now_ms(), 0, LED_BLINK_FALLBACK_MS);
      led_force = ((led_tick % LED_RESEND_TICKS) == 0);   /* see above */
 
@@ -614,15 +670,13 @@ static void led_refresh(void)
            * either deck, whatever its note rows say -- the channel guard is what
            * keeps a -1 base from arithmetically landing on channel 0. */
           int sch = (n->deck_ch < 0) ? -1 : n->deck_ch + i;
-          int playing = ((int (*)(void *, int))PE_ISPLAYING)(pe, i) != 0;
-          int loaded  = ((int (*)(void *, int))PE_ISLOADED)(pe, i) != 0;
-          int sync    = ((int (*)(void *, int))PE_ISSYNCON)(pe, i) != 0;
           int mt      = ((int (*)(void *, int))PE_ISMASTERTEMPO)(pe, i) != 0;
           int vinyl   = ((int (*)(void *, int))PE_ISVINYLMODE)(pe, i) != 0;
           int slip    = ((int (*)(void *, int))PE_ISSLIPMODEON)(pe, i) != 0;
           int looping = ((int (*)(void *, int))PE_ISLOOPING)(pe, i) != 0;
           int canrel  = ((int (*)(void *, int))PE_ISCANRELOOP)(pe, i) != 0;
           int aloop   = ((int (*)(void *, int))PE_ISAUTOBEATLOOP)(pe, i) != 0;
+          int tr;
           int armed;
 
           /* a loop that ends clears the "loop-in armed" latch */
@@ -634,19 +688,18 @@ static void led_refresh(void)
            * after exit (isPossibleToReLoop) must NOT keep the LED blinking. */
           armed = led_loop_armed[i];
 
-          /* SYNC comes from rbp's own LED state (id 4), so the three states
-           * survive: off / solid (locked) / blink (synced but nudged off
-           * beat).  Falls back to isSyncOn() if rbp has no entry. */
-          led_from_table(sch, n->n_sync, &led_last[i][L_SYNC], LEDSTAT_SYNC, i, sync);
-          led_send(sch, n->n_cue, &led_last[i][L_CUE], loaded && !playing);
-          /* PLAY: solid while playing, blinks while paused on a loaded
-           * track, dark with nothing loaded. The blink is rbp's own when it has
-           * an opinion -- and it does, id 49 with a period per deck (500 ms on
-           * deck 1 and 250 ms on deck 2, read off the unit) -- so the cadence
-           * comes from there and only the DECISION stays derived. */
-          led_send(sch, n->n_play, &led_last[i][L_PLAY],
-                   playing ? 1 : (loaded ? led_blink_for(LEDSTAT_PLAY,
-                                                         (unsigned int)i + 1) : 0));
+          /* SYNC, CUE and PLAY are NOT decided here. led_transport_update() made
+           * all three from this same snapshot a few lines up, and the drawers draw
+           * that same decision -- reading it back rather than repeating it is the
+           * one thing that keeps the two surfaces from drifting apart. `tr < 0`
+           * cannot happen on this path (led_transport_ok is set beside the snapshot
+           * this loop is reading), and it is spelled out rather than asserted. */
+          tr = rbp_transport_get(i);
+          if (tr < 0)
+               continue;
+          led_send(sch, n->n_sync, &led_last[i][L_SYNC], tr & RBP_TRANSPORT_SYNC);
+          led_send(sch, n->n_cue, &led_last[i][L_CUE], tr & RBP_TRANSPORT_CUE);
+          led_send(sch, n->n_play, &led_last[i][L_PLAY], tr & RBP_TRANSPORT_PLAY);
           led_send(sch, n->n_keylock, &led_last[i][L_KEYLOCK], mt);
           led_send(sch, n->n_vinyl, &led_last[i][L_VINYL], vinyl);
           led_send(sch, n->n_slip, &led_last[i][L_SLIP], slip);
@@ -782,6 +835,12 @@ static void led_refresh(void)
           if (led_debug_loop) {
                int bits = (looping << 0) | (canrel << 1) | (armed << 2);
                if (bits != led_dbg_last[i]) {
+                    /* Read here and not above: the deck's loaded flag is one of the
+                     * three the transport decoder already asked for, and asking again
+                     * on every tick for a line that is off by default would be a call
+                     * into rbp per deck per tick for nothing. */
+                    int ld = ((int (*)(void *, int))PE_ISLOADED)(pe, i) != 0;
+
                     led_dbg_last[i] = bits;
                     klog("knobshim2: loopdbg d%d loop=%d canrel=%d armed=%d "
                          "inadj=%d outadj=%d aloop=%d loaded=%d "
@@ -789,7 +848,7 @@ static void led_refresh(void)
                          i + 1, looping, canrel, armed,
                          ((int (*)(void *, int))PE_ISLOOPINADJ)(pe, i),
                          ((int (*)(void *, int))PE_ISLOOPOUTADJ)(pe, i),
-                         aloop, loaded,
+                         aloop, ld,
                          ledstat_state(49, (unsigned int)i + 1),
                          ledstat_state(53, (unsigned int)i + 1),
                          ledstat_state(55, (unsigned int)i + 1));
@@ -873,17 +932,25 @@ void *led_thread(void *arg)
      led_dump = env_on("LED_DUMP", 0);
      led_sweep = env_on("LED_SWEEP", 0);
      led_pads = env_on("LED_PADS", 1);
+
+     /* LED_DISABLE turns off the CONTROLLER's LEDs; it no longer ends this thread.
+      * An edge drawer shows rbp's SYNC/CUE/PLAY too (rbp_led.h), and a knob named
+      * after the panel must not be the reason three buttons on the glass go dark --
+      * that is exactly the silent, unrelated-cause failure this tree keeps paying
+      * for. The thread still runs, the transport read still happens, and only the
+      * notes are suppressed, which is what the flag says. */
      if (led_disabled)
-          return NULL;
+          klog("knobshim2: LED_DISABLE -- the controller's LEDs are off; "
+               "the drawers' transport state is still read\n");
 
      /* Wait up to 30 s for an output route. midi_io.c is what opens it and is
       * the only place that knows which one it is (a sequencer port, or a
       * rawmidi node), so this waits on the route rather than on a device. Not
       * fatal if none appears: led_refresh() does nothing until there is one, and
       * the poll loop picks a controller up whenever it is plugged in. */
-     for (int i = 0; i < 300 && !midi_out_ready(); i++)
+     for (int i = 0; !led_disabled && i < 300 && !midi_out_ready(); i++)
           usleep(100000);
-     if (!midi_out_ready())
+     if (!led_disabled && !midi_out_ready())
           klog("knobshim2: no LED/meter output route yet; "
                "sending will begin when one comes up\n");
      memset(led_last, -1, sizeof(led_last));

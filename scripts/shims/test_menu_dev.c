@@ -81,6 +81,7 @@
 #include "rbp_vu.h"           /* g_fader: what the drawer's handle is drawn at */
 #include "side_paint.h"       /* the drawer's pixels, for the plane assertion */
 #include "side_zone.h"        /* the drawer's gesture, driven below */
+#include "rbp_transport.h"   /* the transport bits, and the accessors below */
 
 /* ---------------------------------------------------------------------------
  * Assertions and the log.
@@ -497,14 +498,34 @@ static int seq_band_teardown, seq_side_setup;
 static int side_paints;
 static int side_paints_left, side_paints_right;
 static int side_last_which = -1;
+static int side_last_led = -1;      /* the packed SYNC/CUE/PLAY the wrapper was handed */
 static int prompt_paints;
+
+/* rbp's deck state, faked.
+ *
+ * menu_draw.c reads the drawers' transport LEDs through rbp_transport.h, and the
+ * REAL object is linked here -- rbp_transport.o is pure (no syscall, no clock, no rbp
+ * address), so unlike rbp_led.o, which decides what the bits are, it needs none of a
+ * chroot to run. That is deliberate: the state machine the drawer depends on is the
+ * production one, driven by the same setters the LED thread calls, and not a stub that
+ * could drift from it.
+ *
+ * The value is the test's to choose through those setters, which buys the thing worth
+ * pinning: "a blink repaints and a steady state does not" and "the state reaches the
+ * painter" are both COUNTED rather than argued.
+ *
+ * -1 is the object's real "nothing read yet" and it is where every test starts, because
+ * it is what every scenario that is not about the LEDs must see: a drawer whose state is
+ * unknown paints exactly as it did before this existed. rbp_transport_clear() puts it
+ * back there. */
 
 extern int  __real_drm_band_setup(struct drm_band *b, int w, int h, int bpp);
 extern int  __real_drm_band_show(struct drm_band *b, int x, int y);
 extern void __real_drm_band_hide(struct drm_band *b);
 extern void __real_drm_band_teardown(struct drm_band *b);
 extern void __real_side_paint(const struct menu_view *v, int side,
-                              int pressed_hit, int fader_v);
+                              int pressed_hit, int fader_v,
+                              int sync, int cue, int play);
 extern void __real_prompt_paint(const struct menu_view *v,
                                 const struct prompt_state *S, int pressed_cell,
                                 int selected_cell);
@@ -575,7 +596,7 @@ void __wrap_drm_band_teardown(struct drm_band *b)
 }
 
 void __wrap_side_paint(const struct menu_view *v, int side, int pressed_hit,
-                       int fader_v)
+                       int fader_v, int sync, int cue, int play)
 {
     side_paints++;
     if (side == SZ_RIGHT)
@@ -583,7 +604,8 @@ void __wrap_side_paint(const struct menu_view *v, int side, int pressed_hit,
     else
         side_paints_left++;
     side_last_which = side;
-    __real_side_paint(v, side, pressed_hit, fader_v);
+    side_last_led   = sync | (cue << 1) | (play << 2);
+    __real_side_paint(v, side, pressed_hit, fader_v, sync, cue, play);
 }
 
 void __wrap_prompt_paint(const struct menu_view *v, const struct prompt_state *S,
@@ -1079,7 +1101,7 @@ static int plane_is_drawer(int which, int hit, int v, const char *what, int line
     sv.bpp   = FB_BPP;
     sv.dw    = pw;
     sv.dh    = FB_H;
-    __real_side_paint(&sv, which, hit, v);
+    __real_side_paint(&sv, which, hit, v, 0, 0, 0);
     if (memcmp(plane_use_alt ? plane_alt : plane_buf, want, sizeof want) == 0)
         return 1;
     failures++;
@@ -1122,7 +1144,7 @@ static int page_is_drawer(int which, int hit, int v, const char *what, int line)
     sv.bpp   = FB_BPP;
     sv.dw    = pw;
     sv.dh    = FB_H;
-    __real_side_paint(&sv, which, hit, v);
+    __real_side_paint(&sv, which, hit, v, 0, 0, 0);
 
     memset(want, 0, sizeof want);
     for (y = 0; y < FB_H; y++)
@@ -1180,6 +1202,7 @@ static void side_swipe_away(int side)
 static void scenario_drawer(void)
 {
     int pw = (SZ_W * FB_W) / MZ_LOGICAL_W;
+    int before_led;
 
     /* scenario_close_and_reopen() left the band's panel OPEN, and a drawer may not
      * arm while it is -- the ONE SURFACE gate. Close it the operator's way. */
@@ -1318,6 +1341,58 @@ static void scenario_drawer(void)
     CHECK(teardown_n[SURF_SIDE] == 3, "the drawer's plane was torn down %d times", teardown_n[SURF_SIDE]);
     CHECK(setup_n[SURF_BAND] == 3, "the band's plane did not come back at the end (%d)",
           setup_n[SURF_BAND]);
+    /* --- 7. the transport LEDs, which are rbp's state and not a gesture -----
+     *
+     * The three buttons used to say nothing but "a finger is on me", because the state
+     * was only ever computed on the way to a MIDI note and this unit need not have a
+     * controller at all. They are now part of this very gate, and the two claims worth
+     * pinning are opposite halves of the same one: a state that MOVES repaints (that is
+     * what a blink is, and it has to reach the glass) and a state that does not, does
+     * not (an idle drawer must cost nothing, or the single-buffered plane tears). */
+    side_open(SZ_LEFT);
+    run_tick();                        /* the open itself: one paint, state not read yet */
+    before_led = side_paints;
+    rbp_transport_set(SZ_LEFT, RBP_TRANSPORT_PLAY);
+    run_tick();
+    CHECK(side_paints == before_led + 1, "PLAY lit painted %d times, not once",
+          side_paints - before_led);
+    CHECK(side_last_led == RBP_TRANSPORT_PLAY,
+          "the drawer was painted with transport %d, wanted PLAY", side_last_led);
+    run_tick();
+    run_tick();
+    CHECK(side_paints == before_led + 1,
+          "a steady lit PLAY repainted (%d paints over three ticks)", side_paints - before_led);
+
+    /* The blink: rbp does not toggle State, rbp_led.c resolves the phase, and this value
+     * is what changes. Two edges per period, each one a paint -- so the drawer follows
+     * rbp's cadence and not this thread's. */
+    rbp_transport_set(SZ_LEFT, 0);
+    run_tick();
+    CHECK(side_paints == before_led + 2, "the dark half of a blink painted %d times",
+          side_paints - before_led - 1);
+    CHECK(side_last_led == 0, "the dark half was painted with transport %d", side_last_led);
+    rbp_transport_set(SZ_LEFT, RBP_TRANSPORT_PLAY);
+    run_tick();
+    CHECK(side_paints == before_led + 3, "the lit half of a blink painted %d times",
+          side_paints - before_led - 2);
+
+    /* ...and the state is per DECK. A right-hand drawer with the left deck's state
+     * would be the mirror showing through, and it is one index away. */
+    rbp_transport_set(SZ_LEFT, 0);
+    rbp_transport_set(SZ_RIGHT, RBP_TRANSPORT_CUE | RBP_TRANSPORT_SYNC);
+    side_swipe_away(SZ_LEFT);
+    run_tick();
+    side_open(SZ_RIGHT);
+    run_tick();
+    run_tick();
+    CHECK(side_last_led == (RBP_TRANSPORT_CUE | RBP_TRANSPORT_SYNC),
+          "the right drawer was painted with transport %d, wanted CUE|SYNC",
+          side_last_led);
+    side_swipe_away(SZ_RIGHT);
+    run_tick();
+
+    /* Leave nothing behind, in this module's state or in the shared object's. */
+    rbp_transport_clear();
     plane_fake = 0;
 }
 

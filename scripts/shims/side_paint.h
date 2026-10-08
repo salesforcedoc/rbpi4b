@@ -56,8 +56,20 @@ int side_paint_ok(const struct menu_view *v);
  *                supplies it because the drawer has no position of its own when it
  *                is not being dragged: it is the same value rbp's mixer is being
  *                sent, so what is drawn is what the channel is doing.
+ *   sync/cue/play  whether rbp has that LED lit ON THIS DECK right now -- 1 lit, 0
+ *                dark, and a blink arithmetically already resolved to one of the
+ *                two. They come from rbp_transport.h's rbp_transport_get(), which is the
+ *                same reading the controller's own LEDs are sent, so the drawer and
+ *                the hardware say the same thing at the same instant and not merely
+ *                at the same rate. Pass 0 for all three when rbp's state is not known
+ *                yet: "I do not know" and "dark" are the same picture on a panel with
+ *                two levels, which is why the caller does not have to distinguish them
+ *                here.
  *
- * Every pixel of the view is written. Does nothing when side_paint_ok() is 0. */
-void side_paint(const struct menu_view *v, int side, int pressed_hit, int fader_v);
+ * Every pixel of the view is written, and written the same way for the same inputs --
+ * the destination is single-buffered on the page route, so a paint that is not
+ * idempotent is a paint that tears. Does nothing when side_paint_ok() is 0. */
+void side_paint(const struct menu_view *v, int side, int pressed_hit, int fader_v,
+                int sync, int cue, int play);
 
 #endif /* RBPI4B_SIDE_PAINT_H */

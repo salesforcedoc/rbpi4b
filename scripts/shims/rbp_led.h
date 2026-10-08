@@ -1,9 +1,16 @@
 /*
  * rbp_led.h -- the LED bridge's interface to the rest of the shim.
  *
- * Only the three symbols ctrlshim.c needs: the two threads, the LED_SWEEP flag
- * they share, and the loop-in latch that the key handler sets and the LED
- * refresh consumes.
+ * The three symbols ctrlshim.c needs -- the two threads, the LED_SWEEP flag they
+ * share, and the loop-in latch the key handler sets and the LED refresh consumes.
+ *
+ * The transport state the edge drawers read is NOT here. It lives in
+ * rbp_transport.h, in an object of its own linked into both shims, because the
+ * drawers are painted by fbshim.so and this file is compiled into knobshim.so,
+ * which fbshim is loaded BEFORE -- so fbshim cannot call into this file's symbols
+ * even if this object exported them, which it does not (-fvisibility=hidden over
+ * CTRL_OBJS). rbp_transport.h carries the whole account; do not reintroduce the
+ * dependency by adding those accessors back here.
  */
 #ifndef RBPI4B_RBP_LED_H
 #define RBPI4B_RBP_LED_H

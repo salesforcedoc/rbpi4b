@@ -180,12 +180,25 @@ static void sp_text_center(const struct menu_view *v, int side, int lx0, int ly0
  * half-width button would be the same 8 lines with two constants changed. The pressed
  * pair is the band's own (MENU_BTN_PRESSED / MENU_LABEL_PRESSED), so a press reads the
  * same here as it does on the strip. */
+/* A button that rbp has LIT. The face stays the dark MENU_BTN and the accent goes
+ * into the FRAME AND THE LABEL -- a backlit control, which is what the three it is
+ * used for are: rbp lights a PLAY, a CUE and a SYNC and the hardware beside this
+ * panel lights the same three. The alternative, filling the face with the accent,
+ * was rejected because it is the same picture as "a finger is on me"
+ * (MENU_BTN_PRESSED) and would have made the two indistinguishable -- and because
+ * PLAY is lit for as long as a deck is playing, which is most of the time.
+ *
+ * A BLINK is not a third appearance: the caller resolves it and passes 1 or 0
+ * (side_paint.h), so a flashing button is this button alternating with the one
+ * below, at rbp's own period. Nothing here keeps a clock, and that is what keeps
+ * every paint a pure function of its arguments. */
 static void sp_button_x(const struct menu_view *v, int side, int lx0, int lx1,
-                        int ly0, int ly1, const char *label, int pressed)
+                        int ly0, int ly1, const char *label, int pressed, int lit)
 {
     int fx0, fy0, fx1, fy1;
     unsigned int face = menu_pixel(v->bpp, pressed ? MENU_BTN_PRESSED : MENU_BTN);
-    unsigned int ink  = menu_pixel(v->bpp, pressed ? MENU_LABEL_PRESSED : MENU_LABEL);
+    unsigned int ink  = menu_pixel(v->bpp, pressed ? MENU_LABEL_PRESSED
+                                      : (lit ? MENU_BTN_PRESSED : MENU_LABEL));
 
     sp_rect(v, side, lx0, ly0, lx1, ly1, &fx0, &fy0, &fx1, &fy1);
     sp_fill(v, fx0, fy0, fx1, fy1, face);
@@ -194,9 +207,9 @@ static void sp_button_x(const struct menu_view *v, int side, int lx0, int lx1,
 }
 
 static void sp_button(const struct menu_view *v, int side, int ly0, int ly1,
-                      const char *label, int pressed)
+                      const char *label, int pressed, int lit)
 {
-    sp_button_x(v, side, SZ_BTN_X0, SZ_BTN_X1, ly0, ly1, label, pressed);
+    sp_button_x(v, side, SZ_BTN_X0, SZ_BTN_X1, ly0, ly1, label, pressed, lit);
 }
 
 /* THE NUDGE MARK, DRAWN RATHER THAN SET -- and it has to be, because the atlas has no
@@ -310,7 +323,8 @@ int side_paint_ok(const struct menu_view *v)
     return 1;
 }
 
-void side_paint(const struct menu_view *v, int side, int pressed_hit, int fader_v)
+void side_paint(const struct menu_view *v, int side, int pressed_hit, int fader_v,
+                int sync, int cue, int play)
 {
     int fx0, fy0, fx1, fy1;
     unsigned int fill  = menu_pixel(v->bpp, MENU_FILL);
@@ -325,6 +339,11 @@ void side_paint(const struct menu_view *v, int side, int pressed_hit, int fader_
         fader_v = 0;
     if (fader_v > 1023)
         fader_v = 1023;
+    /* One bit each: the caller's values are booleans, and a value that is merely
+     * TRUTHY must not change what is drawn (sp_button_x tests it with a ?:). */
+    sync = sync ? 1 : 0;
+    cue  = cue  ? 1 : 0;
+    play = play ? 1 : 0;
 
     /* THE BED, AND NOTHING AROUND IT. *"you don't need a white border on the side swipe
      * menus"* (2026-10-06) -- so the panel's own edge is the black MENU_FILL and the
@@ -341,24 +360,26 @@ void side_paint(const struct menu_view *v, int side, int pressed_hit, int fader_
     sp_text_center(v, side, SZ_TITLE_X0, SZ_TITLE_Y0, SZ_TITLE_X1, SZ_TITLE_Y1,
                    title, fill, ink);
 
-    sp_button(v, side, SZ_SYNC_Y0, SZ_SYNC_Y1, "SYNC", pressed_hit == SZ_HIT_SYNC);
+    sp_button(v, side, SZ_SYNC_Y0, SZ_SYNC_Y1, "SYNC",
+              pressed_hit == SZ_HIT_SYNC, sync);
 
     /* The nudge pair: two boxes sharing one row, each with its DRAWN mark rather than
      * a label. The '+' cell is the right one -- the operator's own order, left to
      * right, and the caller is what decides which of rbp's two bend directions each
-     * means (side_zone.h's SZ_HIT_NUDGE_*). */
+     * means (side_zone.h's SZ_HIT_NUDGE_*). Neither has a state to show: rbp has no
+     * LED for a nudge, and the bend is a thing you do and not a thing you are. */
     sp_button_x(v, side, SZ_NUDGE_M_X0, SZ_NUDGE_M_X1, SZ_NUDGE_Y0, SZ_NUDGE_Y1,
-                "", pressed_hit == SZ_HIT_NUDGE_M);
+                "", pressed_hit == SZ_HIT_NUDGE_M, 0);
     sp_sign(v, side, SZ_NUDGE_M_X0, SZ_NUDGE_M_X1, SZ_NUDGE_Y0, SZ_NUDGE_Y1, 0,
             pressed_hit == SZ_HIT_NUDGE_M);
     sp_button_x(v, side, SZ_NUDGE_P_X0, SZ_NUDGE_P_X1, SZ_NUDGE_Y0, SZ_NUDGE_Y1,
-                "", pressed_hit == SZ_HIT_NUDGE_P);
+                "", pressed_hit == SZ_HIT_NUDGE_P, 0);
     sp_sign(v, side, SZ_NUDGE_P_X0, SZ_NUDGE_P_X1, SZ_NUDGE_Y0, SZ_NUDGE_Y1, 1,
             pressed_hit == SZ_HIT_NUDGE_P);
 
     sp_readout(v, side, fader_v);
     sp_fader(v, side, fader_v, pressed_hit == SZ_HIT_FADER);
 
-    sp_button(v, side, SZ_CUE_Y0, SZ_CUE_Y1, "CUE", pressed_hit == SZ_HIT_CUE);
-    sp_button(v, side, SZ_PLAY_Y0, SZ_PLAY_Y1, "PLAY", pressed_hit == SZ_HIT_PLAY);
+    sp_button(v, side, SZ_CUE_Y0, SZ_CUE_Y1, "CUE", pressed_hit == SZ_HIT_CUE, cue);
+    sp_button(v, side, SZ_PLAY_Y0, SZ_PLAY_Y1, "PLAY", pressed_hit == SZ_HIT_PLAY, play);
 }

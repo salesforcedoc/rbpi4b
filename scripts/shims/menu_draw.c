@@ -121,6 +121,9 @@
 #include "menu_zone.h"
 #include "side_zone.h"         /* the edge drawers: which is out, and its geometry */
 #include "side_paint.h"        /* ...and the image it is drawn with */
+#include "rbp_transport.h"   /* ...and the deck state its SYNC/CUE/PLAY report. NOT rbp_led.h:
+                              * that is compiled into knobshim.so, which is loaded AFTER
+                              * fbshim.so, so this file must not name its symbols at all. */
 #include "prompt_zone.h"       /* the USB STOP chooser: its box, and whether it is up */
 #include "prompt_paint.h"      /* ...and the image it is drawn with */
 #include "fx_zone.h"           /* the Beat FX picker: its box, and whether it is up */
@@ -294,6 +297,9 @@ struct menu_map {
     int  side_painted_which[2];  /* the drawer the published image is for, or -1 */
     int  side_painted_hit[2];    /* ...and the control it is highlighted for */
     int  side_painted_v[2];      /* ...and the fader value it was drawn at */
+    int  side_painted_led[2];    /* ...and its SYNC/CUE/PLAY state, packed; see
+                                  * menu_side_leds(). -1 for "no image yet", because 0
+                                  * is the real and common "all three dark". */
     void  *side_img[2][2];       /* [drawer][front,back]; NULL when none could be had */
     size_t side_img_bytes;       /* one image, bytes */
     int    side_buf_w;           /* the image's geometry, cached at allocation ... */
@@ -869,6 +875,35 @@ static int menu_side_value(int which)
     return v;
 }
 
+/* The drawer's three transport LEDs, packed into ONE int so they can be a repaint
+ * key like the pressed control and the fader value already are -- the destinations
+ * are single-buffered, so the gate has to be fed real values and not a flag that
+ * alternates by itself (menu_window_repaint()'s rule).
+ *
+ * THE STATE IS rbp's, read from rbp_led.c, which is the same reading the controller's
+ * own SYNC/CUE/PLAY LEDs are sent (rbp_transport.h). A BLINK ARRIVES HERE AS A BLINK: rbp
+ * not toggle State, it asks for a blink and leaves it, so rbp_led.c resolves the phase
+ * against rbp's own period at the instant of the read. Feeding the drawer a "blinking"
+ * flag instead would flash it at the same rate and at whatever phase this thread's
+ * clock happened to be in -- two surfaces disagreeing about a deck they are both
+ * describing is the one thing reading one source is for.
+ *
+ * Which means the flash rides on THIS gate: a change in the packed value is a repaint,
+ * and the value changes twice per blink period. The builders run per tick
+ * (POINT_MENU_MS, shipped at 0.1 ms), so the drawer follows at rbp's own cadence and
+ * not at the tick's, and a drawer with nothing blinking never rebuilds at all.
+ *
+ * `deck` and `side` are the same index by construction: side_zone.h's side_channel() is
+ * deck + 1, and rbp_led.c indexes decks the same way. */
+static int menu_side_leds(int which)
+{
+    int tr = rbp_transport_get(which);
+
+    if (tr < 0)
+        return 0;                    /* not read yet: every button dark, as before */
+    return tr;
+}
+
 /* A view over one drawer, whichever route it is being drawn on.
  *
  * ON A PLANE the buffer IS the panel: origin 0,0, and dw/dh its own size, so
@@ -924,16 +959,18 @@ static void menu_side_repaint(int which)
     struct menu_view sv;
     int hit = side_pressed(which);
     int v   = menu_side_value(which);
+    int led = menu_side_leds(which);
 
     if (g.side_painted_which[which] == which && g.side_painted_hit[which] == hit &&
-        g.side_painted_v[which] == v)
+        g.side_painted_v[which] == v && g.side_painted_led[which] == led)
         return;
     menu_side_view(&sv, which);
     if (side_paint_ok(&sv))
-        side_paint(&sv, which, hit, v);
+        side_paint(&sv, which, hit, v, led & 1, (led >> 1) & 1, (led >> 2) & 1);
     g.side_painted_which[which] = which;
     g.side_painted_hit[which]   = hit;
     g.side_painted_v[which]     = v;
+    g.side_painted_led[which]   = led;
 }
 
 /* A view over one drawer's SCRATCH image, for the off-lock build. Deliberately not
@@ -970,7 +1007,7 @@ static void menu_side_buf_view(struct menu_view *sv, void *buf)
 static void menu_side_build(int which)
 {
     struct menu_view sv;
-    int hit, v;
+    int hit, v, led;
     void *t;
     long t0;
 
@@ -982,9 +1019,11 @@ static void menu_side_build(int which)
 
     hit = side_pressed(which);
     v   = menu_side_value(which);
+    led = menu_side_leds(which);
     if (g.side_painted_which[which] == which &&
         g.side_painted_hit[which] == hit &&
-        g.side_painted_v[which] == v)
+        g.side_painted_v[which] == v &&
+        g.side_painted_led[which] == led)
         return;                      /* the published image is already this one */
 
     menu_side_buf_view(&sv, g.side_img[which][1]);
@@ -992,10 +1031,11 @@ static void menu_side_build(int which)
         return;
 
     t0 = menu_now_us();
-    side_paint(&sv, which, hit, v);
+    side_paint(&sv, which, hit, v, led & 1, (led >> 1) & 1, (led >> 2) & 1);
     if (g.verbose)
-        pointsrc_log("side: build %ld us: %s drawer for %d/%d",
-                     menu_now_us() - t0, which == SZ_LEFT ? "left" : "right", hit, v);
+        pointsrc_log("side: build %ld us: %s drawer for %d/%d at %d",
+                     menu_now_us() - t0, which == SZ_LEFT ? "left" : "right", hit, v,
+                     led);
 
     pthread_mutex_lock(&g_lock);
     t = g.side_img[which][0];
@@ -1004,6 +1044,7 @@ static void menu_side_build(int which)
     g.side_painted_which[which] = which;
     g.side_painted_hit[which]   = hit;
     g.side_painted_v[which]     = v;
+    g.side_painted_led[which]   = led;
     g.side_pending[which]       = 1;
     pthread_mutex_unlock(&g_lock);
 }
@@ -1089,10 +1130,12 @@ static void menu_side_live(int which)
          * and its shimmer, and it is only ever reached on a machine where the plane
          * cannot be had. */
         struct menu_view sv;
+        int led = menu_side_leds(which);
 
         menu_side_view(&sv, which);
         if (side_paint_ok(&sv))
-            side_paint(&sv, which, side_pressed(which), menu_side_value(which));
+            side_paint(&sv, which, side_pressed(which), menu_side_value(which),
+                       led & 1, (led >> 1) & 1, (led >> 2) & 1);
         return;
     }
     menu_side_repaint(which);
@@ -1112,6 +1155,15 @@ static void menu_side_live(int which)
 static void menu_side_plane_sync(void)
 {
     int i, any = side_any_open();
+
+    /* Tell the LED thread whether anything on the glass wants rbp's deck state this tick.
+     * Raised on the FIRST line, before any route is decided, because the drawers' LEDs
+     * are a property of a drawer being OPEN and not of the route it happens to be
+     * drawn on: a machine that refused a plane paints the page and still wants them. And
+     * lowered by the same line on the tick after the last one shuts -- a unit with no
+     * controller attached would otherwise pay the LED thread's 1.5 ms LedStat snapshot
+     * forever for a panel that is not there. */
+    rbp_transport_want(any);
 
     if (any && g.band_ok) {
         drm_band_teardown(&g.band);
@@ -1142,6 +1194,7 @@ static void menu_side_plane_sync(void)
             g.side_painted_which[i] = -1;
             g.side_painted_hit[i]   = SZ_HIT_NONE;
             g.side_painted_v[i]     = -1;
+            g.side_painted_led[i]   = -1;
             g.side_pending[i]       = 0;
             g.side_fail[i] = 0;
             continue;
@@ -2315,6 +2368,10 @@ static int menu_fb_open_unlocked(int loud)
      * buffer's image for". */
     g.side_prev = -1;
     g.side_painted_which[SZ_LEFT] = g.side_painted_which[SZ_RIGHT] = -1;
+    /* ...and the LED triple the same way. -1 and not 0: 0 is a real and the common
+     * reading here -- all three buttons dark -- so a zeroed struct would let the first
+     * gate pass draw a dark drawer over a lit one it had never looked at. */
+    g.side_painted_led[SZ_LEFT] = g.side_painted_led[SZ_RIGHT] = -1;
     g.band_off = !env_flag("MENU_PLANE", 1);
     /* The window is opened, not shown: the plane it needs is set up by the tick, on
      * this thread's own terms, so that the one writer of the plane is the paint

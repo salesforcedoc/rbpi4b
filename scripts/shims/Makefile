@@ -45,6 +45,14 @@ $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a:
 # wins. See netshim.c's header and doctor.sh.
 SHARED  := knobshim.so audioshim.so fbshim.so crashcatch.so netshim.so
 
+# The load order itself, as rb.conf ships it. This is NOT cosmetic: a preloaded
+# library resolves its undefined names against the libraries loaded BEFORE it, so
+# "which shim defines this" is a question with an order-dependent answer, and
+# `check` needs the order to answer it. Kept here as its own list rather than
+# derived from SHARED (whose order is only the report order) precisely so that a
+# new shim has to be placed in it deliberately -- check asserts the two agree.
+PRELOAD := crashcatch.so netshim.so fbshim.so knobshim.so audioshim.so
+
 # Static ARM helpers (have no soft-float runtime dependency)
 STATIC  := seqinject2 udplog controllers_cli
 
@@ -90,6 +98,23 @@ shmstate.o: shmstate.c shmstate.h
 # copies. The one rule below is the explicit `%.o: %.c` for this file, so the flag
 # set cannot be changed by moving the object into a list.
 fader_state.o: fader_state.c rbp_vu.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# rbp_transport.o is the FOURTH object both libraries link, and for the same reason
+# as fader_state.o above: the transport state the edge drawers draw is written by
+# knobshim's LED thread and read by fbshim's painter, and those are two libraries with
+# fbshim FIRST in RB_LD_PRELOAD. NO -fvisibility=hidden, and NOT in either object list
+# (CTRL_OBJS would hide it), exactly like fader_state.o -- the explicit rule below is
+# what fixes the flag set.
+#
+# This one is not a tidiness choice, it is the fix for a launch failure. The first
+# build declared the accessors in rbp_led.h instead, and rbp died three seconds in with
+# `/root/pdj/rbp: symbol lookup error: /usr/lib/fbshim.so: undefined symbol:
+# rbp_led_transport_want` -- fbshim cannot call into knobshim at all, and CTRL_OBJS's
+# -fvisibility=hidden meant knobshim exported nothing to call in any case.
+# rbp_transport.h carries the account. `arm-linux-gnueabi-nm -D --defined-only
+# knobshim.so fbshim.so | grep rbp_transport` must show both defining it.
+rbp_transport.o: rbp_transport.c rbp_transport.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # rbp_key.o is the second object both libraries link: the key path (are we rbp,
@@ -180,10 +205,11 @@ CTRL_OBJS  := ctrlshim.o ctrl_map.o map_flx4.o map_jp21.o map_kbd.o evdev_io.o \
 CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \
               midi_io.h shimutil.h ctrl_map.h mididump.h evdev_io.h syscalls.h \
               shmstate.h plinn_scan.h controllers.h usb_label.h
-knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o fader_state.o $(CTRL_HDRS) \
+knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o fader_state.o rbp_transport.o \
+             $(CTRL_HDRS) rbp_transport.h \
              $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
 	$(CC) $(CFLAGS) -shared -o $@ $(CTRL_OBJS) rbp_key.o shmstate.o \
-	    fader_state.o -lpthread -lm -lc $(LDFLAGS)
+	    fader_state.o rbp_transport.o -lpthread -lm -lc $(LDFLAGS)
 
 $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 	$(CC) $(CFLAGS) -fvisibility=hidden -c -o $@ $<
@@ -358,12 +384,13 @@ FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h touch_zone.h syscalls.h \
                prompt_paint.h fx_zone.h fx_paint.h hc_zone.h usb_label.h \
                fxpad_zone.h fxpad_paint.h
 
-fbshim.so: $(FBSHIM_OBJS) rbp_key.o fader_state.o $(FBSHIM_HDRS) \
+fbshim.so: $(FBSHIM_OBJS) rbp_key.o fader_state.o rbp_transport.o \
+           $(FBSHIM_HDRS) rbp_transport.h \
            $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
 	$(CC) $(CFLAGS) -shared -o $@ $(FBSHIM_OBJS) rbp_key.o fader_state.o \
-	    -lpthread -lm -lc $(LDFLAGS)
+	    rbp_transport.o -lpthread -lm -lc $(LDFLAGS)
 
-fb_shim.o: fb_shim.c $(FBSHIM_HDRS)
+fb_shim.o: fb_shim.c pointsrc.h $(FBSHIM_HDRS)
 tscfake.o: tscfake.c tscfake.h pointsrc.h
 # An interposer has to look at the arguments it is handed — that is the job — so
 # glibc's `nonnull` on open()'s pathname and `access(write_only)` on poll()'s
@@ -1029,7 +1056,7 @@ MENU_TEST_OBJS := test_menu_dev.o menu_draw.o menu_paint.o menu_zone.o \
                   menu_window.o menu_window_paint.o menu_keyboard.o \
                   browser_link.o point_xform.o drmband.o side_zone.o \
                   side_paint.o prompt_zone.o prompt_paint.o fx_zone.o fx_paint.o \
-                  fxpad_zone.o fxpad_paint.o fader_state.o
+                  fxpad_zone.o fxpad_paint.o fader_state.o rbp_transport.o
 
 # The drawer's wrappers, and they are the ONE exception to "drmband.o is the real
 # object". --wrap=drm_band_* lets scenario_drawer() hand the module a plane that
@@ -1061,7 +1088,8 @@ test: $(TESTS)
 	@echo "-- test_menu_dev (padded page stride)"
 	@qemu-arm ./test_menu_dev 8 || exit 1
 
-# Fail the build if any GLIBC version above 2.7 or a hard-float tag sneaks in.
+# Fail the build if any GLIBC version above 2.7 or a hard-float tag sneaks in, and
+# fail it if any shim asks for a symbol nothing in the process can supply.
 #
 # The exit status is the point.  This printed the version list and left the
 # reading to a human, which is how a GLIBC_2.34 reference (pthread/dlfcn, which
@@ -1069,6 +1097,48 @@ test: $(TESTS)
 # the chroot.  objdump -T is used rather than nm because nm -D prints a
 # versioned symbol as name@GLIBC_x.y, so a name-based grep matches only the
 # unversioned references and never sees a version at all.
+#
+# THE SECOND BLOCK WAS DEAD FOR AS LONG AS IT HAS EXISTED, and how it was dead is
+# worth keeping, because the fix looks like a simplification.  It tested
+# `$4=="*UND*"`.  objdump -T prints
+#
+#     address   flags   *UND*   value   version   name
+#
+# so the marker is field 3 and field 4 is the value column: the test was never true,
+# `und` was always empty, and every shim reported "all resolved".  It was written
+# against `nm -D`, where the line is `U name`, and the nm -> objdump -T rewrite moved
+# the columns out from under it -- unnoticed, because the tree happened to be clean
+# the day of the rewrite.  Proven 2026-10-08 by building fbshim.so WITHOUT
+# rbp_transport.o: objdump -T then showed `U rbp_transport_get` and
+# `U rbp_transport_want` in its dynamic symbol table, and this check printed
+# "fbshim.so: all resolved" and exited 0.  A check that cannot fail is not a check:
+# before trusting a green line here, break the thing it claims to watch.
+#
+# The rule it applies now is the one a preloaded library actually obeys.  Not "is it
+# in the vendor libc" -- that draft is wrong in both directions.  A symbol may also
+# come from this shim's OWN definitions, or from a shim loaded BEFORE it: RB_LD_PRELOAD
+# is an order, and a later library cannot satisfy an earlier one's relocation.  So:
+#
+#     vendor libc  +  this shim's own definitions  +  the shims ahead of it
+#
+# That is what makes audioshim's g_master_gain/g_mirror_gain/g_vu_peak legal -- shmstate.o
+# is deliberately NOT linked into audioshim, knobshim defines them, and knobshim is
+# loaded first.  And it is what makes the launch failure this check exists for a
+# FAILURE: rbp_led_transport_want was undefined in fbshim.so and defined -- hidden --
+# in knobshim.so, which fbshim is loaded BEFORE.  See rbp_transport.h.
+#
+# Symbols a shim is ALLOWED to leave undefined.  Printed on every run; never silent.
+# One entry, and it is a hazard rather than a design:
+#
+#   fstat -- browser_link.o calls it in bl_frame_map() (browser_link.c:61,73).  The
+#   vendor libc exports no plain `fstat`, only __fxstat/__fxstat64, so this reference
+#   binds to nothing and fires "symbol lookup error" the first time that path runs --
+#   which is the moment the abandoned browser pane finds a /tmp/rbwin.frame to look at.
+#   It has never fired because that workstream is abandoned and the file is never
+#   there.  It is the last survivor of the class rbp-vendor-libc-has-no-stat records
+#   (stat() and time() were removed from the same file on 2026-10-04); it wants the
+#   same treatment, or the pane wants dropping, before that work resumes.
+KNOWN_DANGLING := fstat
 check: $(SHARED)
 	@echo "== GLIBC symbol versions =="
 	@rc=0; for f in $(SHARED); do \
@@ -1080,27 +1150,51 @@ check: $(SHARED)
 	  fi; \
 	  $(CROSS)readelf -A $$f | grep -i 'Tag_ABI_VFP_args' && { echo "  !! HARD-FLOAT"; rc=1; } || true; \
 	done; \
-	echo "== undefined symbols the vendor libc cannot supply =="; \
+	echo "== undefined symbols nothing loaded at or before it can supply =="; \
 	have=""; for l in $(RX3)/lib/libc.so.6 $(RX3)/lib/libdl.so.2 $(RX3)/lib/librt.so.1 \
 	                  $(RX3)/lib/libm.so.6 $(RX3)/lib/libpthread.so.0; do \
 	  have="$$have $$($(CROSS)objdump -T $$l 2>/dev/null | awk '{print $$NF}' \
 	         | sed 's/@.*//' | tr '\n' ' ')"; \
 	done; \
-	for f in $(SHARED); do \
-	  und=$$($(CROSS)objdump -T $$f 2>/dev/null | awk '$$4=="*UND*" && $$NF!="" {print $$NF}' \
-	        | sed 's/@.*//' | sort -u); \
+	earlier=""; \
+	for f in $(PRELOAD); do \
+	  und=$$($(CROSS)objdump -T $$f 2>/dev/null | awk '/\*UND\*/ {print $$NF}' | sort -u); \
+	  own=$$($(CROSS)nm -D --defined-only $$f 2>/dev/null | awk '{print $$NF}' \
+	        | sort -u | tr '\n' ' '); \
 	  miss=""; \
 	  for s in $$und; do \
 	    case $$s in _ITM_*|__gmon_start__) continue;; esac; \
-	    echo " $$have " | grep -q " $$s " || miss="$$miss $$s"; \
+	    case " $(KNOWN_DANGLING) " in *" $$s "*) \
+	      echo "   -- $$s: allowed to dangle in $$f -- see KNOWN_DANGLING above"; continue;; esac; \
+	    echo " $$have $$own $$earlier " | grep -q " $$s " || miss="$$miss $$s"; \
 	  done; \
 	  if [ -n "$$miss" ]; then \
-	    echo "-- $$f: !! FAIL -- not in the target libc:$$miss"; \
+	    echo "-- $$f: !! FAIL -- nothing loaded at or before it defines:$$miss"; \
 	    echo "   (this links fine and then kills rbp at startup: symbol lookup error)"; rc=1; \
 	  else \
 	    echo "-- $$f: all resolved"; \
 	  fi; \
-	done; exit $$rc
+	  earlier="$$earlier $$own"; \
+	done; \
+	for f in $(SHARED); do \
+	  case " $(PRELOAD) " in *" $$f "*) ;; \
+	    *) echo "-- $$f: !! FAIL -- built, but not placed in PRELOAD, so its load order is unknown"; rc=1;; \
+	  esac; \
+	done; \
+	echo "== the shared state both shims must define =="; \
+	smiss=""; for n in rbp_transport_get rbp_transport_set rbp_transport_clear \
+	                    rbp_transport_want rbp_transport_wanted; do \
+	  for f in fbshim.so knobshim.so; do \
+	    $(CROSS)nm -D --defined-only $$f 2>/dev/null | grep -q " $$n$$" || smiss="$$smiss $$n($$f)"; \
+	  done; \
+	done; \
+	if [ -n "$$smiss" ]; then \
+	  echo "!! FAIL -- not defined by BOTH fbshim.so and knobshim.so:$$smiss"; \
+	  echo "   (the edge drawer reads what the LED thread writes: see rbp_transport.h)"; rc=1; \
+	else \
+	  echo "-- rbp_transport: default visibility, defined by both"; \
+	fi; \
+	exit $$rc
 
 clean:
 	rm -f $(SHARED) $(STATIC) $(REFERENCE) $(TESTS) pcmprobe ccexit netcheck *.o

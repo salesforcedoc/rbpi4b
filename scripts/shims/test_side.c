@@ -951,7 +951,7 @@ static void test_paint_refusals(void)
     /* And nothing draws into one that was refused. */
     fill(0xa5a5u, 180, 100);
     v = mkview(180, 100);
-    side_paint(&v, SZ_LEFT, 0, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
     {
         int i, touched = 0;
 
@@ -974,7 +974,7 @@ static void test_paint_covers(void)
 
     fill(0xa5a5u, 180, 800);
     v = mkview(180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
 
     for (y = 0; y < 800; y++)
         for (x = 0; x < 180; x++)
@@ -986,49 +986,98 @@ static void test_paint_covers(void)
 static void test_paint_idempotent(void)
 {
     static unsigned short first[180 * 800];
+    static unsigned short dark[180 * 800];
+    static unsigned short pressed[180 * 800];
     struct menu_view v = mkview(180, 800);
 
     /* A second identical paint changes nothing -- the whole reason menu_draw.c's gate
      * can be a comparison of three ints instead of a counter: if a repeat paint were
      * not a no-op, the gate would be holding back work that was needed. */
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
     memcpy(first, fb, sizeof first);
-    side_paint(&v, SZ_LEFT, 0, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
     CHECK(memcmp(first, fb, sizeof first) == 0,
           "a second identical paint changed the image");
 
     /* And a DIFFERENT state changes it, so the gate cannot be satisfied by a painter
      * that draws the same thing whatever it is told. */
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
-    side_paint(&v, SZ_LEFT, 0, 0);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
+    side_paint(&v, SZ_LEFT, 0, 0, 0, 0, 0);
     CHECK(memcmp(first, fb, sizeof first) != 0,
           "moving the fader to zero did not change the image");
 
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
-    side_paint(&v, SZ_LEFT, SZ_HIT_SYNC, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
+    side_paint(&v, SZ_LEFT, SZ_HIT_SYNC, 512, 0, 0, 0);
     CHECK(memcmp(first, fb, sizeof first) != 0,
           "pressing SYNC did not change the image");
 
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
-    side_paint(&v, SZ_LEFT, SZ_HIT_CUE, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
+    side_paint(&v, SZ_LEFT, SZ_HIT_CUE, 512, 0, 0, 0);
     CHECK(memcmp(first, fb, sizeof first) != 0,
           "pressing CUE did not change the image");
 
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
-    side_paint(&v, SZ_LEFT, SZ_HIT_NUDGE_M, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
+    side_paint(&v, SZ_LEFT, SZ_HIT_NUDGE_M, 512, 0, 0, 0);
     CHECK(memcmp(first, fb, sizeof first) != 0,
           "pressing the '-' nudge cell did not change the image");
 
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
-    side_paint(&v, SZ_RIGHT, 0, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
+    side_paint(&v, SZ_RIGHT, 0, 512, 0, 0, 0);
     CHECK(memcmp(first, fb, sizeof first) != 0,
           "the two drawers paint the same image -- the mirror is not in the pixels");
+
+    /* The three transport LEDs, which are rbp's and not the press's: each of the
+     * three must move the image ON ITS OWN, and each must move it in its own box and
+     * nowhere else. A painter that ORed them together, or that put them all in one
+     * button, would pass "SYNC lights something" and fail this. */
+    for (int i = 0; i < 3; i++) {
+        int cy0, cy1;
+        unsigned int lit[3] = { 0, 0, 0 };
+
+        switch (i) {
+        case 0: cy0 = SZ_SYNC_Y0; cy1 = SZ_SYNC_Y1; break;
+        case 1: cy0 = SZ_CUE_Y0;  cy1 = SZ_CUE_Y1;  break;
+        default: cy0 = SZ_PLAY_Y0; cy1 = SZ_PLAY_Y1; break;
+        }
+        lit[i] = 1;
+
+        fill(0xa5a5u, 180, 800);
+        side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
+        memcpy(dark, fb, sizeof dark);
+        side_paint(&v, SZ_LEFT, 0, 512, lit[0], lit[1], lit[2]);
+        CHECK(memcmp(dark, fb, sizeof dark) != 0,
+              "button %d lit did not change the image", i);
+
+        for (int y = 0; y < 800; y++)
+            for (int x = 0; x < 180; x++) {
+                int in = (x >= devx(180, SZ_BTN_X0) && x <= devx(180, SZ_BTN_X1) &&
+                          y >= devy(800, cy0) && y <= devy(800, cy1));
+
+                if (!in && fb[y * 180 + x] != dark[y * 180 + x]) {
+                    CHECK(0, "lighting button %d changed a pixel outside its box"
+                             " (x=%d y=%d)", i, x, y);
+                    break;
+                }
+            }
+
+        /* A press still wins over a lit button: the finger's own feedback is the one
+         * thing on this panel that must never be swallowed by a state. */
+        fill(0xa5a5u, 180, 800);
+        side_paint(&v, SZ_LEFT, i == 0 ? SZ_HIT_SYNC
+                              : i == 1 ? SZ_HIT_CUE : SZ_HIT_PLAY, 512, 0, 0, 0);
+        memcpy(pressed, fb, sizeof pressed);
+        side_paint(&v, SZ_LEFT, i == 0 ? SZ_HIT_SYNC
+                              : i == 1 ? SZ_HIT_CUE : SZ_HIT_PLAY, 512,
+                   lit[0], lit[1], lit[2]);
+        CHECK(memcmp(pressed, fb, sizeof pressed) == 0,
+              "lighting button %d changed the image while a finger was on it", i);
+    }
 }
 
 /* The pressed image must differ ONLY inside the pressed box -- otherwise a press
@@ -1043,9 +1092,9 @@ static void test_paint_pressed_is_local(void)
     int cy0 = devy(800, SZ_CUE_Y0), cy1 = devy(800, SZ_CUE_Y1);
 
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 512);
+    side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
     memcpy(plain, fb, sizeof plain);
-    side_paint(&v, SZ_LEFT, SZ_HIT_CUE, 512);
+    side_paint(&v, SZ_LEFT, SZ_HIT_CUE, 512, 0, 0, 0);
 
     for (y = 0; y < 800; y++)
         for (x = 0; x < 180; x++) {
@@ -1085,7 +1134,7 @@ static void test_paint_mirror(void)
         int y     = SZ_SYNC_Y0 + SZ_BTN_H / 2;
 
         fill(0xa5a5u, 180, 800);
-        side_paint(&v, side, 0, 512);
+        side_paint(&v, side, 0, 512, 0, 0, 0);
 
         CHECK(fb[y * 180 + outer] == ink,
               "side %d: SYNC's outer edge is not outlined", side);
@@ -1128,13 +1177,13 @@ static void test_paint_fader_cap(void)
           SP_HANDLE_H, SZ_FADER_TRAVEL);
 
     fill(0xa5a5u, 180, 800);
-    side_paint(&v, SZ_LEFT, 0, 1023);
+    side_paint(&v, SZ_LEFT, 0, 1023, 0, 0, 0);
     CHECK(fb[top * 180 + cx] == face,
           "at full the top of the well is not the cap: the handle is not at the top");
     CHECK(fb[bot * 180 + cx] == well,
           "at full the bottom of the well is the cap: the handle has not moved");
 
-    side_paint(&v, SZ_LEFT, 0, 0);
+    side_paint(&v, SZ_LEFT, 0, 0, 0, 0, 0);
     CHECK(fb[bot * 180 + cx] == face,
           "at zero the bottom of the well is not the cap");
     CHECK(fb[top * 180 + cx] == well, "at zero the top of the well is still the cap");
@@ -1175,7 +1224,7 @@ static void test_paint_signs(void)
 
     for (side = 0; side < 2; side++) {
         fill(0xa5a5u, 180, 800);
-        side_paint(&v, side, 0, 512);
+        side_paint(&v, side, 0, 512, 0, 0, 0);
 
         for (i = 0; i < 2; i++) {
             int fx0, fx1, cx, want = i ? ink : face;
@@ -1221,7 +1270,7 @@ static void test_paint_signs(void)
               " boundary assumption is wrong, so the checks below prove nothing");
 
         fill(0xa5a5u, 65, 800);
-        side_paint(&small, SZ_LEFT, 0, 512);
+        side_paint(&small, SZ_LEFT, 0, 512, 0, 0, 0);
         cell_rect(65, SZ_LEFT, SZ_NUDGE_M_X0, SZ_NUDGE_M_X1, &fx0, &fx1);
         cx = (fx0 + fx1) / 2;
         CHECK(cx - SP_SIGN_ARM >= fx0 && cx + SP_SIGN_ARM <= fx1 - 1,
@@ -1229,7 +1278,7 @@ static void test_paint_signs(void)
               fx1 - fx0);
 
         fill(0xa5a5u, 65, 800);
-        side_paint(&small, SZ_RIGHT, 0, 512);
+        side_paint(&small, SZ_RIGHT, 0, 512, 0, 0, 0);
         cell_rect(65, SZ_RIGHT, SZ_NUDGE_P_X0, SZ_NUDGE_P_X1, &fx0, &fx1);
         cx = (fx0 + fx1) / 2;
         CHECK(cx - SP_SIGN_ARM >= fx0 && cx + SP_SIGN_ARM <= fx1 - 1,
@@ -1571,7 +1620,7 @@ static void test_paint_label_pens(void)
             dx1 -= 2;
 
             fill(0xa5a5u, 180, 800);
-            side_paint(&v, side, 0, 512);
+            side_paint(&v, side, 0, 512, 0, 0, 0);
 
             for (y = labels[i].ly0 + 2; y <= labels[i].ly1 - 2; y++)
                 for (x = dx0; x <= dx1; x++)
