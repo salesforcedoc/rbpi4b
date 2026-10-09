@@ -1,0 +1,42 @@
+[Unit]
+Description=rblive4-conf - the unit's status page, and the place the config page will live
+Documentation=https://github.com/salesforcedoc/rbpi4b/blob/main/docs/20-config-page.md
+# basic.target ONLY, and deliberately not multi-user.target and not rblive4.service.
+#
+# The whole reason this unit exists is that the page must come up when the viewer does not:
+# the control page served by vncserve is only there when RB_VNC=1, so it cannot be the page
+# you use to turn VNC on. Waiting for multi-user would add a whole span of latency for
+# nothing (measured at 11.9 s against basic's 11.9 -- see rblive4.service's own note), and
+# ordering after rblive4.service would make the page's arrival depend on the player's, which
+# is exactly the dependency this service was created to avoid.
+After=basic.target
+# Missing python makes the unit SKIP, not fail -- the same guard rblive4-boot.service uses,
+# for the same reason: a page that cannot be served should not report a failed unit forever.
+ConditionPathExists=/usr/bin/python3
+# Retry forever. The page is the operator's window into a unit that may be misbehaving, so
+# it must come back after whatever took it down; a unit that gave up would be silent exactly
+# when it is needed.
+StartLimitIntervalSec=0
+# NOTE, and it is the point: there is no Requires= and no Wants= anywhere in this file, and
+# nothing in the tree depends on THIS unit. A fault in the page must never be able to take
+# the player down with it -- the page is a convenience, the player is the show.
+
+[Service]
+Type=simple
+# The deployed absolute path, and an absolute interpreter rather than a shebang, exactly as
+# rblive4-boot.service does it (its comment explains why: the unit must not depend on the
+# file's mode or on a /usr/bin/env lookup).
+ExecStart=/usr/bin/python3 /opt/rblive4/confscreen.py
+Restart=always
+RestartSec=10
+# The page holds no device node and no lock, so a stop is immediate.
+TimeoutStopSec=5
+# mixed: SIGTERM to the interpreter alone first, so a graceful exit is possible, and only
+# then the group.
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rblive4-conf
+
+[Install]
+WantedBy=multi-user.target

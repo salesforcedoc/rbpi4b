@@ -166,7 +166,7 @@ fi
 # reader standing at the machine finds the installer that made the tree, not a
 # gap where it used to be. Copying a running shell script is fine -- sh reads it
 # a line at a time and holds its own descriptor.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh bootscreen.py install.sh uninstall.sh rb.conf; do
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh bootscreen.py confscreen.py install.sh uninstall.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
@@ -508,6 +508,17 @@ if [ -f "$BOOT_UNIT" ]; then
   fi
 fi
 
+# The status page's unit. Installed UNCONDITIONALLY, like the boot screen's and for
+# the same reason -- there is no binary to cross-build, only a script copied into
+# the deploy root above. ENABLED only when RB_CONF=1, in the gate below.
+CONF_UNIT=/etc/systemd/system/rblive4-conf.service
+if [ -f "$HERE/rblive4-conf.service" ]; then
+  install -m 644 -o root -g root "$HERE/rblive4-conf.service" "$CONF_UNIT"
+  say "installed $CONF_UNIT"
+else
+  warn "rblive4-conf.service is not in $HERE -- there will be no status page"
+fi
+
 # The rendezvous directory the launcher appends to (rb_bootmsg) and the screen
 # tails. A tmpfiles.d entry makes it exist at sysinit -- BEFORE basic.target, so
 # before either writer -- which is the only way it is a guarantee rather than a
@@ -642,6 +653,25 @@ if command -v systemctl >/dev/null 2>&1; then
         say "rblive4-boot.service installed but DISABLED (RB_BOOTSCREEN=${RB_BOOTSCREEN:-1})"
       fi
     fi
+  fi
+fi
+
+# The status page, gated ONLY on RB_CONF -- deliberately not on the player and not
+# on the viewer, and this is the one place in this script that says so. The page has
+# to be up on a unit whose player is disabled and whose viewer was never installed,
+# because switching those on is what it is for; and it shares nothing with them, so
+# enabling it cannot affect either. It is served on RB_CONF_HTTP_PORT.
+if [ -f "$CONF_UNIT" ]; then
+  if [ "${RB_CONF:-1}" = "1" ]; then
+    if systemctl enable rblive4-conf.service >/dev/null 2>&1; then
+      say "rblive4-conf.service enabled -- status page http://<this host>:${RB_CONF_HTTP_PORT:-5904}/ (RB_CONF=1)"
+    else
+      warn "could not enable rblive4-conf.service; start it by hand with
+  systemctl enable --now rblive4-conf"
+    fi
+  else
+    systemctl disable rblive4-conf.service >/dev/null 2>&1 || true
+    say "rblive4-conf.service installed but DISABLED (RB_CONF=${RB_CONF:-1})"
   fi
 fi
 

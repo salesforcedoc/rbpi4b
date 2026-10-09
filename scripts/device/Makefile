@@ -29,11 +29,13 @@ vncserve:
 	$(MAKE) -C vncserve
 
 # The pure-module tests, run natively (vncserve/Makefile explains why they are not
-# soft-float under qemu like scripts/shims/'s), plus bootscreen.py's own suite --
-# which, unusually for this tree, runs the daemon as a real subprocess against a
-# plain file standing in for /dev/fb0 (every path it touches is env-overridable).
+# soft-float under qemu like scripts/shims/'s), plus the two daemons' own suites --
+# which, unusually for this tree, run each daemon as a real subprocess against a
+# stand-in for the thing it reads (every path either one touches is env-overridable).
 test:
 	python3 test_bootscreen.py
+	python3 test_confscreen.py
+	python3 test_confedit.py
 	$(MAKE) -C vncserve test
 
 clean:
