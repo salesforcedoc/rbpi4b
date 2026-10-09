@@ -664,15 +664,17 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 			note "anyone on this LAN who guesses it can press the buttons of a live"
 			note "player: $_vi_file says 'on', so a click in the picture is a real"
 			note "press on the glass. This is the state to leave only on a bench. It is"
-			note "also the CONFIGURATION PAGE's password, which can edit this unit and"
-			note "restart the player, so the placeholder is reachable from a browser too."
+			note "also the CONFIGURATION PAGE's password -- and once that page's write"
+			note "path lands, this same placeholder is what a browser would need to edit"
+			note "settings and restart the player."
 			fix "printf 'RB_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
 		else
 			warn "RB_PASSWORD is still the shipped placeholder ('password')"
 			note "it is the first thing anyone would guess. The pointer is off, so today"
 			note "it buys a look at the screen -- but it is ALSO the configuration page's"
-			note "password, and that page can write settings and restart the player, so"
-			note "set a real one before the unit is left unattended."
+			note "password, and that is the one that will protect editing settings and"
+			note "restarting the player once the page's write path lands, so set a real"
+			note "one before the unit is left unattended."
 			fix "printf 'RB_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
 		fi
 	fi
