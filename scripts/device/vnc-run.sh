@@ -64,11 +64,39 @@ fi
 # and the config file would be a lie.
 : "${RB_VNC_ZLIB_LEVEL:=1}"
 
-# The control file's directory has to exist before the server starts, or the very
+# The pointer. This is the position the server STARTS in; from then on the switch is
+# /run/rblive4/vnc.input, which the page's on/off button writes and the server
+# re-reads every turn. rb.conf documents the setting and this is what makes it real:
+# rb_load_conf sets a shell variable and does not export it, so a value the launcher
+# does not pass is a line that looks like a setting and reaches nothing -- and the
+# failure is quiet in the worst way, because OFF is a perfectly working viewer whose
+# clicks do nothing.
+: "${RB_VNC_INPUT:=0}"
+: "${RB_VNC_INPUT_FILE:=/run/rblive4/vnc.input}"
+
+# WHETHER THE SCREEN IS SERVED AT ALL, and this one defaults OFF on purpose.
+#
+# The process always starts and always serves the control page -- that is what makes
+# it possible to turn the screen on from a browser. This switch decides whether it
+# ALSO opens /dev/fb0 and /dev/dri/card1 and listens for VNC clients. Off, there is
+# nothing left of it that a display can notice.
+#
+# WHY IT DEFAULTS OFF. vncserve comes up at ~6.9 s on this unit, before the player
+# (10.3 s) and before rbp itself (15.0 s), and it was the only thing in the boot that
+# touched the display from outside the player. On a unit whose player can come up
+# blank on a cold boot, the honest default is the one that leaves the boot exactly as
+# it was before this program existed; the page's button puts it back in one press.
+: "${RB_VNC_LIVE:=off}"
+: "${RB_VNC_LIVE_FILE:=/run/rblive4/vnc.live}"
+
+# The control files' directory has to exist before the server starts, or the very
 # first mode change is written into a directory that is not there and the switch
 # silently does nothing. /run, not /tmp: this describes the running system, and a
 # reboot is a legitimate way to be back at the default.
+# ALL THREE files: the mode switch, the input switch and the sharing switch.
 mkdir -p "$(dirname "$RB_VNC_MODE_FILE")" 2>/dev/null || true
+mkdir -p "$(dirname "$RB_VNC_INPUT_FILE")" 2>/dev/null || true
+mkdir -p "$(dirname "$RB_VNC_LIVE_FILE")" 2>/dev/null || true
 
 if [ -z "$RB_VNC_PASSWORD" ]; then
     # Said loudly, because the failure it prevents is invisible from the Mac: macOS's
@@ -84,6 +112,9 @@ fi
 echo "vnc-run: serving on $RB_VNC_PORT, page on $RB_VNC_HTTP_PORT," \
      "$RB_VNC_FPS fps," \
      "mode $RB_VNC_MODE, zlib level $RB_VNC_ZLIB_LEVEL, switch file $RB_VNC_MODE_FILE"
+echo "vnc-run: the pointer starts $RB_VNC_INPUT (switch file $RB_VNC_INPUT_FILE)"
+echo "vnc-run: sharing starts $RB_VNC_LIVE (switch file $RB_VNC_LIVE_FILE); with it" \
+     "off only the page runs and nothing here opens a display"
 
 exec "$BIN" \
     --port "$RB_VNC_PORT" \
@@ -92,5 +123,9 @@ exec "$BIN" \
     --password "$RB_VNC_PASSWORD" \
     --mode "$RB_VNC_MODE" \
     --mode-file "$RB_VNC_MODE_FILE" \
+    --input "$RB_VNC_INPUT" \
+    --input-file "$RB_VNC_INPUT_FILE" \
+    --live "$RB_VNC_LIVE" \
+    --live-file "$RB_VNC_LIVE_FILE" \
     --zlib-level "$RB_VNC_ZLIB_LEVEL" \
     --log "${RB_LOG_DIR:-$RB_DEPLOY_ROOT/log}/vncserve.log"

@@ -8,7 +8,10 @@ Two kinds of tool live here:
 | [`build-directfb/`](build-directfb/) | workstation | C / patch | patched DirectFB 1.4.16 (core + fbdev + modules) |
 | [`build-toolchain/`](build-toolchain/) | workstation | Docker | the soft-float armel cross build environment the shims are built in |
 | [`fit-crosscheck.sh`](fit-crosscheck.sh) | workstation | shell + C | prove the driver's copy and the shim's copy of the fit rule still agree |
+| [`fbimg.py`](fbimg.py) | workstation | Python | decode a raw RGB565 frame to BMP and PNG — one encoder, so the pixel format is written down once |
+| [`fbwatch.py`](fbwatch.py) | workstation | Python | catch a display artifact: a burst of frames from the unit around an operator action, reporting only the frames that changed |
 | [`fbdump.c`](fbdump.c) | **the Pi** | C | dump `/dev/fb0` geometry/format + say what it means for the present path |
+| [`fbscreen.py`](fbscreen.py) | **the Pi** | Python | draw a known picture on `/dev/fb0` — a ticking clock or cycling solid colours — as a loop, so the panel can be read off the glass |
 | [`evdevdump.c`](evdevdump.c) | **the Pi** | C | enumerate input devices; find the pointer and its axis algebra |
 | [`pcmprobe.c`](pcmprobe.c) | **inside the chroot on the Pi**, or a workstation under `qemu-arm` | C | name ALSA's `snd_pcm_format_t` values, list a card's accepted formats by name, and run the whole open→configure→write sequence against a named device, access and channel count |
 | [`aseqdump2dump.py`](aseqdump2dump.py) | the Pi or a workstation | Python | turn an `aseqdump` capture into a replayable MIDI dump, and print the inventory and arithmetic a controller map is written from |
@@ -130,6 +133,42 @@ mirror, and then a plain-language verdict: whether the format is a straight
 `memcpy` or needs a 565→8888 convert, whether the fb is pannable, and whether
 the geometry matches `rbp`'s logical 1280x800 so the present path can copy 1:1
 or must letterbox. It is read-only — it never issues a mode-set.
+
+## `fbscreen` — a known picture, so the glass can be read
+
+`fbdump` says what the framebuffer *is*; `fbscreen` says whether it is *alive*.
+It draws one of two patterns over the whole 1280x800 area, framed by a thin
+border: a clock ticking on the second boundary, or solid colours cycling.
+
+```bash
+python3 fbscreen.py clock              # Ctrl-C stops it
+python3 fbscreen.py solid --colour red
+python3 fbscreen.py clock --once       # one frame, for a timestamped capture
+```
+
+A **loop**, not a one-shot, on purpose: a single paint cannot be told apart
+from "the write landed and something repainted over it", and this unit has
+several things that repaint. The picture has to keep saying so.
+
+Read it off the glass. With `rbp` healthy the picture **strobes** — rbp
+repaints over it ~46/s, so the clock flickers through rather than sitting. With
+`rbp` in the blank cold-boot state it **sticks**, clean and still, because rbp
+is turning its loop and drawing nothing to compete with it. That is the
+discriminator the tool exists for: it separates "the panel is broken" from
+"rbp never produced a frame", and only the second is what this unit does on a
+cold boot — a known open item, not yet written up in `docs/`.
+
+Two traps, both worth knowing before writing anything else to `/dev/fb0`:
+
+* **`write(2)` advances `f_pos`.** The fbdev driver refuses a write that would
+  run past `smem_len`, so a loop built on `write()` paints exactly one frame
+  and then dies — silently, if the caller drops the return value. `fbscreen`
+  uses an **mmap**, which has no file offset to get wrong.
+* **The depth is 16 bpp, not the shim's lie.** `/dev/fb0` is 1280x800 RGB565 at
+  stride 2560 — 2,048,000 contiguous bytes, so pixel `(x, y)` sits at
+  `(y*1280 + x) * 2`. `rbp` is told 32 bpp by the fbshim (`RB_FB_LIE_BPP`), and
+  believing that from a shell writes garbage. `fix.smem_len` = 2048000 is what
+  gives the real depth away.
 
 ## `evdevdump` — finding the pointer
 

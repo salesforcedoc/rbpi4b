@@ -37,6 +37,7 @@
 
 #include "vnc_capture.h"
 #include "vnc_input.h"
+#include "vnc_live.h"
 #include "vnc_mode.h"
 #include "vnc_net.h"
 #include "vnc_rfb.h"
@@ -463,6 +464,7 @@ static void usage(void)
           "                 [--http-port N | --no-http] [--mode-file PATH]\n"
           "                 [--mode raw|hwjpeg] [--zlib-level 0..9]\n"
           "                 [--input on|off] [--input-file PATH] [--input-dev PATH]\n"
+          "                 [--live on|off] [--live-file PATH]\n"
           "                     Serve the screen over RFB until killed, and the\n"
           "                     switch's control page on --http-port (default: one\n"
           "                     above --port). Tapping the picture on that page hides\n"
@@ -470,6 +472,10 @@ static void usage(void)
           "                     --input makes a click in the picture a REAL press on\n"
           "                     the panel. It starts OFF, and --input-file is the\n"
           "                     switch the page writes.\n"
+          "                     --live decides whether the screen is served at all.\n"
+          "                     It starts OFF, so a boot opens no framebuffer, no\n"
+          "                     DRM node and no RFB port -- the process serves only\n"
+          "                     the page, and its button starts sharing.\n"
           "       vncserve --probe [--port N] [--bind ADDR] [--seconds N]\n"
           "                 [--version NNN.NNN] [--sec none|vnc|both]\n"
           "                 [--once] [--log PATH]\n"
@@ -486,9 +492,12 @@ int main(int argc, char **argv)
     int http_port = -1;                 /* -1: not given, so --port + 1 */
     int default_mode = VNC_MODE_RAW;
     int default_input = VNC_INPUT_OFF;  /* OFF until the page is told otherwise */
+    int default_live = VNC_LIVE_OFF;    /* OFF until the page is told otherwise -- and
+                                         * this is the one whose default decides
+                                         * whether a BOOT touches the display */
     int zlib_level = 1;                 /* 0 disables compressing updates entirely */
     const char *bindaddr = NULL, *logpath = NULL, *mode_file = NULL;
-    const char *input_file = NULL, *input_dev = NULL;
+    const char *input_file = NULL, *input_dev = NULL, *live_file = NULL;
     const char *password = getenv("RB_VNC_PASSWORD");
     const char *name = "rbpi4b rbp";
     struct vnc_session_opts opts;
@@ -552,6 +561,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--once"))                      once = 1;
         else if (!strcmp(argv[i], "--input-file") && i + 1 < argc) input_file = argv[++i];
         else if (!strcmp(argv[i], "--input-dev") && i + 1 < argc)  input_dev = argv[++i];
+        else if (!strcmp(argv[i], "--live-file") && i + 1 < argc)  live_file = argv[++i];
+        else if (!strcmp(argv[i], "--live") && i + 1 < argc) {
+            /* Parsed by vnc_live's own reader, so "on" and "yes" and "1" are the same
+             * word here as they are in the file the page writes. */
+            int v;
+            if (vnc_live_parse(argv[++i], &v) < 0) {
+                fprintf(stderr, "--live wants on or off\n");
+                return 2;
+            }
+            default_live = v;
+        }
         else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
             /* Parsed by vnc_input's own reader, so "on", "yes" and "1" are the same
              * word here as they are in the file the page writes. */
@@ -645,6 +665,20 @@ int main(int argc, char **argv)
                     getenv("RB_VNC_INPUT"), vnc_input_name(default_input));
     }
 
+    /* THE SHARING SWITCH, AND ITS DEFAULT IS THE ONE THAT MATTERS. OFF means a boot
+     * starts a process that serves the control page and nothing else -- no /dev/fb0,
+     * no /dev/dri/card1, no RFB listener -- which is what the cold-boot blank screen
+     * made worth being able to say out loud. See vnc_live.h. */
+    if (!live_file) live_file = getenv("RB_VNC_LIVE_FILE");
+    if (getenv("RB_VNC_LIVE")) {
+        int v;
+        if (vnc_live_parse(getenv("RB_VNC_LIVE"), &v) == 0)
+            default_live = v;
+        else
+            fprintf(stderr, "RB_VNC_LIVE=%s is neither on nor off; sharing stays %s\n",
+                    getenv("RB_VNC_LIVE"), vnc_live_name(default_live));
+    }
+
     if (logpath) {
         FILE *f = fopen(logpath, "a");
         if (!f) { fprintf(stderr, "cannot open %s: %s\n", logpath, strerror(errno)); return 1; }
@@ -666,6 +700,8 @@ int main(int argc, char **argv)
         opts.input_path = input_file;
         opts.input_dev = input_dev;
         opts.default_input = default_input;
+        opts.live_path = live_file;
+        opts.default_live = default_live;
         return vnc_session_run(&opts);
     }
 

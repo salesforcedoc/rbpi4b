@@ -76,6 +76,15 @@ struct vnc_session_opts {
     const char *input_path;
     const char *input_dev;
     int default_input;           /* VNC_INPUT_OFF or VNC_INPUT_ON */
+
+    /* WHETHER THE SCREEN IS SERVED AT ALL, which is the one switch here that decides
+     * whether this program goes near the display. OFF -- the default, and what a boot
+     * starts in -- means the process serves only the control page: no /dev/fb0, no
+     * /dev/dri/card1, no RFB listener, no hardware encoder. See vnc_live.h for why
+     * that matters (the cold-boot blank screen) and why the page has to stay up
+     * anyway. NULL for `live_path` means VNC_LIVE_PATH. */
+    const char *live_path;
+    int default_live;            /* VNC_LIVE_OFF or VNC_LIVE_ON */
 };
 
 /* Run until a client-visible stop condition, or forever. Returns a process exit

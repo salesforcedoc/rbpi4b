@@ -21,6 +21,7 @@
 #include "vnc_http.h"
 #include "vnc_input.h"
 #include "vnc_jpeg.h"
+#include "vnc_live.h"
 #include "vnc_mode.h"
 #include "vnc_net.h"
 #include "vnc_rfb.h"
@@ -28,6 +29,15 @@
 #include "vnc_zlib.h"
 
 #define VNC_MAX_CLIENTS  4
+
+/* THE SCREEN, BEFORE ANYBODY HAS OPENED ONE. While sharing is off there is no capture
+ * and therefore no geometry to ask for, but the control page still prints a size and
+ * the preview <img> still wants an aspect ratio -- so these stand in until the first
+ * vnc_capture_open, whose width and height replace them. They are the panel's real
+ * numbers, which is what makes the page look right in the off state rather than
+ * merely being non-empty. */
+#define VNC_FALLBACK_W   1280
+#define VNC_FALLBACK_H   800
 
 /* A CLIENT THAT HAS BEEN SENT THIS MUCH AND HAS NOT TAKEN IT IS NOT GOING TO.
  * Twelve megabytes is two whole 32-bpp frames: a link that is merely slow is never
@@ -1073,51 +1083,142 @@ static int state_timeout(int s)
     }
 }
 
-int vnc_session_run(const struct vnc_session_opts *o)
+/* --- coming up, and going down --------------------------------------------- */
+
+/*
+ * WHAT "SERVING" COSTS, IN ONE PLACE. Everything this program opens to watch the
+ * display is opened here and closed in stop_serving: /dev/fb0 and /dev/dri/card1
+ * through vnc_capture_open, the two frame buffers, the hardware encoder, and the RFB
+ * listener. Sharing off means none of them exist, which is the whole point of the
+ * switch -- see vnc_live.h, which also says why the process stays up regardless.
+ *
+ * It is a function rather than a block inside vnc_session_run because it has to be
+ * able to run a SECOND time, minutes later, when somebody presses the button on the
+ * page -- and because the failure path has to leave the process exactly as it found
+ * it. The listener can fail on a port a stale vncserve still holds; the honest answer
+ * to that is the page saying so, not a half-open server.
+ */
+static int start_serving(struct vnc_capture **cap, struct vnc_jpeg **jpeg,
+                         struct frame *fr, int *ls,
+                         const struct vnc_session_opts *o)
 {
     char err[256];
-    struct vnc_capture *cap;
-    struct frame fr;
-    int ls, i;
-    unsigned long long next_tick;
-    struct vnc_mode mode;
-    struct vnc_jpeg *jpeg;
-    struct vnc_http *http = NULL;
-    struct vnc_http_state hst;
-    struct vnc_input_switch insw;
-    struct vnc_input input;
+    int i;
 
-    cap = vnc_capture_open(err, sizeof err);
-    if (!cap) {
+    *cap = vnc_capture_open(err, sizeof err);
+    if (!*cap) {
         vlog("capture: %s", err);
-        return 1;
+        return -1;
     }
-    memset(&fr, 0, sizeof fr);
-    fr.w = vnc_capture_width(cap);
-    fr.h = vnc_capture_height(cap);
-    fr.px   = malloc((size_t)fr.w * fr.h * 2);
-    fr.prev = malloc((size_t)fr.w * fr.h * 2);
-    if (!fr.px || !fr.prev) {
-        vlog("out of memory for two %dx%d frames", fr.w, fr.h);
-        free(fr.px); free(fr.prev); vnc_capture_close(cap);
-        return 1;
+    fr->w = vnc_capture_width(*cap);
+    fr->h = vnc_capture_height(*cap);
+    fr->px   = malloc((size_t)fr->w * fr->h * 2);
+    fr->prev = malloc((size_t)fr->w * fr->h * 2);
+    if (!fr->px || !fr->prev) {
+        vlog("out of memory for two %dx%d frames", fr->w, fr->h);
+        goto fail_frames;
     }
-    for (i = 0; i < VNC_MAX_CLIENTS; i++) g_clients[i].fd = -1;
 
-    ls = vnc_net_listen(o->bindaddr, o->port);
-    if (ls < 0) { free(fr.px); free(fr.prev); vnc_capture_close(cap); return 1; }
+    /* One capture before the first client arrives, so the first frame anybody asks
+     * for is a picture rather than a buffer of zeroes. The serial starts at 1 so the
+     * first client's first update has something to differ from -- and it is set here
+     * rather than left where it was, because fr.prev is a fresh allocation and a
+     * comparison against unfilled memory is meaningless. */
+    vnc_capture_frame(*cap, fr->px);
+    memcpy(fr->prev, fr->px, (size_t)fr->w * fr->h * 2);
+    fr->serial = 1;
 
     /* THE ENCODER IS OPENED EVEN WHEN THE MODE IS RAW, because the page's preview must
      * be able to show what the other mode looks like without the mode being switched
      * first. It costs a few hundred kilobytes of mapping and, until a preview or a
      * hwjpeg client wants a frame, not one millisecond of CPU -- no buffer is ever
      * queued to it until vnc_jpeg_frame is called. */
-    jpeg = vnc_jpeg_create(fr.w, fr.h);
-    if (!jpeg) {
+    *jpeg = vnc_jpeg_create(fr->w, fr->h);
+    if (!*jpeg) {
         vlog("out of memory for the JPEG encoder handle");
-        close(ls); free(fr.px); free(fr.prev); vnc_capture_close(cap);
-        return 1;
+        goto fail_frames;
     }
+
+    *ls = vnc_net_listen(o->bindaddr, o->port);
+    if (*ls < 0) {
+        vlog("cannot listen on %s:%d: %s -- the screen is NOT being served",
+             o->bindaddr ? o->bindaddr : "0.0.0.0", o->port, strerror(errno));
+        goto fail_jpeg;
+    }
+
+    for (i = 0; i < VNC_MAX_CLIENTS; i++) g_clients[i].fd = -1;
+    vlog("serving: listening on %s:%d -- %d bpp, %d fps ceiling, password %s",
+         o->bindaddr ? o->bindaddr : "0.0.0.0", o->port, 16, o->fps,
+         o->password[0] ? "set" : "EMPTY (any client that answers nothing is in)");
+    vlog("serving: first frame captured: %s", vnc_capture_status(*cap));
+    return 0;
+
+fail_jpeg:
+    vnc_jpeg_destroy(*jpeg);
+    *jpeg = NULL;
+fail_frames:
+    free(fr->px); free(fr->prev);
+    fr->px = fr->prev = NULL;
+    vnc_capture_close(*cap);
+    *cap = NULL;
+    return -1;
+}
+
+/* Everything start_serving opened, closed, and the clients first -- a client
+ * mid-handshake holds a socket this is about to have no listener for. The geometry
+ * goes back to the fallback so the page still lays its placeholder out at the right
+ * shape while sharing is off. */
+static void stop_serving(struct vnc_capture **cap, struct vnc_jpeg **jpeg,
+                         struct frame *fr, int *ls)
+{
+    int i;
+
+    for (i = 0; i < VNC_MAX_CLIENTS; i++) client_close(&g_clients[i]);
+    if (*ls >= 0) { close(*ls); *ls = -1; }
+    if (*jpeg) { vnc_jpeg_destroy(*jpeg); *jpeg = NULL; }
+    free(fr->px); free(fr->prev);
+    fr->px = fr->prev = NULL;
+    if (*cap) { vnc_capture_close(*cap); *cap = NULL; }
+    fr->w = VNC_FALLBACK_W;
+    fr->h = VNC_FALLBACK_H;
+    fr->serial = 0;
+}
+
+int vnc_session_run(const struct vnc_session_opts *o)
+{
+    struct vnc_capture *cap = NULL;
+    struct frame fr;
+    int ls = -1, i;
+    unsigned long long next_tick;
+    struct vnc_mode mode;
+    struct vnc_live live;
+    struct vnc_jpeg *jpeg = NULL;
+    struct vnc_http *http = NULL;
+    struct vnc_http_state hst;
+    struct vnc_input_switch insw;
+    struct vnc_input input;
+
+    memset(&fr, 0, sizeof fr);
+    fr.w = VNC_FALLBACK_W;
+    fr.h = VNC_FALLBACK_H;
+
+    vnc_live_init(&live, o->live_path ? o->live_path : VNC_LIVE_PATH, o->default_live);
+    vnc_live_get(&live);
+    if (live.on && start_serving(&cap, &jpeg, &fr, &ls, o) < 0) {
+        /* Asked for at startup and could not: put the switch back OFF rather than run
+         * a server that says it is serving and is not. The page is still up, so the
+         * button still works once whatever held the display or the port has gone. */
+        char note[128];
+        vlog("*** sharing was asked for at startup and could not start; leaving it off");
+        vnc_live_set(&live, VNC_LIVE_OFF);
+        if (vnc_live_note(&live, note, sizeof note))
+            vlog("sharing: %s", note);
+    }
+    if (!live.on)
+        vlog("sharing is OFF: this process serves the control page only -- no capture, "
+             "no DRM, no RFB listener. Press the button on the page to start.");
+    else
+        vlog("sharing is ON at startup (switch file %s)", live.path);
 
     vnc_mode_init(&mode, o->mode_path ? o->mode_path : VNC_MODE_PATH, o->default_mode);
     vnc_input_switch_init(&insw, o->input_path ? o->input_path : VNC_INPUT_PATH,
@@ -1134,6 +1235,7 @@ int vnc_session_run(const struct vnc_session_opts *o)
     hst.w = fr.w;
     hst.h = fr.h;
     hst.in = &insw;
+    hst.live = &live;
     hst.vnc_port = o->port;
 
     if (o->http_port > 0) {
@@ -1147,21 +1249,11 @@ int vnc_session_run(const struct vnc_session_opts *o)
                  o->http_port);
     }
 
-    vlog("listening on %s:%d -- %d bpp, %d fps ceiling, password %s",
-         o->bindaddr ? o->bindaddr : "0.0.0.0", o->port, 16, o->fps,
-         o->password[0] ? "set" : "EMPTY (any client that answers nothing is in)");
     vlog("announcing RFB 3.%03d; the session's real dialect is the lower of that and "
          "whatever the client answers", o->announce_minor);
     vlog("starting in %s mode, switch file %s", vnc_mode_name(mode.mode), mode.path);
-    vlog("vnc input starts %s, switch file %s", vnc_input_name(insw.on), insw.path);
 
-    /* One capture before the client arrives, so the first frame a client asks for is
-     * a picture rather than a buffer of zeroes. The serial starts at 1 so that the
-     * first client's first update has something to differ from. */
-    vnc_capture_frame(cap, fr.px);
-    memcpy(fr.prev, fr.px, (size_t)fr.w * fr.h * 2);
-    fr.serial = 1;
-    vlog("first frame captured: %s", vnc_capture_status(cap));
+    vlog("vnc input starts %s, switch file %s", vnc_input_name(insw.on), insw.path);
 
     next_tick = now_ms() + 1000 / (o->fps > 0 ? o->fps : 1);
     fr.last_report = now_ms();
@@ -1190,6 +1282,53 @@ int vnc_session_run(const struct vnc_session_opts *o)
                 vlog("mode: %s", note);
         }
 
+        /* THE SHARING SWITCH, read beside the mode file -- but this is the one whose
+         * TURN is expensive, because acting on it opens or closes a framebuffer, a
+         * DRM node, an encoder and a listener. So it is the TRANSITION that matters,
+         * and the common turn is a stat() of a four-byte file.
+         *
+         * A SWITCH THAT CANNOT DO WHAT IT SAYS IS TURNED BACK OFF, the same rule the
+         * input switch follows and for the same reason: leaving the page showing "on"
+         * while nothing is being served is the least debuggable answer available. The
+         * case is real here rather than theoretical -- the RFB port can be held by a
+         * vncserve somebody left running, and opening the capture can fail outright. */
+        {
+            char note[128];
+            vnc_live_get(&live);
+
+            /* STATE, NOT TRANSITION -- and `int was = live.on` was the bug, not the
+             * style. The control page's own /session handler writes the switch file
+             * through the SAME tracker this loop reads, so the turn that mattered had
+             * already moved live.on before the loop ever compared it, the two were
+             * equal, and nothing was started. Measured on the unit 2026-10-09: button
+             * pressed, the page said on, /run/rblive4/vnc.live read `on` -- and the
+             * process held no framebuffer, no DRM node and no RFB listener at all.
+             * A switch that reports on and does nothing is the worst of the answers.
+             *
+             * What is compared instead is what the FILE asks for against what this
+             * process is DOING, and `cap` non-NULL is the doing: start_serving sets it
+             * and stop_serving is the only thing that clears it. Whoever moved the
+             * request -- the page, an editor, another process entirely -- the loop
+             * converges on the next turn. Re-running this when nothing changed costs
+             * one stat() of a four-byte file and two pointer comparisons. */
+            if (live.on && !cap) {
+                if (start_serving(&cap, &jpeg, &fr, &ls, o) < 0) {
+                    vlog("*** the page asked to start sharing and it could not; "
+                         "turning the switch back off");
+                    stop_serving(&cap, &jpeg, &fr, &ls);
+                    vnc_live_set(&live, VNC_LIVE_OFF);
+                } else {
+                    /* The first frame of a run is a whole frame, so the timer is
+                     * pulled forward rather than waiting out the old tick. */
+                    next_tick = now;
+                }
+            } else if (!live.on && cap) {
+                stop_serving(&cap, &jpeg, &fr, &ls);
+            }
+            if (vnc_live_note(&live, note, sizeof note))
+                vlog("sharing: %s", note);
+        }
+
         /* THE INPUT SWITCH, read beside the mode file and for the same reason. What
          * matters here is the TRANSITION rather than the state: a switch turned off
          * while a button is held has to put the finger up, and the panel has to be
@@ -1203,17 +1342,28 @@ int vnc_session_run(const struct vnc_session_opts *o)
          * the log both say so on the next turn. */
         {
             int was = insw.on;
+            int want_input;
             vnc_input_switch_get(&insw);
             if (insw.on != was) {
                 char note[VNC_NOTE_MAX];
                 if (vnc_input_switch_note(&insw, note, sizeof note))
                     vlog("input: %s", note);
-                if (!insw.on) {
-                    vnc_input_release(&input);
-                    g_input_owner = -1;
-                }
             }
-            if (insw.on && input.fd < 0) {
+
+            /* BOTH SWITCHES HAVE TO SAY SO, and the second one is the reason this is
+             * not simply `if (insw.on)`. With sharing off there is no picture, so
+             * there is no click in it to inject -- but the node would still be OPEN,
+             * held from boot by a process whose entire purpose at boot is to be
+             * indistinguishable from not existing. Opening the operator's panel
+             * before anyone can possibly press it is a side effect with no upside.
+             *
+             * So the panel opens when sharing is turned on and closes when it is
+             * turned off, and the input switch is what decides whether a CLICK is
+             * allowed once it is open. Turning sharing off puts the finger up first:
+             * a finger left down when the node closes is the one state that would
+             * follow the operator back to the glass. */
+            want_input = insw.on && live.on;
+            if (want_input && input.fd < 0) {
                 char ierr[256];
                 if (vnc_input_open(&input, o->input_dev, ierr, sizeof ierr) == 0) {
                     vlog("input is ON: a click in the picture is a REAL press on the "
@@ -1230,11 +1380,16 @@ int vnc_session_run(const struct vnc_session_opts *o)
                     g_input_owner = -1;
                 }
             }
-            if (!insw.on && input.fd >= 0) {
-                /* The file says off: put the finger up (already done above) and let the
+            if (!want_input && input.fd >= 0) {
+                /* The file says off -- or sharing does: put the finger up and let the
                  * panel go. Closing costs nothing and turning it back on reopens, which
                  * is what keeps "off" meaning off rather than merely idle. */
+                vnc_input_release(&input);
+                g_input_owner = -1;
                 vnc_input_close(&input);
+                vlog("input: the panel node is closed (%s)", live.on
+                     ? "the input switch says off"
+                     : "sharing is off, so there is no picture to click");
             }
         }
 
@@ -1250,11 +1405,13 @@ int vnc_session_run(const struct vnc_session_opts *o)
          * a process that exists to stay out of the player's way. */
         vnc_http_poll(http, 0);
 
-        pf[nf].fd = ls;
-        pf[nf].events = POLLIN;
-        pf[nf].revents = 0;
-        idx[nf] = -1;
-        nf++;
+        if (ls >= 0) {
+            pf[nf].fd = ls;
+            pf[nf].events = POLLIN;
+            pf[nf].revents = 0;
+            idx[nf] = -1;
+            nf++;
+        }
 
         for (i = 0; i < VNC_MAX_CLIENTS; i++) {
             struct client *c = &g_clients[i];
@@ -1385,7 +1542,7 @@ int vnc_session_run(const struct vnc_session_opts *o)
                 next_tick = now;
         }
 
-        if (now >= next_tick) {
+        if (cap && now >= next_tick) {
             frame_tick(&fr, cap);
             next_tick = now + (unsigned long long)(1000 / (o->fps > 0 ? o->fps : 1));
 
@@ -1415,7 +1572,7 @@ int vnc_session_run(const struct vnc_session_opts *o)
                         }
                     }
                 }
-                if (want) {
+                if (want && jpeg) {
                     int n = vnc_jpeg_frame(jpeg, fr.px, &jpg, 200);
                     jlen = n > 0 ? (size_t)n : 0;
                     if (n <= 0)
@@ -1441,8 +1598,12 @@ int vnc_session_run(const struct vnc_session_opts *o)
             }
             hst.vnc_clients = clients;
             hst.vnc_jpeg_clients = jpeg_ok;
-            hst.jpeg_ok = vnc_jpeg_ok(jpeg);
-            hst.jpeg_status = vnc_jpeg_status(jpeg);
+            /* With no encoder there is no encoder to describe, and asking one for its
+             * status is the kind of "the switch is off but the code still runs" that
+             * makes a page lie. */
+            hst.jpeg_ok = jpeg ? vnc_jpeg_ok(jpeg) : 0;
+            hst.jpeg_status = jpeg ? vnc_jpeg_status(jpeg)
+                                   : "off -- sharing is not on, so nothing is encoded";
             /* Name the RIGHT reason. This said "did not offer Tight", which is the
              * wrong half of the rule: Apple's client does offer Tight and still gets
              * Raw, because it never asks for a JPEG quality level. A page that blames
@@ -1555,20 +1716,27 @@ int vnc_session_run(const struct vnc_session_opts *o)
         }
 
         /* One line a minute, so "is it costing the player anything" is a question
-         * with an answer in the log rather than in top. */
+         * with an answer in the log rather than in top. The frame line is printed in
+         * both states -- "sharing off" is an answer too, and the one that matters
+         * when the operator is looking at why a boot came up blank. */
         if (now - fr.last_report >= 60000) {
             int live = 0;
             for (i = 0; i < VNC_MAX_CLIENTS; i++)
                 if (g_clients[i].fd >= 0) live++;
-            vlog("status: %s mode, %d client(s), %llu frame(s) composed, %llu sent, "
-                 "%d plane(s) composited -- %s", vnc_mode_name(mode.mode), live,
-                 fr.ticks, fr.sends, vnc_capture_plane_count(cap),
-                 vnc_capture_status(cap));
+            if (cap)
+                vlog("status: %s mode, %d client(s), %llu frame(s) composed, %llu sent, "
+                     "%d plane(s) composited -- %s", vnc_mode_name(mode.mode), live,
+                     fr.ticks, fr.sends, vnc_capture_plane_count(cap),
+                     vnc_capture_status(cap));
+            else
+                vlog("status: sharing OFF -- %d client(s), nothing captured, no display "
+                     "opened, %llu frame(s) composed before it was turned off",
+                     live, fr.ticks);
             fr.last_report = now;
         }
     }
 
-    close(ls);
+    if (ls >= 0) close(ls);
     for (i = 0; i < VNC_MAX_CLIENTS; i++) client_close(&g_clients[i]);
     /* THE FINGER LAST, and after every client that could have pressed has been closed
      * -- client_close() releases the panel on its way out when that client owned it,
@@ -1581,9 +1749,9 @@ int vnc_session_run(const struct vnc_session_opts *o)
     g_input = NULL;
     g_input_sw = NULL;
     vnc_http_close(http);
-    vnc_jpeg_destroy(jpeg);
+    if (jpeg) vnc_jpeg_destroy(jpeg);
     free(fr.px);
     free(fr.prev);
-    vnc_capture_close(cap);
+    if (cap) vnc_capture_close(cap);
     return 0;
 }

@@ -1,0 +1,58 @@
+[Unit]
+Description=rblive4 boot progress screen (bootscreen.py)
+Documentation=https://github.com/salesforcedoc/rbpi4b/blob/main/docs/11-runtime-launcher.md
+# Same argument as rblive4.service's After=basic.target, and stated explicitly for
+# the same reason: it is the guarantee this unit rests on, and a future
+# DefaultDependencies=no should not be able to remove it silently. (systemd also
+# supplies After=basic.target via DefaultDependencies; this line is redundant and
+# deliberately so.)
+After=basic.target
+# Pins the ORDER between this and the player, so the screen has opened /dev/fb0
+# before rblive4 exists. It is NOT what makes the screen appear -- rbp would not
+# draw until 13-18 s regardless -- and it costs only a fork(): with Type=simple
+# below, systemd marks this unit "started" at fork(), before execve(), so the
+# python process's whole multi-second life is off rblive4's critical path. See
+# systemd.service(5) "Type=simple" and systemd.unit(5) Before=.
+#
+# It also governs the BOOT transaction only. A mid-session restart of rblive4
+# (Restart=always) is a separate job, so the screen does not reappear and that
+# black gap returns -- this is "boot progress", not "player-start progress".
+Before=rblive4.service
+# A missing interpreter makes the unit SKIP (inactive) rather than FAIL (which
+# would show in `systemctl --failed` and mark the boot degraded). Either way the
+# player is unaffected -- there is no Requires=/BindsTo=/Requisite= on this unit
+# anywhere, on purpose: a fault here must never take the player with it.
+ConditionPathExists=/usr/bin/python3
+
+[Service]
+# LOAD-BEARING. Type=simple completes the job at fork(), so a hung, crashed, or
+# slow-to-start screen cannot delay the player. Changing this to oneshot would
+# hold rblive4 for the full TimeoutStartSec; notify/exec/forking add waits; idle
+# delays. Do not change it without moving Before= off rblive4 at the same time.
+Type=simple
+# The absolute interpreter, not a #!/usr/bin/env shebang: this takes /usr/bin/env
+# and PATH resolution out of the boot path (healthwatch.service's pattern). The
+# script carries its own /usr/bin/env line for running by hand.
+ExecStart=/usr/bin/python3 /opt/rblive4/bootscreen.py
+# NO restart, and that is not laziness. The screen's NORMAL termination is exit 0
+# -- it exits the instant rbp paints its first frame -- so Restart=always would
+# relaunch it right then and paint over the live player, defeating the feature.
+# Restart=on-failure is also pointless while every path exits 0 by design (a
+# failure is made VISIBLE instead: the journal line and /run/rblive4/boot.stage).
+Restart=no
+# Generous; python's default SIGTERM action exits at once. There is deliberately
+# no SIGTERM handler in the script -- a repaint-on-stop would make a stop take the
+# full window and add surface to this unit's soft-reboot hang (see
+# [[rblive4-soft-reboot-hangs]]).
+TimeoutStopSec=5
+KillMode=mixed
+SyslogIdentifier=rblive4-boot
+StandardOutput=journal
+StandardError=journal
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Deliberately NOT set: PrivateDevices=/DeviceAllow= would silently break the
+# screen (it needs /dev/fb0); a future reader adding either gets a condition-style
+# failure, not a boot failure, so it is named here to be found.
+
+[Install]
+WantedBy=multi-user.target

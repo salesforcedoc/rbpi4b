@@ -36,6 +36,7 @@
 
 #include "vnc_mode.h"
 #include "vnc_input.h"
+#include "vnc_live.h"
 
 /* What the page prints about the world outside this module. The session owns one of
  * these and refills it every tick; vnc_http only ever reads it, at the moment a request
@@ -49,6 +50,14 @@ struct vnc_http_state {
      * a setting: the session re-reads the file every turn and acts on the transitions,
      * so turning this off from the page puts up any finger that was down. */
     struct vnc_input_switch *in;
+
+    /* THE SHARING SWITCH -- the one control on this page that is about this program
+     * rather than about the picture. It is here because the page is the only thing
+     * that is always up: the process serves it even with sharing off, so this is the
+     * one place a button can exist that starts the screen being served. See
+     * vnc_live.h. NULL means "no switch", and the page then reports sharing as off
+     * and offers nothing to press. */
+    struct vnc_live *live;
 
     int jpeg_ok;                    /* is the hardware encoder up right now      */
     const char *jpeg_status;        /* one line from vnc_jpeg_status()           */

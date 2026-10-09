@@ -23,6 +23,9 @@ below into the deploy root (`/opt/rblive4` by default). So a unit needs
 ├── display-watch.sh monitor geometry change -> restart the unit
 ├── boot-trim.sh     the boot-time trim, and its own inverse
 ├── healthwatch.sh   the wedge recorder, run by healthwatch.service
+├── bootscreen.py    the boot screen: the launcher's stages drawn on fb0, run by
+│                    rblive4-boot.service
+├── test_bootscreen.py  its host test — not deployed; `make test` runs it
 ├── vnc-run.sh       the VNC viewer's launcher, run by rblive4-vnc.service
 ├── vncserve/        the viewer itself: sources + the binary built HERE, on the unit
 ├── log/             rbp.log, edb_streamd.log, usbwatch.log, displaywatch.log, vncserve.log
@@ -41,6 +44,7 @@ below into the deploy root (`/opt/rblive4` by default). So a unit needs
 | `boot-trim.sh` | `apply`/`revert`/`status`/`report` (`items`: `services cloudinit apt unit bootfiles`). The boot-time trim, run by `install.sh` and reversible: it persists the service masks so the launcher's step 1 stops reloading systemd for no-ops, turns cloud-init off, takes the apt timers off the boot path, and ensures the `/boot/firmware` tokens and directives. `report` prints the boot's monotonic milestones so a before/after is a diff. |
 | `healthwatch.sh` | Run by `healthwatch.service`, not by hand. Records *why* the unit wedges: a seq-numbered round every 15 s to `/opt/rblive4/log/health.log` (survives a reboot) **and** `/tmp/health.log` (survives a disk stall — read it before rebooting), probing the symptom itself with a loopback `:22` banner read. A gap in the sequence numbers is itself evidence that the recorder was not scheduled either. |
 | `vnc-run.sh` | Run by `rblive4-vnc.service`, not by hand. Sources `lib.sh` + `rb.conf` and execs `vncserve/vncserve` with the `RB_VNC_*` values. A unit of its own rather than a branch in `start-rb.sh`, so a fault in the viewer cannot take the player down and `RB_VNC=0` costs nothing at all. Deliberately has **no ordering dependency** on `rblive4.service`: with the player down it serves an honest black screen with the drawers on it, which is a useful thing to look at while working out why the player is down. |
+| `bootscreen.py` | Run by `rblive4-boot.service`, not by hand. Draws the launcher's stage messages (`/run/rblive4/boot.log`, written by `rb_bootmsg` in `lib.sh`) plus a 1 Hz heartbeat on `/dev/fb0` from the moment `vc4drmfb` exists (~6.7 s) until rbp paints its first frame (~13–18 s) — the ~10 s gap that is otherwise black, and the blank cold boot's **only on-glass sign** (there it stays up with an honest "rbp is running, drawing nothing" rather than exiting). Waits for `vc4drmfb` **before** opening fb0, verifies the geometry from sysfs, and exits only on a **non-black frame that is not its own** — a shadow of the last frame it wrote tells its own paint from rbp's, so an all-black clear it did not make is ignored. The **first** tick paints unconditionally: whatever is on fb0 when it starts (a frame from a previous rbp run, or the firmware's) is stale evidence, and a screen that refused to draw over it would silently never appear. Every exit path is `exit 0`: a diagnostic must never break the boot, and the unit is `Type=simple` with no `Requires=` so even a hang cannot delay the player. |
 | `vncserve/` | The viewer: rbp's screen over RFB, with a runtime `raw` ↔ `hwjpeg` switch. Hand-rolled (a subset needing only libc) because `libvncserver` cannot be handed a JPEG we already encoded, and the hardware encoder is the entire point. Two ports: the session (`RB_VNC_PORT`) and the control page, which carries the mode switch, the live preview, and the full-screen view — **the state it opens in**; tap the picture for the words. **Built here on the unit by `install.sh`** — see the note below. |
 | `uninstall.sh` | `--dry-run`/`--yes`/`--purge`. The inverse of `install.sh`, and the reason it is a script is the order: stop the units, `boot-trim.sh revert` **before** anything is deleted (it lives inside the tree being removed, and it is the only thing that knows how to restore `/boot/firmware` and re-enable the services the trim disabled), then unmount the six mounts under the deploy root and **re-read `/proc/mounts` and refuse while anything remains** — an `rm -rf` over a live bind mount descends through it, and one of the six is the host's own `/dev`. Preserves `rb.local.conf` to `/root` unless `--purge`, and never writes to, deletes from or repairs the USB media. |
 | `lib.sh` | Sourced by eight of the others (`boot-trim`, `display-watch`, `doctor`, `fix-dev`, `install`, `start-rb`, `usb-watch`, `vnc-run`) — not run directly. `healthwatch.sh` deliberately does not: it has to keep working when the rest of the box does not. |
@@ -127,6 +131,20 @@ below into the deploy root (`/opt/rblive4` by default). So a unit needs
 * `timeout.c` / `make` here build a static `timeout` for targets without
   coreutils. **Not needed on Pi OS**, which has `/usr/bin/timeout` — that is what
   `RB_USB_TIMEOUT` points at. Kept for portability.
+
+* **`test_bootscreen.py` is a host test and is deliberately not in the deploy
+  copy list** (unlike `bootscreen.py`, which is). `make -C scripts/device test`
+  runs it, and it is unusual for this tree in that it does not test pure modules
+  only: every path `bootscreen.py` touches is env-overridable (`RB_FB`,
+  `RB_FB_NAME`, `RB_FB_SYSFS`, `RB_BOOT_LOG`, `RB_RUN_DIR`), so the suite runs the
+  daemon **as a real subprocess** with a plain file standing in for `/dev/fb0` and
+  a small fake sysfs tree, and asserts on what it painted and how it exited. That
+  is what pins the two behaviours a pure test cannot reach: the **first tick
+  paints over whatever is already on fb0** (the 2026-10-09 regression — a stale
+  frame made the daemon exit before drawing, so the screen silently never
+  appeared), and the **exit on a foreign non-black frame**. It found both that bug
+  and a second one: a geometry refusal wrote its breadcrumb before the run
+  directory existed, so the message explaining the blank screen was itself lost.
 
 ## See also
 

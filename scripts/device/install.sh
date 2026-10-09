@@ -21,6 +21,14 @@
 # that can produce a hard-float armhf binary. RB_VNC=1 (rb.local.conf) installs and
 # enables the VNC viewer's unit; RB_VNC=0 (the default) installs it disabled.
 #
+# The boot-progress screen (bootscreen.py + rblive4-boot.service) is copied and
+# installed unconditionally but ENABLED with the player: RB_AUTOSTART=0 disables
+# it too, and RB_BOOTSCREEN=0 disables just it. It draws the launcher's stages on
+# /dev/fb0 from the moment the real framebuffer exists until rbp paints its first
+# frame, tailing /run/rblive4/boot.log -- which this script also makes exist at
+# sysinit with a tmpfiles.d entry. It needs python3 on the unit, and says so if it
+# is missing rather than failing.
+#
 # RB_DEPLOY_ROOT overrides the destination:
 #   sudo RB_DEPLOY_ROOT=/srv/rblive4 sh install.sh /tmp/rbpi4b-pi4.tgz
 
@@ -158,7 +166,7 @@ fi
 # reader standing at the machine finds the installer that made the tree, not a
 # gap where it used to be. Copying a running shell script is fine -- sh reads it
 # a line at a time and holds its own descriptor.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh install.sh uninstall.sh rb.conf; do
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh bootscreen.py install.sh uninstall.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
@@ -216,10 +224,12 @@ fi
 #
 # THE STALE DEPLOY TRAP, closed here rather than documented again.
 #
-# start-rb.sh's install_override() copies six files from the deploy root into the
-# chroot at EVERY launch, and skips each one in silence when its source is
-# absent. That is deliberate -- it is how you iterate on one shim without
-# rebuilding the tarball -- but it has a consequence this installer had never
+# start-rb.sh's install_override() installs the deploy-root artifacts into the
+# chroot at every launch, skipping each one in silence when its source is absent
+# or already identical (the latter is a `cmp -s` guard, so it stops copying 7.6 MB
+# of unchanged player per launch). That is deliberate -- it is how you iterate on
+# one shim without rebuilding the tarball -- but it has a consequence this
+# installer had never
 # dealt with: **the deploy-root copies are authoritative**. A file left there by
 # a hand scp overrides whatever the tarball put inside the chroot, forever, and
 # nothing in the tree said so. That is how a build can be correct, deployed, and
@@ -470,6 +480,54 @@ else
   warn "rblive4-vnc.service is not in $HERE -- the screen cannot be shared over VNC"
 fi
 
+# The boot-progress screen: a unit of its own, for the reason bootscreen.py's
+# header gives -- a fault in a diagnostic must not take the player with it -- and
+# it must be up before rblive4 to be worth having. Unlike rblive4-vnc.service it is
+# installed UNCONDITIONALLY: there is no binary to cross-build here, only a script
+# install.sh copied into the deploy root above. It is ENABLED only when
+# RB_BOOTSCREEN=1 (and the player autostarts), in the gate below.
+BOOT_UNIT=/etc/systemd/system/rblive4-boot.service
+if [ -f "$HERE/rblive4-boot.service" ]; then
+  install -m 644 -o root -g root "$HERE/rblive4-boot.service" "$BOOT_UNIT"
+  say "installed $BOOT_UNIT"
+else
+  warn "rblive4-boot.service is not in $HERE -- there will be no boot screen"
+fi
+
+# python3 is the screen's only dependency, and a missing one makes the unit SKIP
+# in silence (ConditionPathExists=/usr/bin/python3 in the unit). Said here so it
+# is not a mystery: "the screen did not appear" must name its reason, and this is
+# the one place that reason can be caught with an install-time voice.
+if [ -f "$BOOT_UNIT" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    say "  python3 present: $(command -v python3)"
+  else
+    warn "python3 is NOT installed -- rblive4-boot.service will skip its condition
+  and no boot screen will appear. The player is unaffected. To get the screen:
+  apt-get install python3, then systemctl restart rblive4-boot."
+  fi
+fi
+
+# The rendezvous directory the launcher appends to (rb_bootmsg) and the screen
+# tails. A tmpfiles.d entry makes it exist at sysinit -- BEFORE basic.target, so
+# before either writer -- which is the only way it is a guarantee rather than a
+# race: nothing else creates /run/rblive4 at boot (only vnc-run.sh does, and only
+# when RB_VNC=1), and the gap between basic.target and the launcher is 70 ms.
+# rb_bootmsg() also does a defensive mkdir -p and the screen its own makedirs, so
+# this is belt to those rather than the only thing holding the directory up.
+install -d -m 755 /etc/tmpfiles.d
+cat > /etc/tmpfiles.d/rblive4.conf <<'TMPFILES'
+# Created by rbpi4b's install.sh. The boot-progress rendezvous: the launcher
+# appends its stages here (rb_bootmsg in lib.sh) and bootscreen.py tails it. Made
+# at sysinit, so it exists before basic.target -- before either writer can run.
+d /run/rblive4 0755 root root -
+TMPFILES
+chmod 644 /etc/tmpfiles.d/rblive4.conf
+# Apply it now as well, so an install on a running unit creates the directory
+# before the next boot rather than waiting for one.
+systemd-tmpfiles --create /etc/tmpfiles.d/rblive4.conf >/dev/null 2>&1 || true
+say "installed /etc/tmpfiles.d/rblive4.conf (/run/rblive4 created at sysinit)"
+
 # Persistent journal: the file's own header says why (a brownout's evidence is
 # otherwise in RAM). Installed unconditionally; it is capped at 200M and the way
 # to undo it is to delete the file.
@@ -560,6 +618,29 @@ if command -v systemctl >/dev/null 2>&1; then
       say "rblive4-vnc.service installed but DISABLED (RB_VNC=${RB_VNC:-0})"
       say "  to share the screen: set RB_VNC=1 in $DEPLOY/rb.local.conf, then"
       say "  systemctl enable --now rblive4-vnc"
+    fi
+  fi
+
+  # The boot screen, gated the way the PLAYER is rather than the way the viewer
+  # is: it is a screen FOR the player, so a unit that does not autostart rbp gets
+  # no screen either -- RB_AUTOSTART=0 turns both off together. RB_BOOTSCREEN=0 is
+  # the escape hatch for a unit that runs the player but wants the early
+  # framebuffer left alone, and the next install honours it.
+  if [ -f "$BOOT_UNIT" ]; then
+    if [ "${RB_AUTOSTART:-1}" = "1" ] && [ "${RB_BOOTSCREEN:-1}" = "1" ]; then
+      if systemctl enable rblive4-boot.service >/dev/null 2>&1; then
+        say "rblive4-boot.service enabled -- the boot screen draws from first light (RB_BOOTSCREEN=1)"
+      else
+        warn "could not enable rblive4-boot.service; start it by hand with
+  systemctl enable --now rblive4-boot"
+      fi
+    else
+      systemctl disable rblive4-boot.service >/dev/null 2>&1 || true
+      if [ "${RB_AUTOSTART:-1}" != "1" ]; then
+        say "rblive4-boot.service installed but DISABLED with the player (RB_AUTOSTART=${RB_AUTOSTART:-1})"
+      else
+        say "rblive4-boot.service installed but DISABLED (RB_BOOTSCREEN=${RB_BOOTSCREEN:-1})"
+      fi
     fi
   fi
 fi

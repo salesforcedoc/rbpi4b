@@ -1263,6 +1263,37 @@ away — and they are likewise undeployed: the build they ran against is a hand-
 process out of the same tmpfs directory, and the second listener S11.11 measured has since
 been deleted.
 
+## S12 — the boot screen drills
+
+**What this section is for.** The panel is black from `vc4drmfb` at **6.74 s**
+(the firmware `simplefb` is up from 0.78 s and handed over in between) until rbp
+paints its first frame at **~13–18 s** — about ten seconds of silence in the middle
+of every boot, and on the blank cold boot ([12](12-troubleshooting.md)) a black
+screen that is a *symptom* with no other on-glass sign. `bootscreen.py`, run by
+`rblive4-boot.service`, draws the launcher's stages there and stays up "saying so"
+if rbp never paints ([11](11-runtime-launcher.md#the-boot-screen)).
+
+**S12.0–S12.3 are RUN and green (2026-10-09, on `.239`); S12.4 and S12.5 are
+NOT RUN.** The unit path — `bootscreen.py`, the unit, the `tmpfiles.d` entry, the
+`RB_BOOTSCREEN` gate, `doctor.sh`'s new checks — is installed and was exercised by
+starting the player through it. What is *not* yet shown is the same on a real cold
+boot: S12.4 needs a reboot, a soft reboot on this target has hung and taken `.239`
+off the network (see the soft-reboot note in [12](12-troubleshooting.md)) and destroys the tmpfs evidence, so
+S12.4 asks first and does not take; S12.5 rides on the blank cold boot happening.
+
+| # | Drill | What it proves | State |
+|---|---|---|---|
+| S12.0 | `python3 -m py_compile bootscreen.py`, then `make -C scripts/device test` (the shipped `test_bootscreen.py`) | the frame builder is pure and correct: exactly **2 048 000 bytes**, the border lands on the four edges, the title rasterises, the heartbeat **toggles** (lit on odd ticks, dark on even), the honest line renders amber, `geometry_ok()` **accepts** 1280×800/2560/16 and **refuses** the 32-bpp lie and a different mode, and every glyph is 7 rows of 5-bit masks — and, because every path is env-overridable, the daemon runs as a **real subprocess** against a file standing in for `/dev/fb0`, so the loop itself is pinned: first tick paints, a stale frame does not end it, a foreign frame does, an all-black clear does not, a bad geometry exits 0 painting nothing, a non-`vc4drmfb` fb0 waits, and it stays up past `RB_DRAW_S` | **run, green — 30 checks.** It caught three bugs: the amber test looked for `"RBP"` while the status was lowercase (the honest line rendered green); the daemon exited on a *stale* frame before drawing; and a geometry refusal wrote its breadcrumb before the run directory existed, losing the one message that explains a blank screen. The second and third are fixed in `bootscreen.py` and pinned here |
+| S12.1 | on the unit **by hand, no reboot**: write synthetic lines into `/run/rblive4/boot.log`, run `bootscreen.py` from ssh, read the glass back as a captured frame; then `python3 tools/fbscreen.py solid --colour red --once` in another shell; then the stay-up path with rbp stopped | the screen draws, tails, heartbeats; it **exits** on a frame that is not its own (`rbp-drew` in `boot.stage`); and with rbp stopped it **stays up** with the amber honest line | **run, green (2026-10-09).** Capture showed `RElive4 BOOT`, `T+15475`, the stage lines and the heartbeat block. This drill **found a real bug**: with a stale frame already on fb0 the daemon read it as rbp's and exited before drawing — found because a leftover diagnostic `fbscreen.py clock` was painting the panel. Fixed with a first-tick paint; re-run then drew over the stale frame, exited only on the *different* (red) frame, and stayed up ~12 s past `RB_DRAW_S=10` showing `RBP IS RUNNING, DRAWING NOTHING` in amber |
+| S12.2 | start the player **through the unit** and read `/run/rblive4/boot.log` | the launcher integration: the stage lines land with sensible uptime stamps, and `rb_bootmsg` creates `/run/rblive4` if it is not there | **run, green (2026-10-09).** All ten stages landed in order: `deploy root`, `chroot`, `device binds…(fix-dev.sh)`, `depth: player and lie both 32 bpp`, `shims: …`, `display baseline: 1280,800 2560 16`, `launching rbp (log: …)`, `rbp pid 9941 ready (udev_usb1 fd open)`, `usb-watch started`, `display-watch started` |
+| S12.3 | `systemctl start rblive4-boot`, then start `rblive4`; watch the glass | the unit: the screen comes up, then disappears the moment rbp paints; `systemctl is-failed rblive4-boot` is clean | **run, green (2026-10-09).** At T+3 s the screen was `active` drawing the first three stages; by T+8 s `boot.stage` read `rbp-drew uptime=1598.1` and the unit was `inactive` (not failed) with rbp's UI on the glass. `doctor.sh` then reported `last boot-screen stage: rbp-drew uptime=1598.1` from the installed unit |
+| S12.4 | **reboot — ASK FIRST**; then `boot-trim.sh report` | the ~10 s gap is filled on the real boot path, and rbp-ready is unchanged against the known-good **17.9 / 18.0 / 18.2 s** | **NOT RUN** |
+| S12.5 | on a blank cold boot, read the glass | the on-glass explanation: with the screen up, the blank state now *says* "rbp is running, drawing nothing" instead of being an unmarked black panel — the discriminator `tools/fbscreen.py` gives a two-second manual version of | **NOT RUN** |
+
+**Rollback is one line and no reboot**: `RB_BOOTSCREEN=0` in `rb.local.conf`, then
+`systemctl disable --now rblive4-boot`. The unit is `Type=simple` with no
+`Requires=` on the player, so even a fault in it cannot delay or stop rbp.
+
 **Never click raw x 1884 at the strip rows** when S11.8 is finally attempted — that is
 USB STOP, and it stops the operator's media ([08](08-controls.md)).
 

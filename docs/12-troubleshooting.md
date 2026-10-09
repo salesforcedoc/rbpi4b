@@ -66,6 +66,24 @@ the rectangle that was actually drawn into.
 | `display-watch.sh: not found` on a deployed unit | it was added to the installer's explicit copy list, so an old deploy root predates it | re-run `install.sh`; the list is `for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh rb.conf` |
 | No `/dev/fb0` at all when nothing is plugged in | expected — vc4drmfb only creates the node for an attached connector. The unit deliberately has **no** `ConditionPathExists=/dev/fb0`, so the launcher runs and rbp exits; the watcher is not up, because it starts only after rbp is confirmed running | plug the monitor in and restart the unit. Whether rbp should instead wait for the framebuffer is **unmeasured** — S10.9 is the row, and it is not assumed either way |
 
+### The boot screen
+
+The launcher's stages drawn on `/dev/fb0` from `vc4drmfb` (~6.7 s) until rbp's
+first frame (~13–18 s) — `scripts/device/bootscreen.py`, run by
+`rblive4-boot.service`; [11](11-runtime-launcher.md#the-boot-screen) is the design,
+[13](13-raspberrypi4.md) S12 the drills. **Run on the unit 2026-10-09** (S12.1–S12.3):
+the screen came up mid-launch, every stage landed in `boot.log`, and it left the
+moment rbp painted.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| **The panel is black until ~13 s** on a normal boot | expected — nothing draws on fb0 between the firmware's `simplefb` (0.78 s, handed to `vc4drmfb` at 6.74 s) and rbp's first frame. This is the gap the boot screen exists to fill, not a fault | nothing to do; if it is still black *with* the screen enabled, the next three rows |
+| The boot screen never appears | one of four, in order of likelihood: `RB_BOOTSCREEN=0` (which disables the unit at boot but does **not** remove it), no `python3` on the unit (the unit *skips*, it does not fail — `systemctl status rblive4-boot` says `inactive (dead)` with the condition un-met), `rblive4-boot` never enabled, or `/dev/fb0`'s name is not `vc4drmfb` when the daemon looks | `grep RB_BOOTSCREEN /opt/rblive4/rb.local.conf /opt/rblive4/rb.conf`; `command -v python3`; `systemctl is-enabled rblive4-boot`; `cat /sys/class/graphics/fb0/name`. `doctor.sh` checks all four and prints `last boot-screen stage:` from `/run/rblive4/boot.stage` — that file is the daemon's own last word, and it is where a fault is named |
+| The boot screen appears and then **vanishes instantly**, before rbp's first frame | a frame already on fb0 that is **not ours and not black** — the daemon reads it as "rbp has drawn". `boot.stage` says `rbp-drew` with an uptime far too early. The same thing happens if something else is drawing on the panel (a leftover diagnostic `fbscreen.py clock` loop did exactly this on 2026-10-09) | find the other writer: `for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null \| grep -q fb0 && echo "$p $(cat $p/comm)"; done`. Note the daemon's own **first** tick paints regardless (measured: it drew over a stale frame), so an exit this early is genuinely someone else's content, not a leftover from `vc4drmfb` |
+| The screen shows the title and heartbeat but **no stage lines** | the launcher wrote nothing to `/run/rblive4/boot.log` — `/run` is tmpfs and the directory is made at sysinit by `/etc/tmpfiles.d/rblive4.conf`, so its absence means the drop-in is not installed, or `start-rb.sh` is an old copy without the `rb_bootmsg` calls | `ls -l /etc/tmpfiles.d/rblive4.conf`; `cat /run/rblive4/boot.log` (a **regular file** — reading a `/tmp/udev_*` FIFO blocks, this does not). Re-run `install.sh`, which writes the drop-in and copies the current scripts |
+| On a blank cold boot the screen **stays up** rather than clearing | this is the design, and the honest one: rbp has drawn nothing, so the daemon keeps the panel and says **"rbp is running, drawing nothing"** in amber, with the heartbeat still ticking so it cannot be read as a frozen frame | it is the on-glass diagnosis for the blank cold boot the Display section above describes. `tools/fbscreen.py` distinguishes it from a strobe by hand in two seconds — `systemctl stop rblive4-boot` clears it |
+| The screen is gone but rbp's picture is not there either | the daemon exits only on a **non-black frame that is not its own** — rbp's start-up *clear* is all-black and is ignored, so an exit means something drew content | read `/run/rblive4/boot.stage`: `rbp-drew` is the normal exit and carries the uptime. Any other stage word (`fault …`, or a geometry refusal) is the daemon reporting a fault it survived — it is always `exit 0`, so a fault here can never be why the player is down |
+
 ## Pointing
 
 | Symptom | Cause | Fix |
@@ -195,6 +213,7 @@ the rectangle that was actually drawn into.
 | `display-watch.sh status` | whether the watcher is running, the baseline rbp was launched with, the geometry now, and the fire count. `--dry-run` logs the decision without restarting, and `RB_SYSFS_ROOT` points it at a fake tree |
 | `$RB_LOG_DIR/displaywatch.log` | `baseline: '<geometry>'`, every `REFUSE:` with its reason, every restart and its trigger, and the debounce/cooldown/cap decisions |
 | `$RB_LOG_DIR/vncserve.log` | the VNC server's whole conversation: each client's **version string** (macOS answers `RFB 003.003`, so the session is always 3.3), the **security type** it chose, the `SetEncodings` list **by raw number** with `Tight:`/`zlib:`/`JPEG-quality:` decoded beside it, the encoding that client was actually given, every mode change with its reason, the encoder's status, and every fallback to `raw` ([19](19-vnc.md)) |
+| `/run/rblive4/boot.log`, `/run/rblive4/boot.stage` | the launcher's boot stages, uptime-stamped (`rb_bootmsg`), and the boot screen's **last word** — which stage it reached and how it left (`rbp-drew` is the normal exit). Both are tmpfs, so read them **before** a reboot; a service restart leaves them ([11](11-runtime-launcher.md#the-boot-screen)) |
 
 Only the **start-up** DirectFB log survives: the per-flip and per-input-event
 debug traces were removed from the patch, and keeping them out is mandatory

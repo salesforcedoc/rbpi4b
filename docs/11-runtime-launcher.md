@@ -321,3 +321,70 @@ Four properties of the unit are load-bearing rather than decorative:
   manager and of `getty@tty1` that `boot-trim.sh apply services` writes is
   therefore load-bearing on a target that has one installed and enabled, and
   inert on this unit, where none of the three exists.
+
+## The boot screen
+
+`/dev/fb0` exists from **6.74 s** (`vc4drmfb`; the firmware `simplefb` is up from
+0.78 s and handed over in between) and rbp paints its first frame at **~13–18 s**,
+so the panel is black for about ten seconds in the middle of every boot. Nothing
+else draws on it — `fbcon=map:1` keeps the console on fb1, and `/proc/fb` shows a
+single `vc4drmfb` — so that gap is silent, and on the blank cold boot ([13](13-raspberrypi4.md#s12--the-boot-screen-drills))
+the same black screen is a *symptom* with no other on-glass sign.
+
+[`scripts/device/bootscreen.py`](../scripts/device/bootscreen.py), run by
+[`rblive4-boot.service`](../scripts/device/rblive4-boot.service), fills it: a title
+with the boot uptime, a scrolling list of the launcher's stage messages, and a 1 Hz
+heartbeat, drawn from the moment `vc4drmfb` appears until rbp paints its first
+frame — at which point the screen exits and leaves rbp's own picture. If rbp never
+paints it **stays up** with an honest final line ("rbp is running, drawing
+nothing"), which is the operator's choice: leave only when a real frame arrives.
+The heartbeat is not decoration — a static picture cannot be told apart from a
+frozen one, and this whole file exists to be *read off the glass*
+([`tools/fbscreen.py`](../tools/fbscreen.py) states the same rule for its loop).
+
+The stages come from **`/run/rblive4/boot.log`**, which [`rb_bootmsg()`](../scripts/device/lib.sh)
+appends to at each step of `start-rb.sh`. It is a **regular file, never a FIFO**,
+and that is the whole reason `rb_bootmsg` is a function: opening a reader-less FIFO
+for write *blocks in `open()`* until a reader appears (the hazard `usb-watch.sh`'s
+`notify()` guards with `[ -p ]` + `timeout 3`), and during boot the screen may not
+be up yet — so a blocking write there would stall the launcher. An `O_APPEND` write
+to a file never blocks and needs no reader. `install.sh` ships a `tmpfiles.d` entry
+that creates the directory at sysinit, so it exists before either writer, and
+`rb_bootmsg` `mkdir -p`s defensively anyway.
+
+Three things in the daemon are load-bearing, and each was a wrong first draft:
+
+* **It waits for `vc4drmfb` before opening fb0.** The `simplefb` → `vc4drmfb`
+  handover at ~6.74 s means an fd opened earlier points at a torn-down
+  framebuffer, so the sequence is: poll `/sys/class/graphics/fb0/name`, *then*
+  open, *then* mmap.
+* **It exits only on a non-black frame that is not its own.** "Redraw while fb0 is
+  black, exit when it is not" cannot both hold — the daemon's own paint makes fb0
+  non-black, so it would exit after one frame. A shadow of the last frame it wrote
+  tells its own paint from rbp's, so an all-black clear it did not make (rbp's
+  start-up clear, a display baseline) is correctly ignored. Its **first** tick
+  paints unconditionally: a frame already on fb0 when it starts — left by a
+  previous rbp run, or by the firmware — is stale evidence, not "rbp has drawn",
+  and a screen that refused to draw over it would silently never appear, which is
+  the one failure a diagnostic must not have. Measured 2026-10-09: with a stale
+  frame on the panel the daemon painted over it and stayed; it left only when a
+  *different* frame appeared.
+* **It verifies the geometry from sysfs** (1280×800 / stride 2560 / 16 bpp) and
+  refuses to paint on a mismatch, exiting 0 — a mis-strided write does not look
+  like a bug, it looks like a clean picture ([`tools/fbscreen.py`](../tools/fbscreen.py)
+  makes the same point, and the depth is 16 bpp RGB565, not the 32 bpp the fbshim
+  tells rbp).
+
+The unit is deliberately unable to break the boot. `Type=simple` completes its job
+at `fork()` — before `execve()` — so the python process's whole lifetime is off
+rblive4's critical path; `Before=rblive4.service` only pins the *order* between the
+two forks, which is what guarantees the screen has opened fb0 before the player
+exists (and it governs the boot transaction only: a mid-session `Restart=always`
+restart of rblive4 does not bring the screen back). There is no
+`Requires=`/`BindsTo=` anywhere, so a fault here cannot take the player down, and
+every exit path in the script is `exit 0`. `Restart=no` is correct and
+`Restart=always` would be a bug: the screen's *normal* termination is exit 0 when
+rbp draws, so `always` would relaunch it and paint over the live player.
+`RB_BOOTSCREEN=0` (or `RB_AUTOSTART=0`, which it follows) installs the unit but
+leaves it disabled, and `doctor.sh` reports each way it can look installed and not
+work.

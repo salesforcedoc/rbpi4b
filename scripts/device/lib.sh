@@ -123,3 +123,40 @@ pids_matching() {
         echo "$_pid"
     done
 }
+
+# --- boot progress ----------------------------------------------------------
+
+# rb_bootmsg MESSAGE [MESSAGE...]
+#
+# Append one timestamped line to the boot-progress log the early screen tails
+# (bootscreen.py, started by rblive4-boot.service). It writes ONLY to that file,
+# never to stdout: the launcher's own `echo` lines already give the journal
+# record, so repeating them here would double every line in a report.
+#
+# A REGULAR FILE, never a FIFO, and that is the whole reason this is a function
+# rather than a one-liner at each call site. Opening a reader-less FIFO for write
+# BLOCKS in open() until a reader appears — usb-watch.sh's notify() guards against
+# exactly that with `[ -p ]` + `timeout 3` — and during boot the reader (the
+# screen) may not be up yet, so a blocking write here would stall the launcher.
+# An O_APPEND write to a regular file never blocks, never loses the first line,
+# and needs no reader.
+#
+# The stamp is /proc/uptime's first field — seconds since boot, monotonic and
+# boot-relative, matching boot-trim.sh's milestones — NOT the wall clock: the wall
+# clock is not set yet this early, and a 32-bit `long` CLOCK_MONOTONIC in ns wraps
+# every 4.3 s (docs/13's long-clock note).
+#
+# NEVER fatal. A missing directory or a read-only /run is a silent no-op; the
+# screen is a diagnostic, and a diagnostic must not be able to stop the player.
+# The `mkdir -p` is defensive and closes a real race: nothing creates /run/rblive4
+# at boot (only vnc-run.sh does, and only when RB_VNC=1), and the gap between
+# basic.target and the launcher is 70 ms — so the earliest calls could otherwise
+# run before any directory exists. install.sh also ships a tmpfiles.d entry that
+# makes the directory before either writer.
+rb_bootmsg() {
+    _t=$(cut -d' ' -f1 /proc/uptime 2>/dev/null) || _t=
+    [ -n "$_t" ] || _t=0
+    _bl=${RB_BOOT_LOG:-/run/rblive4/boot.log}
+    mkdir -p "${_bl%/*}" 2>/dev/null
+    printf '%s  %s\n' "$_t" "$*" >>"$_bl" 2>/dev/null || :
+}

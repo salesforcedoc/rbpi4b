@@ -198,6 +198,10 @@ static void page_html(struct vnc_http *h, struct sbuf *b)
 {
     struct vnc_http_state *s = h->st;
     int raw = s->mode->mode == VNC_MODE_RAW;
+    /* "sharing" is asked twice below, once for the words and once for whether there
+     * is a picture to point the preview at, and it is asked through s->live, which
+     * may be absent. One local, so neither place can forget the NULL. */
+    const int share = s->live && s->live->on;
 
     sb_adds(b, "<!doctype html><html><head><meta charset=\"utf-8\">"
                "<title>rbp screen</title>"
@@ -214,6 +218,41 @@ static void page_html(struct vnc_http *h, struct sbuf *b)
     sb_adds(b, "<h1>rbp screen</h1>");
     sb_addf(b, "<p class=\"lead\">%dx%d &middot; the deck, the drawers and the band, "
                "over VNC.</p>", s->w, s->h);
+
+    /* --- sharing ------------------------------------------------------------ *
+     * THE FIRST CONTROL ON THE PAGE, AND THE ONLY ONE ABOUT THIS PROGRAM RATHER
+     * THAN ABOUT THE PICTURE. It is here, at the top and as the largest thing on
+     * the page, because with sharing off there is no picture anywhere on this page
+     * -- so the thing to press has to be impossible to miss. It is also the whole
+     * reason the page survives when the screen does not: see vnc_live.h. */
+    sb_adds(b, "<h1 style=\"font-size:16px\">Sharing</h1>");
+    if (s->live) {
+        sb_addf(b, "<p class=\"lead\">%s</p>", share
+                 ? "On. The screen is being served &mdash; connect with VNC, or watch "
+                   "the preview below."
+                 : "Off. Nothing is being served: this program has not opened the "
+                   "framebuffer, the display or the VNC port at all, so the player "
+                   "cannot tell that it is running.");
+        sb_adds(b, "<form method=\"get\" action=\"/session\">");
+        sb_addf(b, "<button name=\"set\" value=\"on\"%s>Start sharing</button>",
+                share ? " class=\"on\"" : "");
+        sb_addf(b, "<button name=\"set\" value=\"off\"%s>Stop sharing</button>",
+                share ? "" : " class=\"on\"");
+        sb_adds(b, "</form>");
+        sb_adds(b, "<table>");
+        sb_adds(b, "<tr><td class=\"k\">Switch file</td><td><code>");
+        sb_addesc(b, s->live->path);
+        sb_addf(b, "</code> &mdash; %s</td></tr>",
+                s->live->have_mtime ? "set" : "not written yet, using the default");
+        sb_adds(b, "</table>");
+        if (!share)
+            sb_adds(b, "<p class=\"note\">Starting sharing is the moment the display "
+                       "is opened. On a unit whose player comes up blank on a cold "
+                       "boot, leaving this off across the reboot is how you find out "
+                       "whether this program is the reason for it.</p>");
+    } else {
+        sb_adds(b, "<p class=\"lead\">Off.</p>");
+    }
 
     sb_adds(b, "<form method=\"get\" action=\"/mode\">");
     sb_addf(b, "<button name=\"set\" value=\"raw\"%s>Raw</button>",
@@ -289,15 +328,28 @@ static void page_html(struct vnc_http *h, struct sbuf *b)
     }
 
     sb_adds(b, "<h1 style=\"font-size:16px\">Preview</h1>");
-    sb_adds(b, "<p class=\"note\">This is the hardware encoder's own output, live, "
-               "whatever the switch above says &mdash; so the JPEG can be judged before "
-               "the VNC picture is handed over to it. It runs only while this page is "
-               "open. <b>Tap the picture to show or hide every word on this page.</b> "
-               "The page opens with them hidden, picture alone on black.</p>");
+    if (!share)
+        sb_adds(b, "<p class=\"note\">Nothing to show: the preview is the hardware "
+                   "encoder's own output, and the encoder is closed while sharing is "
+                   "off. Press <b>Start sharing</b> above &mdash; the page comes back "
+                   "with the picture on it.</p>");
+    else
+        sb_adds(b, "<p class=\"note\">This is the hardware encoder's own output, live, "
+                   "whatever the switch above says &mdash; so the JPEG can be judged before "
+                   "the VNC picture is handed over to it. It runs only while this page is "
+                   "open. <b>Tap the picture to show or hide every word on this page.</b> "
+                   "The page opens with them hidden, picture alone on black.</p>");
     sb_adds(b, "</div>");
 
-    sb_addf(b, "<div class=\"shot\" id=\"shot\"><img src=\"/preview.mjpg?%llu\" "
-               "alt=\"live preview\"></div>", h->switched);
+    if (!share)
+        /* NO <img>, AND THAT IS THE POINT: an <img> pointing at the preview would open
+         * a preview connection, and a preview connection is a reason to run the capture
+         * -- which is exactly what sharing off has just closed. The box is still drawn,
+         * at the right shape, so the page does not jump when the picture appears. */
+        sb_adds(b, "<div class=\"shot\" id=\"shot\"></div>");
+    else
+        sb_addf(b, "<div class=\"shot\" id=\"shot\"><img src=\"/preview.mjpg?%llu\" "
+                   "alt=\"live preview\"></div>", h->switched);
 
     /* The listen address is deliberately not printed here: it is 0.0.0.0 by default,
      * which is not a thing to put in a URL, and the address the operator needs is the
@@ -452,6 +504,31 @@ static void route_get(struct vnc_http *h, struct hconn *c, const char *target)
         return;
     }
 
+    if (!strncmp(target, "/session", 8) && (target[8] == '\0' || target[8] == '?')) {
+        char word[32];
+        if (h->st->live && query_set(target, word, sizeof word)) {
+            int want;
+            if (!strcmp(word, "toggle")) {
+                /* The same word as the input switch, for the same reason: a file
+                 * cannot hold "the other one". */
+                want = h->st->live->on ? VNC_LIVE_OFF : VNC_LIVE_ON;
+            } else if (vnc_live_parse(word, &want) < 0) {
+                want = -1;
+            }
+            if (want >= 0) {
+                int took = vnc_live_set(h->st->live, want);
+                vlog("http: the page turned sharing %s (file %s)",
+                     vnc_live_name(took), h->st->live->path);
+            } else {
+                vlog("http: the page asked for sharing \"%s\", which is neither on nor "
+                     "off; leaving it %s", word, vnc_live_name(h->st->live->on));
+            }
+        }
+        reply(c, 303, "See Other", "text/plain; charset=utf-8", "", 0,
+              "Location: /\r\n");
+        return;
+    }
+
     if (!strncmp(target, "/preview.mjpg", 13)) {
         preview_start(c);
         return;
@@ -594,6 +671,14 @@ int vnc_http_preview_wanted(const struct vnc_http *h)
 {
     int i;
     if (!h) return 0;
+    /* SHARING OFF MEANS NOT EVEN THE PREVIEW IS ENCODED. A preview connection is a
+     * reason for the capture to run, and while sharing is off there is no capture at
+     * all -- honouring one here would open the display and the encoder behind the
+     * operator's back, which is precisely the thing the switch exists to stop. The
+     * page does not ask for a preview in that state either; this is the backstop for
+     * a tab that was already open when sharing was turned off. */
+    if (h->st && h->st->live && !h->st->live->on)
+        return 0;
     for (i = 0; i < VNC_HTTP_CONNS; i++)
         if (h->conn[i].fd >= 0 && h->conn[i].preview)
             return 1;

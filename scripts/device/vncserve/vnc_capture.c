@@ -4,13 +4,31 @@
  * THE SHAPE. Open both devices once. Every frame: copy fb0, then walk card1's planes
  * and copy each active one over it. The plane LIST is re-read every 250 ms rather than
  * every frame (the set of planes changes only when rbp creates or destroys one), but a
- * plane's PIXELS and its rectangle are read every frame -- a drawer is repainted in
- * place, and its position moves as it slides. Getting that split wrong gives either a
- * drawer that never updates or an ioctl storm.
+ * plane's PIXELS, its RECTANGLE and its framebuffer MAPPING are all read every frame --
+ * a drawer is repainted in place, its position moves as it slides, and the buffer that
+ * a framebuffer id names is REPLACED every time a drawer is closed and opened again.
+ * See get_fb(): skipping that last one is not an optimisation, it is a frozen drawer.
  *
- * NO DRM MASTER IS TAKEN. Everything here is a query: GETPLANE for the binding, GETFB
- * for the buffer, MAP_DUMB to map it. The plane rbp is scanning out is never written,
- * never re-bound, never disabled. rbp cannot tell this process is running.
+ * NO DRM MASTER IS TAKEN -- and that takes a call, not just good intentions. Everything
+ * here is a query: GETPLANE for the binding, GETFB for the buffer, MAP_DUMB to map it.
+ * The plane rbp is scanning out is never written, never re-bound, never disabled.
+ *
+ * BUT THE KERNEL HANDS MASTER TO THE FIRST CLIENT THAT OPENS THE PRIMARY NODE, and a
+ * client that never asked for it still holds it until it drops it or exits. That is not
+ * theory: this file's own comment claimed no master for as long as the ordering happened
+ * to hide the problem. MEASURED 2026-10-09, on the first cold boot where the viewer came
+ * up BEFORE the player (systemd starts rblive4-vnc at 17:02:12, rblive4 at 17:02:20), the
+ * only process holding /dev/dri/card1 was vncserve -- and the shims that put rbp's band
+ * and drawers on real planes were refused:
+ *
+ *     pointsrc: menu plane: SET_MASTER on /dev/dri/card1: Device or resource busy --
+ *               something else holds the display; the band stays on /dev/fb0
+ *
+ * pointsrc cannot fall back cleanly: the plane is where the band and the drawers live,
+ * and pointsrc's own handover (menu_draw.c) is written around one master per device. So
+ * opening the node is followed immediately by GIVING MASTER BACK, which costs nothing
+ * here because every ioctl above works as a non-master. The alternative -- ordering the
+ * units so the player starts first -- is a dependency that a reboot is free to break.
  */
 #define _GNU_SOURCE
 #include "vnc_capture.h"
@@ -34,9 +52,14 @@
  * syscall wrappers, which a standalone binary must not link against.
  */
 #define DRM_IOCTL_BASE   'd'
+#define DRM_IO( nr )        _IO (DRM_IOCTL_BASE, nr)
 #define DRM_IOW(nr, type)   _IOW(DRM_IOCTL_BASE, nr, type)
 #define DRM_IOWR(nr, type)  _IOWR(DRM_IOCTL_BASE, nr, type)
 
+/* Opening the primary node is what grants master; DROP_MASTER is what gives it back.
+ * See the header: without the drop, a viewer that starts first holds the display. */
+#define DRM_IOCTL_DROP_MASTER             DRM_IO(0x1f)
+#define DRM_IOCTL_GEM_CLOSE               DRM_IOW(0x09, struct drm_gem_close)
 #define DRM_IOCTL_SET_CLIENT_CAP          DRM_IOW(0x0d, struct drm_set_client_cap)
 #define DRM_IOCTL_MODE_GETPROPERTY        DRM_IOWR(0xAA, struct drm_mode_get_property)
 #define DRM_IOCTL_MODE_GETFB              DRM_IOWR(0xAD, struct drm_mode_fb_cmd)
@@ -128,14 +151,23 @@ struct drm_set_client_cap {
     __u64 value;
 };
 
+struct drm_gem_close {
+    __u32 handle;
+    __u32 pad;
+};
+
 /* ------------------------------------------------------------------ state */
 
+/* One mapped plane buffer. This is a POOL REFILLED EVERY FRAME, not a cache: see
+ * get_fb() for the framebuffer id that is not an identity, and for why nothing here
+ * outlives the frame that made it. */
 struct vnc_fb {
     uint32_t id;
+    __u32 handle;             /* the GEM handle GETFB minted for this mapping */
     int w, h, pitch_px;
     void *map;
     size_t size;
-    int dead;                 /* GETFB or MAP_DUMB failed; dropped at the next refresh */
+    int dead;                 /* GETFB, MAP_DUMB or mmap failed for THIS frame */
 };
 
 /* One plane's placement, keyed by the framebuffer it scans out of. See
@@ -353,7 +385,93 @@ static int plane_prop(struct vnc_capture *c, uint32_t obj_id, const char *want, 
     return -1;
 }
 
-/* The pixels of one framebuffer, mapped once and kept. NULL if it cannot be had. */
+/* Hand the mapping AND the GEM handle back, and leave the slot FREE.
+ *
+ * Both halves of the release matter: the munmap gives the address space back and lets
+ * the driver free a buffer rbp has already torn down, and the close is what keeps the
+ * per-frame GETFB in get_fb() from leaking a handle for every plane of every frame.
+ *
+ * Clearing `id` matters just as much and is easy to leave out: a slot that kept its id
+ * while its mapping went away would satisfy neither of get_fb()'s searches -- not the
+ * "already mapped this frame" one, which wants a live map, and not the "first free
+ * slot" one, which looks for id == 0. After one frame every slot would hold a stale id
+ * and every plane would fail to map, which is a black picture rather than a stale one. */
+static void drop_fb(struct vnc_capture *c, struct vnc_fb *fb)
+{
+    if (fb->map) {
+        munmap(fb->map, fb->size);
+        fb->map = NULL;
+    }
+    if (fb->handle) {
+        struct drm_gem_close gc;
+        memset(&gc, 0, sizeof gc);
+        gc.handle = fb->handle;
+        ioctl(c->drmfd, DRM_IOCTL_GEM_CLOSE, &gc);
+        fb->handle = 0;
+    }
+    fb->size = 0;
+    fb->id   = 0;
+    fb->dead = 0;
+}
+
+/* Every plane mapping is held for exactly one frame. Called at the top of the plane
+ * pass, before anything asks get_fb() for a buffer; see get_fb() for why a mapping
+ * carried across frames is a frozen drawer rather than a saved ioctl. */
+static void release_all_fbs(struct vnc_capture *c)
+{
+    int i;
+    for (i = 0; i < VNC_MAX_FBS; i++)
+        drop_fb(c, &c->fbs[i]);
+}
+
+/* The pixels of one framebuffer, mapped FRESH. NULL if it cannot be had.
+ *
+ * A FRAMEBUFFER ID IS NOT AN IDENTITY, and everything below follows from that.
+ *
+ * The id is a slot in the kernel's idr, handed to the lowest free number, and this
+ * port recycles one every single time a drawer is closed and opened again:
+ * drm_band_teardown() destroys the drawer's framebuffer, and the next
+ * drm_band_setup() gets that SAME id back for a buffer that is a different buffer.
+ * Measured on the unit, 2026-10-09, both drawers out:
+ *
+ *     fb 723  180x800  obj 290816        <- the left drawer
+ *     ... a sideaway closes the drawers ...
+ *     fb 723  (gone)
+ *     fb 723  1280x56  obj 143360        <- the BAND, same id, a moment later
+ *     ... a sideswipe reopens the left drawer ...
+ *     fb 723  180x800  obj 290816        <- a THIRD buffer, same id again
+ *
+ * The driver's own state dump cannot break the tie either: `start` read 0010028d for
+ * all three, because the allocator hands back the same dma address. Size does not
+ * either, between two 180x800 drawers. So there is no cheap token that says "this is
+ * still the buffer I mapped" -- only GETFB answers it, and only for right now.
+ *
+ * A cache keyed on the id alone therefore returns the FIRST mapping it ever made for
+ * that id, and goes on returning it for the life of the process. That was the
+ * 2026-10-09 report -- "i can see side panels but it doesn't seem to refresh or
+ * capture when it's flashing ... the top menu isn't visible now" -- and both halves
+ * were one defect. The drawer showed pitch 33 while the glass showed 60, with the
+ * flashing LEDs frozen, because the mapping pointed at a buffer rbp had already torn
+ * down and its contents had stopped changing. And because the very same id is the
+ * BAND whenever no drawer is out, the same stale slot painted a 180x56 slice of old
+ * drawer pixels where the top menu should have been: the band did not go stale, it
+ * went MISSING -- 1280x56 of geometry clamped against a 180x800 buffer leaves 180 px
+ * of plane drawn and 1100 px of nothing. One id, two surfaces, one stale mapping.
+ *
+ * So the mapping is remade every frame, and it costs almost nothing: five syscalls
+ * per plane per frame against the 2 MB memcpy and 10 KB debugfs read that the frame
+ * already pays for.
+ *
+ * AND THE HANDLE IS CLOSED. DRM_IOCTL_MODE_GETFB mints a NEW GEM handle on every
+ * call -- measured: repeated GETFBs on one id returned handles 1, 2, 3, and never the
+ * same one twice -- so doing this per frame without DRM_IOCTL_GEM_CLOSE would leak a
+ * handle per plane per frame. That leak is the whole reason an earlier version of
+ * this comment argued for caching; the leak was real, but the cure was the missing
+ * close, not the cache. The cache is what cost a frozen drawer and a missing band.
+ *
+ * WITHIN a frame the pool still serves two planes that share one buffer: nothing has
+ * been released between them. release_all_fbs() is what makes that the only case.
+ */
 static struct vnc_fb *get_fb(struct vnc_capture *c, uint32_t fb_id)
 {
     struct drm_mode_fb_cmd fc;
@@ -362,36 +480,44 @@ static struct vnc_fb *get_fb(struct vnc_capture *c, uint32_t fb_id)
     int i;
 
     for (i = 0; i < VNC_MAX_FBS; i++)
-        if (c->fbs[i].id == fb_id && !c->fbs[i].dead)
-            return &c->fbs[i];
+        if (c->fbs[i].id == fb_id && c->fbs[i].map && !c->fbs[i].dead)
+            return &c->fbs[i];             /* already mapped FOR THIS FRAME */
+
     for (i = 0; i < VNC_MAX_FBS; i++)
-        if (c->fbs[i].id == 0 || c->fbs[i].dead) { slot = &c->fbs[i]; break; }
+        if (c->fbs[i].id == 0 || c->fbs[i].dead) {
+            slot = &c->fbs[i];
+            break;
+        }
     if (!slot)
         return NULL;                       /* 16 live planes would be a different problem */
 
+    drop_fb(c, slot);
     memset(slot, 0, sizeof *slot);
+    slot->id = fb_id;
+
     memset(&fc, 0, sizeof fc);
     fc.fb_id = fb_id;
     if (ioctl(c->drmfd, DRM_IOCTL_MODE_GETFB, &fc) < 0) {
-        slot->id = fb_id; slot->dead = 1; slot->w = slot->h = 0;
+        slot->dead = 1;
         return NULL;
     }
+    slot->handle = fc.handle;
 
     memset(&md, 0, sizeof md);
     md.handle = fc.handle;
     if (ioctl(c->drmfd, DRM_IOCTL_MODE_MAP_DUMB, &md) < 0) {
-        slot->id = fb_id; slot->dead = 1; slot->w = slot->h = 0;
+        slot->dead = 1;
         return NULL;
     }
 
     slot->size = (size_t)fc.pitch * fc.height;
     slot->map = mmap(NULL, slot->size, PROT_READ, MAP_SHARED, c->drmfd, (off_t)md.offset);
     if (slot->map == MAP_FAILED) {
-        slot->map = NULL; slot->id = fb_id; slot->dead = 1; slot->w = slot->h = 0;
+        slot->map = NULL;
+        slot->dead = 1;
         return NULL;
     }
 
-    slot->id       = fb_id;
     slot->w        = (int)fc.width;
     slot->h        = (int)fc.height;
     slot->pitch_px = (int)(fc.pitch / 2);
@@ -426,11 +552,10 @@ static void refresh_plane_list(struct vnc_capture *c)
     clock_gettime(CLOCK_MONOTONIC, &c->listed_at);
     c->have_listed = 1;
 
-    /* Any framebuffer that failed last round gets another chance now: rbp reallocates
-     * a plane's buffer when the drawer resizes, and the old id is simply gone. */
-    for (i = 0; i < VNC_MAX_FBS; i++)
-        if (c->fbs[i].dead && c->fbs[i].map == NULL)
-            c->fbs[i].dead = 0;
+    /* There is nothing to do to the framebuffer pool here, and that is the point of
+     * its new shape: it is emptied by release_all_fbs() at the top of every frame's
+     * plane pass, so there is no stale entry for a list refresh to revive, and no
+     * id-keyed cache for a recycled framebuffer id to fool. See get_fb(). */
 }
 
 /* One plane on screen, appended to c->planes. */
@@ -471,7 +596,7 @@ static void add_plane(struct vnc_capture *c, uint32_t plane_id)
     }
 
     fb = get_fb(c, gp.fb_id);
-    if (!fb) { c->failed_planes++; return; }
+    if (!fb || !fb->map) { c->failed_planes++; return; }
 
     if (!crtc_enabled(c, gp.crtc_id))
         return;
@@ -481,19 +606,25 @@ static void add_plane(struct vnc_capture *c, uint32_t plane_id)
      * goes, and drawing it at a guess would be worse than not drawing it. */
     {
         const struct vnc_geom *g = geom_for(c, gp.fb_id);
+        int pw, ph;
         if (!g) { c->no_geometry++; return; }
         if (c->nplanes >= VNC_MAX_PLANES)
             return;
 
+        /* The framebuffer is the only thing that can actually be read; a rectangle
+         * larger than it would walk off the end of the mapping. A rectangle that
+         * comes out EMPTY is a failure to draw, not a plane drawn -- and it has to
+         * be counted as one, or vnc_compose_blit()'s silent return for it makes the
+         * status line report a plane that the picture does not contain. */
+        pw = g->w > fb->w ? fb->w : g->w;
+        ph = g->h > fb->h ? fb->h : g->h;
+        if (pw <= 0 || ph <= 0) { c->failed_planes++; return; }
+
         p = &c->planes[c->nplanes++];
         p->dst_x = g->x;
         p->dst_y = g->y;
-        p->w     = g->w;
-        p->h     = g->h;
-        /* The framebuffer is the only thing that can actually be read; a rectangle
-         * larger than it would walk off the end of the mapping. */
-        if (p->w > fb->w) p->w = fb->w;
-        if (p->h > fb->h) p->h = fb->h;
+        p->w     = pw;
+        p->h     = ph;
     }
 
     if (plane_prop(c, plane_id, "zpos", &z) < 0) z = 0;
@@ -550,6 +681,17 @@ struct vnc_capture *vnc_capture_open(char *err, size_t errlen)
         goto fail;
     }
 
+    /* GIVE BACK WHAT THE OPEN JUST TOOK. The kernel grants DRM master to the first
+     * client to open the primary node, whether or not it ever asked -- and everything
+     * this process does with the node is a query, so holding it only takes the display
+     * away from the shims that need it (see the header). Both failures are expected and
+     * neither is a problem: EINVAL if we were not master after all, EACCES if another
+     * client has it legitimately. Only success is worth saying out loud, because it is
+     * the case that would otherwise be silent and would cost someone a boot. */
+    if (ioctl(c->drmfd, DRM_IOCTL_DROP_MASTER, NULL) == 0)
+        fprintf(stderr, "vncserve: was granted DRM master by opening /dev/dri/card1 "
+                        "first -- dropped it, the display is not ours\n");
+
     /* Without this the kernel lists only the overlay planes -- this board returned 48
      * of card1's 60 objects with every primary and cursor simply absent -- so the plane
      * rbp's deck is on would not even be found. It is a property of the FILE. */
@@ -584,7 +726,7 @@ void vnc_capture_close(struct vnc_capture *c)
     int i;
     if (!c) return;
     for (i = 0; i < VNC_MAX_FBS; i++)
-        if (c->fbs[i].map) munmap(c->fbs[i].map, c->fbs[i].size);
+        drop_fb(c, &c->fbs[i]);
     if (c->fb) munmap(c->fb, c->fbsize);
     if (c->fbfd >= 0) close(c->fbfd);
     if (c->drmfd >= 0) close(c->drmfd);
@@ -714,6 +856,12 @@ int vnc_capture_frame(struct vnc_capture *c, uint16_t *dst)
     c->failed_planes = 0;
     c->bad_format = 0;
     c->no_geometry = 0;
+
+    /* Nothing mapped outlives the frame that mapped it -- not because the pixels go
+     * stale, but because the framebuffer ID they were looked up under is handed out
+     * again to a different buffer the moment rbp closes a drawer. See get_fb(). */
+    release_all_fbs(c);
+
     refresh_plane_list(c);
     refresh_geometry(c);
     for (i = 0; i < c->nplane_ids; i++)

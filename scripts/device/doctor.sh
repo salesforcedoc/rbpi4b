@@ -182,7 +182,7 @@ else
 	note "broken rather than misconfigured. Re-deploy a matching pair."
 fi
 
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh; do
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh bootscreen.py; do
 	[ -f "$RB_DEPLOY_ROOT/$s" ] || {
 		bad "$RB_DEPLOY_ROOT/$s is missing"
 		fix "scp scripts/device/$s root@<unit>:$RB_DEPLOY_ROOT/"
@@ -207,7 +207,7 @@ hdr 2 "shims: the deployed file and the copy rbp loads"
 # The list comes from RB_LD_PRELOAD itself (rb.conf:636), so a shim added to the
 # preload list is checked here without touching this script. basename of each
 # entry is also the deploy-root filename, which is exactly what start-rb.sh's
-# install_override() list mirrors (start-rb.sh:115-120).
+# install_override() list mirrors (start-rb.sh:148-161).
 _seen_preload=0
 for p in $(echo "${RB_LD_PRELOAD:-}" | tr ':' ' '); do
 	_seen_preload=$((_seen_preload + 1))
@@ -644,12 +644,33 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 		# use. That makes this line the only thing that ever says it is still there,
 		# which is exactly why it must exist: a warning that cannot fire is worse
 		# than no warning, because it reads as a check.
-		warn "RB_VNC_PASSWORD is still the shipped placeholder ('password')"
-		note "it is the first thing anyone would guess, and it is the only thing"
-		note "between this LAN and remote control of a live player once RB_VNC_INPUT"
-		note "is on. Fine while the viewer is off; set a real one before either the"
-		note "unit is left unattended on an untrusted network or input is enabled."
-		fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+		# The state that decides how loud this is: with the pointer on, the
+		# placeholder is not just a look at the screen, it is the decks. Read the
+		# way the server reads it (the switch file wins wherever it exists; the
+		# config is only the seed for a file that is not there yet).
+		_vi_file="${RB_VNC_INPUT_FILE:-/run/rblive4/vnc.input}"
+		if [ -f "$_vi_file" ]; then
+			_vi=$(tr -d ' \t\r\n' < "$_vi_file" 2>/dev/null | tr 'A-Z' 'a-z')
+		else
+			_vi=$(printf '%s' "${RB_VNC_INPUT:-0}" | tr -d ' \t\r\n' | tr 'A-Z' 'a-z')
+			case "$_vi" in
+				1|yes|true) _vi=on ;;
+				*)          _vi=off ;;
+			esac
+		fi
+		if [ "$_vi" = "on" ]; then
+			bad "RB_VNC_PASSWORD is the shipped placeholder ('password') AND the pointer is ON"
+			note "anyone on this LAN who guesses it can press the buttons of a live"
+			note "player: $_vi_file says 'on', so a click in the picture is a real"
+			note "press on the glass. This is the state to leave only on a bench."
+			fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+		else
+			warn "RB_VNC_PASSWORD is still the shipped placeholder ('password')"
+			note "it is the first thing anyone would guess. The pointer is off, so"
+			note "today it buys a look at the screen -- but set a real one before the"
+			note "unit is left unattended, and before RB_VNC_INPUT is turned on."
+			fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+		fi
 	fi
 
 	# Read exactly as the server reads it (vnc_mode_parse): blanks and case are
@@ -681,6 +702,61 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 	else
 		ok "control page on port $_vhttp (RB_VNC_HTTP_PORT); it opens full screen, tap for the words"
 	fi
+fi
+
+# The boot-progress screen. Gated like the player, not like the viewer (it is a
+# screen FOR the player), but reported in the same breath. Each way it can look
+# installed and not work:
+#   * python3 missing, so the unit's ConditionPathExists skips it in silence;
+#   * the unit disabled while RB_BOOTSCREEN=1, so the gap stays black;
+#   * the rendezvous directory absent, so the launcher's first boot.log lines die
+#     (rb_bootmsg mkdir -p's defensively, so this is belt, not the only hold-up).
+BOOT_UNIT=/etc/systemd/system/rblive4-boot.service
+if [ -f "$BOOT_UNIT" ]; then
+	_bum=$(stat -c '%a' "$BOOT_UNIT" 2>/dev/null || echo '?')
+	if [ "$_bum" = "644" ]; then
+		ok "rblive4-boot.service installed, mode 644"
+	else
+		warn "rblive4-boot.service mode is $_bum (644 is what install.sh sets)"
+	fi
+	if command -v python3 >/dev/null 2>&1; then
+		ok "python3 present ($(command -v python3)) — the screen can run"
+	else
+		bad "python3 is not installed — ConditionPathExists skips rblive4-boot in silence"
+		note "the player is unaffected; the boot screen simply never appears."
+		fix "apt-get install python3 && systemctl restart rblive4-boot"
+	fi
+	if command -v systemctl >/dev/null 2>&1; then
+		_ben=$(systemctl is-enabled rblive4-boot.service 2>/dev/null || echo unknown)
+		if [ "${RB_AUTOSTART:-1}" = "1" ] && [ "${RB_BOOTSCREEN:-1}" = "1" ]; then
+			case "$_ben" in
+				enabled) ok "enabled — the boot screen draws from first light (RB_BOOTSCREEN=1)";;
+				*)       bad "RB_BOOTSCREEN=1 but rblive4-boot.service is '$_ben'"
+				         fix "systemctl enable rblive4-boot";;
+			esac
+		else
+			case "$_ben" in
+				enabled) warn "rblive4-boot.service is enabled but RB_BOOTSCREEN=${RB_BOOTSCREEN:-1}/RB_AUTOSTART=${RB_AUTOSTART:-1} — the next install will disable it";;
+				*)       ok "disabled (RB_BOOTSCREEN=${RB_BOOTSCREEN:-1}, RB_AUTOSTART=${RB_AUTOSTART:-1})";;
+			esac
+		fi
+	fi
+else
+	warn "/etc/systemd/system/rblive4-boot.service is not installed — no boot screen"
+	note "install.sh installs and enables it with the player (RB_BOOTSCREEN=1)."
+	fix "sh $RB_DEPLOY_ROOT/install.sh"
+fi
+if [ -f /etc/tmpfiles.d/rblive4.conf ]; then
+	ok "tmpfiles.d/rblive4.conf present — /run/rblive4 exists from sysinit"
+else
+	warn "no /etc/tmpfiles.d/rblive4.conf — the launcher's first boot.log lines can race the directory"
+	note "rb_bootmsg mkdir -p's defensively, so this is belt rather than the only"
+	note "thing holding the directory up; install.sh installs the drop-in."
+	fix "sh $RB_DEPLOY_ROOT/install.sh"
+fi
+# The screen's own word on what it did last boot — a breadcrumb, never a fault.
+if [ -f /run/rblive4/boot.stage ]; then
+	note "last boot-screen stage: $(cat /run/rblive4/boot.stage 2>/dev/null)"
 fi
 
 # pids_matching, not `ps | awk`: the same lookup start-rb.sh uses (start-rb.sh:269),
