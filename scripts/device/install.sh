@@ -16,6 +16,11 @@
 # RB_AUTOSTART=0 (rb.conf, or rb.local.conf to override it per machine) installs
 # the unit but leaves it disabled, for a target being brought up by hand.
 #
+# vncserve is COMPILED HERE, ON THE UNIT, and the install aborts with the
+# compiler's own output if that fails -- there is no cross-toolchain in this tree
+# that can produce a hard-float armhf binary. RB_VNC=1 (rb.local.conf) installs and
+# enables the VNC viewer's unit; RB_VNC=0 (the default) installs it disabled.
+#
 # RB_DEPLOY_ROOT overrides the destination:
 #   sudo RB_DEPLOY_ROOT=/srv/rblive4 sh install.sh /tmp/rbpi4b-pi4.tgz
 
@@ -153,7 +158,7 @@ fi
 # reader standing at the machine finds the installer that made the tree, not a
 # gap where it used to be. Copying a running shell script is fine -- sh reads it
 # a line at a time and holds its own descriptor.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh install.sh uninstall.sh rb.conf; do
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh install.sh uninstall.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
@@ -345,6 +350,66 @@ if [ -f "$DEPLOY/rbp-audio" ]; then
     sh $HERE/doctor.sh"
 fi
 
+# --- vncserve: compiled ON THE UNIT, in a staging directory ------------------
+#
+# WHY THERE IS A BUILD STEP IN AN INSTALLER AT ALL. vncserve cannot be shipped in
+# the tarball, because there is no toolchain in this tree that can produce it: the
+# cross-image is soft-float armel and the unit's userland is hard-float armhf. The
+# unit has its own gcc and make, so it builds its own. See
+# scripts/device/vncserve/Makefile for the long version and for why `make all`
+# exiting 0 there proves nothing.
+#
+# WHY IT DOES NOT BUILD IN PLACE, and this is the part that would bite silently.
+# install_artifact's "no source -> return 0, in silence" shape is how a deploy looks
+# clean and ships nothing, so a compile failure here aborts the install with the
+# compiler's own output rather than a summary of it. And the build does NOT run in
+# $DEPLOY/vncserve: `cc -o vncserve` truncates the output file in place, and if a
+# running rblive4-vnc has that binary mapped, the truncation is a SIGBUS in the
+# operator's live view (the same trap as replacing any mapped .so -- stage beside it
+# and rename). So it compiles into $DEPLOY/.vnc-build.$$, and only the finished
+# binary is renamed into place.
+VNC_SRC="$HERE/vncserve"
+VNC_DST="$DEPLOY/vncserve"
+
+if [ ! -d "$VNC_SRC" ]; then
+  warn "vncserve/ is not beside install.sh, so the VNC viewer was not built. If
+  rblive4-vnc.service is enabled it will restart-loop on a missing binary; either
+  install from a complete checkout, or set RB_VNC=0 in $DEPLOY/rb.local.conf."
+elif ! command -v make >/dev/null 2>&1; then
+  warn "make is not installed on this unit, so vncserve was not built. Install it
+  with 'apt-get install -y make gcc' and run install.sh again."
+elif ! command -v cc >/dev/null 2>&1; then
+  warn "cc is not installed on this unit, so vncserve was not built. Install it with
+  'apt-get install -y gcc' and run install.sh again."
+else
+  # A fresh staging directory every time, so a stale object from an earlier failed
+  # run can never be linked into this one.
+  VNC_STAGE="$DEPLOY/.vnc-build.$$"
+  rm -rf "$VNC_STAGE"
+  mkdir -p "$VNC_STAGE"
+  # shellcheck disable=SC2086
+  cp "$VNC_SRC"/*.c "$VNC_SRC"/*.h "$VNC_SRC"/Makefile "$VNC_STAGE/"
+
+  if make -C "$VNC_STAGE" >"$VNC_STAGE/build.log" 2>&1; then
+    # The sources are kept in the deploy root, like install.sh itself: a reader
+    # standing at the machine finds what built the binary, not a gap.
+    mkdir -p "$VNC_DST"
+    # shellcheck disable=SC2086
+    cp "$VNC_SRC"/*.c "$VNC_SRC"/*.h "$VNC_SRC"/Makefile "$VNC_DST/"
+    install -m 755 -o root -g root "$VNC_STAGE/vncserve" "$VNC_DST/vncserve.new.$$"
+    mv -f "$VNC_DST/vncserve.new.$$" "$VNC_DST/vncserve"
+    say "  vncserve: built on the unit and installed to $VNC_DST/vncserve"
+  else
+    cat "$VNC_STAGE/build.log" >&2
+    rm -rf "$VNC_STAGE"
+    die "vncserve did not compile -- the compiler's own output is above. The install
+  stopped here rather than continue with a viewer that is not on the unit. A
+  pre-existing $VNC_DST/vncserve, if any, is UNCHANGED and still runs; fix the
+  source and run install.sh again."
+  fi
+  rm -rf "$VNC_STAGE"
+fi
+
 # --- systemd autostart ------------------------------------------------------
 #
 # The unit is installed from here rather than shipped in the tarball, so the
@@ -381,6 +446,28 @@ else
   warn "healthwatch.service is not in $HERE -- a wedged unit will leave no record.
   This is the unit that writes /opt/rblive4/log/health.log and /tmp/health.log,
   and its log is the only thing that survives the wedge it is there to describe."
+fi
+
+# The VNC viewer: a unit of its own, for the reason vnc-run.sh's header gives -- a
+# fault in the viewer must not take the player with it, and RB_VNC=0 has to mean the
+# process is not started at all. Unlike rblive4.service it is INSTALLED ONLY WHEN THE
+# BINARY EXISTS: vnc-run.sh exits 1 on a missing binary by design, and a unit with
+# Restart=always pointed at that would restart-loop every ten seconds and write the
+# same three lines to the journal forever. A stale unit from an earlier install is
+# removed in the same breath, so "no binary" leaves no way to loop.
+VNC_UNIT=/etc/systemd/system/rblive4-vnc.service
+if [ -f "$HERE/rblive4-vnc.service" ]; then
+  if [ -x "$DEPLOY/vncserve/vncserve" ]; then
+    install -m 644 -o root -g root "$HERE/rblive4-vnc.service" "$VNC_UNIT"
+    say "installed $VNC_UNIT"
+  else
+    rm -f "$VNC_UNIT" 2>/dev/null || true
+    warn "rblive4-vnc.service was NOT installed: $DEPLOY/vncserve/vncserve is not
+  there, so the unit would restart-loop on a missing binary. The reason the build
+  did not happen is in this script's output above."
+  fi
+else
+  warn "rblive4-vnc.service is not in $HERE -- the screen cannot be shared over VNC"
 fi
 
 # Persistent journal: the file's own header says why (a brownout's evidence is
@@ -446,6 +533,33 @@ if command -v systemctl >/dev/null 2>&1; then
     else
       systemctl disable healthwatch.service >/dev/null 2>&1 || true
       say "healthwatch.service installed but DISABLED with the player (RB_AUTOSTART=${RB_AUTOSTART:-1})"
+    fi
+  fi
+
+  # The viewer is gated on RB_VNC and NOT on RB_AUTOSTART, deliberately. A unit
+  # brought up by hand for a show is exactly the unit someone wants to watch from
+  # the desk, and a unit that autostarts rbp is not made more or less safe by a
+  # read-only VNC listener either way. RB_VNC defaults to 0 in rb.conf, so this is
+  # opt-in and an install that never touches it changes nothing.
+  if [ -f "$VNC_UNIT" ]; then
+    # The two ports, resolved exactly the way vnc-run.sh resolves them, so this
+    # summary cannot name a port the server will not actually open. They are one
+    # number and one +1 unless rb.local.conf has said otherwise.
+    VNC_P="${RB_VNC_PORT:-5900}"
+    VNC_H="${RB_VNC_HTTP_PORT:-$((VNC_P + 1))}"
+    if [ "${RB_VNC:-0}" = "1" ]; then
+      if systemctl enable rblive4-vnc.service >/dev/null 2>&1; then
+        say "rblive4-vnc.service enabled -- the screen is served on port $VNC_P (RB_VNC=1)"
+        say "  control page http://<this host>:$VNC_H/   (opens full screen; tap the picture for the words)"
+      else
+        warn "could not enable rblive4-vnc.service; start it by hand with
+  systemctl enable --now rblive4-vnc.service"
+      fi
+    else
+      systemctl disable rblive4-vnc.service >/dev/null 2>&1 || true
+      say "rblive4-vnc.service installed but DISABLED (RB_VNC=${RB_VNC:-0})"
+      say "  to share the screen: set RB_VNC=1 in $DEPLOY/rb.local.conf, then"
+      say "  systemctl enable --now rblive4-vnc"
     fi
   fi
 fi

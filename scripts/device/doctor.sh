@@ -588,6 +588,101 @@ if command -v systemctl >/dev/null 2>&1; then
 	fi
 fi
 
+# The VNC viewer, on the same terms. Gated rather than checked unconditionally:
+# RB_VNC=0 is the shipped default and means the viewer is deliberately not
+# installed, so "not installed" is only a fault on a unit that asked for one. Each
+# check below is a way the feature can look installed and not work:
+#   * the unit restart-looping every ten seconds on a binary that is not there;
+#   * the unit enabled while RB_VNC says off, which the next install will quietly
+#     disable -- and then VNC "stopped working" with nothing having changed;
+#   * an EMPTY PASSWORD, which macOS's Screen Sharing refuses while never using the
+#     word "password" in the error it shows;
+#   * a control file holding something the server will not parse, so a change made
+#     on the web page silently did nothing.
+if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; then
+	VNC_BIN="$RB_DEPLOY_ROOT/vncserve/vncserve"
+	if [ -x "$VNC_BIN" ]; then
+		ok "vncserve built on the unit: $VNC_BIN"
+	else
+		bad "$VNC_BIN is missing or not executable"
+		note "install.sh compiles it here with the unit's own gcc, and aborts with the"
+		note "compiler's output if that fails. There is no cross-toolchain in this"
+		note "tree that can produce a hard-float armhf binary."
+		fix "sh $RB_DEPLOY_ROOT/install.sh"
+	fi
+
+	if command -v systemctl >/dev/null 2>&1; then
+		if [ -f /etc/systemd/system/rblive4-vnc.service ]; then
+			_ven=$(systemctl is-enabled rblive4-vnc.service 2>/dev/null || echo unknown)
+			if [ "${RB_VNC:-0}" = "1" ]; then
+				case "$_ven" in
+					enabled) ok "rblive4-vnc.service enabled — the screen is on port ${RB_VNC_PORT:-5900}";;
+					*)       bad "RB_VNC=1 but rblive4-vnc.service is '$_ven'";
+					         fix "systemctl enable --now rblive4-vnc";;
+				esac
+			else
+				case "$_ven" in
+					enabled) warn "rblive4-vnc.service is enabled but RB_VNC=${RB_VNC} — the next install will disable it";;
+					*)       ok "rblive4-vnc.service disabled (RB_VNC=${RB_VNC})";;
+				esac
+			fi
+		elif [ "${RB_VNC:-0}" = "1" ]; then
+			bad "RB_VNC=1 but /etc/systemd/system/rblive4-vnc.service is not installed"
+			note "install.sh installs it only when the binary exists, so the two are"
+			note "missing together."
+			fix "sh $RB_DEPLOY_ROOT/install.sh"
+		fi
+	fi
+
+	if [ -z "${RB_VNC_PASSWORD:-}" ]; then
+		bad "RB_VNC_PASSWORD is empty"
+		note "macOS's Screen Sharing will not connect to a server that asks for no"
+		note "password at all, and its error message does not mention passwords."
+		fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+	elif [ "${RB_VNC_PASSWORD}" = "password" ]; then
+		# rb.conf ships this placeholder on purpose, so the feature works on first
+		# use. That makes this line the only thing that ever says it is still there,
+		# which is exactly why it must exist: a warning that cannot fire is worse
+		# than no warning, because it reads as a check.
+		warn "RB_VNC_PASSWORD is still the shipped placeholder ('password')"
+		note "it is the first thing anyone would guess, and it is the only thing"
+		note "between this LAN and remote control of a live player once RB_VNC_INPUT"
+		note "is on. Fine while the viewer is off; set a real one before either the"
+		note "unit is left unattended on an untrusted network or input is enabled."
+		fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+	fi
+
+	# Read exactly as the server reads it (vnc_mode_parse): blanks and case are
+	# forgiven, anything that is not raw/hwjpeg is refused and the running mode is
+	# kept. A file holding junk therefore looks like a switch that does nothing.
+	VNC_MODE_FILE="${RB_VNC_MODE_FILE:-/run/rblive4/vnc.mode}"
+	if [ -f "$VNC_MODE_FILE" ]; then
+		_vm=$(tr -d ' \t\r\n' < "$VNC_MODE_FILE" 2>/dev/null | tr 'A-Z' 'a-z')
+		case "$_vm" in
+			raw|hwjpeg) ok "mode file says '$_vm' ($VNC_MODE_FILE)";;
+			*) warn "mode file says '$_vm', which the server refuses — it keeps the mode it has"
+			   note "the page's buttons write this file; a hand edit must be 'raw' or 'hwjpeg'"
+			   fix "printf 'raw\\n' > $VNC_MODE_FILE";;
+		esac
+	elif [ "${RB_VNC:-0}" = "1" ]; then
+		note "no $VNC_MODE_FILE yet — the server writes it on the first change;"
+		note "the mode it started with is in $RB_LOG_DIR/vncserve.log"
+	fi
+
+	# The control page opens in its full-screen state -- every word hidden, picture
+	# alone on black -- and a tap on the picture toggles them. It was a second port
+	# (`RB_VNC_PREVIEW_PORT`) until the operator asked for it to be a tap instead, so
+	# there is nothing here to check beyond the page itself -- no extra listener, and
+	# therefore no extra way for one to be quietly absent.
+	_vport="${RB_VNC_PORT:-5900}"
+	_vhttp="${RB_VNC_HTTP_PORT:-$((_vport + 1))}"
+	if [ "$_vhttp" = "0" ]; then
+		note "no pages at all (RB_VNC_HTTP_PORT=0); the preview is off with them"
+	else
+		ok "control page on port $_vhttp (RB_VNC_HTTP_PORT); it opens full screen, tap for the words"
+	fi
+fi
+
 # pids_matching, not `ps | awk`: the same lookup start-rb.sh uses (start-rb.sh:269),
 # so doctor and the launcher cannot disagree about which process is rbp. The
 # empty-pattern guard is not decoration: pids_matching() treats its argument as

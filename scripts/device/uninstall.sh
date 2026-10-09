@@ -128,8 +128,8 @@ MOUNTS_NOW=$(_mounts_under | wc -l | tr -d ' ')
 echo
 say "this will remove rbpi4b from this unit:"
 echo "    deploy root   $DEPLOY   ($MOUNTS_NOW mount(s) under it will be unmounted first)"
-echo "    units         rblive4.service, healthwatch.service (stopped and disabled)"
-echo "    unit files    /etc/systemd/system/{rblive4,healthwatch}.service"
+echo "    units         rblive4.service, healthwatch.service, rblive4-vnc.service (stopped and disabled)"
+echo "    unit files    /etc/systemd/system/{rblive4,healthwatch,rblive4-vnc}.service"
 echo "    state         /var/lib/rblive4"
 echo "    journal drop-in  /etc/systemd/journald.conf.d/persistent.conf"
 echo "    boot changes  reverted by boot-trim.sh revert (services, cloudinit, apt, unit, bootfiles)"
@@ -168,8 +168,12 @@ fi
 say "stopping the units"
 x_systemctl stop healthwatch.service
 x_systemctl stop rblive4.service
+# The viewer is independent of the player, so it is stopped too rather than being
+# left serving a screen nobody asked for after the tree it lives in is gone.
+x_systemctl stop rblive4-vnc.service
 x_systemctl disable healthwatch.service
 x_systemctl disable rblive4.service
+x_systemctl disable rblive4-vnc.service
 
 # --- 2. boot trim, BEFORE anything is deleted --------------------------------
 #
@@ -269,6 +273,7 @@ fi
 say "removing the unit files"
 x_rm /etc/systemd/system/rblive4.service
 x_rm /etc/systemd/system/healthwatch.service
+x_rm /etc/systemd/system/rblive4-vnc.service
 # boot-trim's `revert unit` drop-in, if a revert left it behind.
 x_rm /etc/systemd/system/rblive4.service.d
 x_systemctl daemon-reload

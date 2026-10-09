@@ -23,7 +23,9 @@ below into the deploy root (`/opt/rblive4` by default). So a unit needs
 ├── display-watch.sh monitor geometry change -> restart the unit
 ├── boot-trim.sh     the boot-time trim, and its own inverse
 ├── healthwatch.sh   the wedge recorder, run by healthwatch.service
-├── log/             rbp.log, edb_streamd.log, usbwatch.log, displaywatch.log
+├── vnc-run.sh       the VNC viewer's launcher, run by rblive4-vnc.service
+├── vncserve/        the viewer itself: sources + the binary built HERE, on the unit
+├── log/             rbp.log, edb_streamd.log, usbwatch.log, displaywatch.log, vncserve.log
 ├── media/usb1/sda1  where a stick is mounted (host side)
 └── rbx3-run/        the soft-float ARM32 chroot: player, shims, DirectFB
 ```
@@ -38,8 +40,10 @@ below into the deploy root (`/opt/rblive4` by default). So a unit needs
 | `display-watch.sh` | `start`/`stop`/`status`/`run`/`baseline` (`--dry-run` on the first two). Compares the framebuffer's geometry against the one `rbp` was launched with and restarts the unit when it changes — the driver and the pointer each read the real geometry once and hold it, so a monitor swap otherwise leaves a sheared or blank picture until someone intervenes. Bounded by a cooldown and a per-boot cap, so a flapping monitor cannot become a restart loop. |
 | `boot-trim.sh` | `apply`/`revert`/`status`/`report` (`items`: `services cloudinit apt unit bootfiles`). The boot-time trim, run by `install.sh` and reversible: it persists the service masks so the launcher's step 1 stops reloading systemd for no-ops, turns cloud-init off, takes the apt timers off the boot path, and ensures the `/boot/firmware` tokens and directives. `report` prints the boot's monotonic milestones so a before/after is a diff. |
 | `healthwatch.sh` | Run by `healthwatch.service`, not by hand. Records *why* the unit wedges: a seq-numbered round every 15 s to `/opt/rblive4/log/health.log` (survives a reboot) **and** `/tmp/health.log` (survives a disk stall — read it before rebooting), probing the symptom itself with a loopback `:22` banner read. A gap in the sequence numbers is itself evidence that the recorder was not scheduled either. |
+| `vnc-run.sh` | Run by `rblive4-vnc.service`, not by hand. Sources `lib.sh` + `rb.conf` and execs `vncserve/vncserve` with the `RB_VNC_*` values. A unit of its own rather than a branch in `start-rb.sh`, so a fault in the viewer cannot take the player down and `RB_VNC=0` costs nothing at all. Deliberately has **no ordering dependency** on `rblive4.service`: with the player down it serves an honest black screen with the drawers on it, which is a useful thing to look at while working out why the player is down. |
+| `vncserve/` | The viewer: rbp's screen over RFB, with a runtime `raw` ↔ `hwjpeg` switch. Hand-rolled (a subset needing only libc) because `libvncserver` cannot be handed a JPEG we already encoded, and the hardware encoder is the entire point. Two ports: the session (`RB_VNC_PORT`) and the control page, which carries the mode switch, the live preview, and the full-screen view — **the state it opens in**; tap the picture for the words. **Built here on the unit by `install.sh`** — see the note below. |
 | `uninstall.sh` | `--dry-run`/`--yes`/`--purge`. The inverse of `install.sh`, and the reason it is a script is the order: stop the units, `boot-trim.sh revert` **before** anything is deleted (it lives inside the tree being removed, and it is the only thing that knows how to restore `/boot/firmware` and re-enable the services the trim disabled), then unmount the six mounts under the deploy root and **re-read `/proc/mounts` and refuse while anything remains** — an `rm -rf` over a live bind mount descends through it, and one of the six is the host's own `/dev`. Preserves `rb.local.conf` to `/root` unless `--purge`, and never writes to, deletes from or repairs the USB media. |
-| `lib.sh` | Sourced by seven of the others (`boot-trim`, `display-watch`, `doctor`, `fix-dev`, `install`, `start-rb`, `usb-watch`) — not run directly. `healthwatch.sh` deliberately does not: it has to keep working when the rest of the box does not. |
+| `lib.sh` | Sourced by eight of the others (`boot-trim`, `display-watch`, `doctor`, `fix-dev`, `install`, `start-rb`, `usb-watch`, `vnc-run`) — not run directly. `healthwatch.sh` deliberately does not: it has to keep working when the rest of the box does not. |
 
 ## Notes
 
@@ -98,6 +102,27 @@ below into the deploy root (`/opt/rblive4` by default). So a unit needs
   candidate. It carries the `HDMI-A-1` `video=` token only; `status bootfiles`
   names the `HDMI-A-2` gap rather than closing it, because that token is S10.8's
   precondition, not a boot-time trim.
+
+* **`vncserve` is compiled on the unit, by `install.sh`, and that is not a
+  shortcut — there is no toolchain in this tree that can produce it.** The
+  `rblive4-build` image is soft-float **armel**; this unit's userland is
+  hard-float **armhf**, and the image has no `arm-linux-gnueabihf-gcc` and no
+  hard-float `libc.a`. It would exit 0 having built nothing, which is exactly why
+  the compile is a step in `install.sh` that **aborts the install with the
+  compiler's own output** on failure instead of a summary of it. The build runs in
+  `$DEPLOY/.vnc-build.$$` and only the finished binary is renamed into
+  `$DEPLOY/vncserve/` — `cc -o` truncates its output in place, and a running
+  `rblive4-vnc` has that binary mapped, so building in place would `SIGBUS` the
+  operator's live view. `make -C scripts/device` builds it on the workstation too,
+  with the **host** compiler and ignoring `CROSS`, so a compile error surfaces here
+  rather than at install time; `make -C scripts/device test` runs its six
+  pure-module suites natively — `vnc_compose` 90, `vnc_des` 11, `vnc_diff` 24,
+  `vnc_mode` 31, `vnc_rfb` 108, `vnc_zlib` 231, **495 checks** — which is a
+  deliberate difference from `scripts/shims/`, whose tests are soft-float armel under
+  `qemu`. **`test_vnc_zlib` cannot run on the unit** — it includes `<zlib.h>` and the
+  unit carries zlib's *runtime*, not its headers — so `make test` there stops at it;
+  build and run that one on the workstation, or name the other five explicitly. The
+  unit's `Makefile` links `-l:libz.so.1` directly for the same reason.
 
 * `timeout.c` / `make` here build a static `timeout` for targets without
   coreutils. **Not needed on Pi OS**, which has `/usr/bin/timeout` — that is what

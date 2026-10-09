@@ -68,6 +68,15 @@ Thumbs.db
 /scripts/shims/netcheck
 /scripts/shims/controllers_cli
 /scripts/device/timeout
+
+# vncserve is built ON THE UNIT (scripts/device/install.sh), and `make -C
+# scripts/device` builds a host-native copy only so a compile error surfaces on
+# the workstation instead of at install time. Neither is a source file. Same
+# negation shape as the shims above: keep test_*.c, drop the binaries.
+/scripts/device/vncserve/vncserve
+/scripts/device/vncserve/test_*
+!/scripts/device/vncserve/test_*.c
+/scripts/device/vncserve/*.o
 __pycache__/
 
 # This machine's unit address and ssh key, read by tools/fbwatch.py

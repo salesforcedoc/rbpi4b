@@ -1,0 +1,45 @@
+[Unit]
+Description=rblive4-vnc - rbp's screen over VNC, with the raw/hwjpeg switch
+Documentation=https://github.com/salesforcedoc/rbpi4b/blob/main/docs/19-vnc.md
+After=basic.target
+# NOT After=rblive4.service, deliberately. The viewer reads the framebuffer and the
+# DRM planes; it does not need the player to be running, and with the player down it
+# serves an honest black screen with the drawers on it -- which is a useful thing to
+# be able to look at while working out why the player is down. An ordering here would
+# also mean a restart of rbp dragged the VNC session down with it, cutting off the
+# operator's view at exactly the moment they want it.
+#
+# It does need /dev/fb0 and /dev/dri/card1 to exist, which is the same assumption
+# rblive4.service makes and for the same reason (basic.target is when udev has done
+# its coldplug). If those are missing the server fails to start, Restart=always
+# retries, and the reason is in the journal -- not a black screen with no explanation.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The deployed absolute path, not a wrapper or a symlink: vnc-run.sh finds lib.sh
+# through `dirname "$0"`, exactly as start-rb.sh does.
+ExecStart=/opt/rblive4/vnc-run.sh
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Restart=always
+# Ten seconds, matching rblive4. Short enough that an operator who reboots the unit
+# does not sit looking at a dead vnc:// window, long enough that a genuinely broken
+# server does not become a fork bomb.
+RestartSec=10
+# The server itself is a clean poll loop with no children and no forking, so there is
+# nothing to wait for and nothing to reap: a stop is immediate.
+TimeoutStopSec=10
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rblive4-vnc
+# Deliberately NOT set:
+#   PrivateTmp= -- the mode file is expected to live under /run and the log under
+#     the deploy root, but rb.local.conf may point the mode file anywhere, and a
+#     private /tmp would silently break a configuration that used it.
+#   ConditionPathExists=/dev/fb0 -- same reasoning as rblive4.service: a unit
+#     powered on before its display would then never start. A viewer, especially,
+#     should keep trying.
+
+[Install]
+WantedBy=multi-user.target
