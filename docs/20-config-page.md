@@ -69,6 +69,14 @@ not offer to change either.
 | `RB_CONF_BIND` | `0.0.0.0` | what it binds |
 | `RB_CONF_REFRESH_S` | `5` | the page's self-reload interval, seconds; `0` disables |
 
+**The credential is `RB_PASSWORD`, and it is one password for two surfaces** — the page's
+writes, and the viewer's VNC clients. It defaults to `password` so the feature works out of
+the box, which is a deliberate temporary choice: it is the first thing anyone would guess, and
+it now stands between the LAN and editing this unit's configuration and restarting the player.
+`RB_VNC_PASSWORD` is the same credential under its old name and **derives** from `RB_PASSWORD`
+unless set explicitly, so existing `rb.local.conf` files keep working; `doctor.sh` warns while
+the value is still the placeholder, and warns separately if the two names have been set apart.
+
 `RB_CONF` and the port are the only two an install consults; the rest the service reads
 itself at startup, and **every path and command it uses can be overridden by an environment
 variable** — which is what lets `test_confscreen.py` run it against a fake unit on a

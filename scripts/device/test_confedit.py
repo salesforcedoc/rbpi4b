@@ -237,12 +237,47 @@ def test_create_and_lock(tmp, m):
           "and BOTH values are in the file -- neither writer's edit was lost")
 
 
+def test_password_wiring(m):
+    """ONE credential, under ONE name -- pinned by sourcing the shipped rb.conf, not by
+    reading it. `RB_PASSWORD` is the knob (the page writes it); `RB_VNC_PASSWORD` is the
+    name vnc-run.sh and doctor.sh already read, and it must COME OUT equal unless someone
+    sets it apart deliberately. The operator asked for this by name on 2026-10-09."""
+    print("\n== one password, two surfaces ==")
+    conf = os.path.join(HERE, "rb.conf")
+    tmp = tempfile.mkdtemp(prefix="confedit-pass.")
+
+    def resolve(extra=None):
+        env = dict(os.environ, RB_DEPLOY_ROOT=tmp)
+        env.update(extra or {})
+        r = subprocess.run(["/bin/sh", "-c",
+                            '. "$1"; printf "%s|%s" "$RB_PASSWORD" "$RB_VNC_PASSWORD"',
+                            "sh", conf], env=env, capture_output=True, text=True)
+        return r.stdout
+
+    try:
+        check(resolve() == "password|password",
+              "by default both names resolve to the shipped placeholder, so it works at once")
+        check(resolve({"RB_PASSWORD": "s3cret"}) == "s3cret|s3cret",
+              "setting RB_PASSWORD alone changes BOTH surfaces")
+        check(resolve({"RB_VNC_PASSWORD": "viewer-only"}) == "password|viewer-only",
+              "setting RB_VNC_PASSWORD alone still overrides the viewer, as before")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    e = m.BY_KEY.get("RB_PASSWORD")
+    check(e is not None, "RB_PASSWORD is a key the page may write")
+    check(e and e.get("secret"), "and it is marked secret, so the page never prints it")
+    check("RB_VNC_PASSWORD" not in m.BY_KEY,
+          "while RB_VNC_PASSWORD is not writable from the page -- it is the alias, not the knob")
+
+
 def main():
     m = load()
     test_schema(m)
     test_validate(m)
     test_read(m)
     test_set(m)
+    test_password_wiring(m)
     tmp = tempfile.mkdtemp(prefix="confedit-test.")
     try:
         test_write(tmp, m)

@@ -634,12 +634,13 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 		fi
 	fi
 
-	if [ -z "${RB_VNC_PASSWORD:-}" ]; then
-		bad "RB_VNC_PASSWORD is empty"
-		note "macOS's Screen Sharing will not connect to a server that asks for no"
-		note "password at all, and its error message does not mention passwords."
-		fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
-	elif [ "${RB_VNC_PASSWORD}" = "password" ]; then
+	if [ -z "${RB_PASSWORD:-}" ]; then
+		bad "RB_PASSWORD is empty"
+		note "the viewer needs a password or macOS's Screen Sharing will not connect at"
+		note "all (and its error message does not mention passwords); the configuration"
+		note "page refuses writes when it is empty, which is the safer of the two."
+		fix "printf 'RB_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+	elif [ "${RB_PASSWORD}" = "password" ]; then
 		# rb.conf ships this placeholder on purpose, so the feature works on first
 		# use. That makes this line the only thing that ever says it is still there,
 		# which is exactly why it must exist: a warning that cannot fire is worse
@@ -659,18 +660,32 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 			esac
 		fi
 		if [ "$_vi" = "on" ]; then
-			bad "RB_VNC_PASSWORD is the shipped placeholder ('password') AND the pointer is ON"
+			bad "RB_PASSWORD is the shipped placeholder ('password') AND the pointer is ON"
 			note "anyone on this LAN who guesses it can press the buttons of a live"
 			note "player: $_vi_file says 'on', so a click in the picture is a real"
-			note "press on the glass. This is the state to leave only on a bench."
-			fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+			note "press on the glass. This is the state to leave only on a bench. It is"
+			note "also the CONFIGURATION PAGE's password, which can edit this unit and"
+			note "restart the player, so the placeholder is reachable from a browser too."
+			fix "printf 'RB_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
 		else
-			warn "RB_VNC_PASSWORD is still the shipped placeholder ('password')"
-			note "it is the first thing anyone would guess. The pointer is off, so"
-			note "today it buys a look at the screen -- but set a real one before the"
-			note "unit is left unattended, and before RB_VNC_INPUT is turned on."
-			fix "printf 'RB_VNC_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
+			warn "RB_PASSWORD is still the shipped placeholder ('password')"
+			note "it is the first thing anyone would guess. The pointer is off, so today"
+			note "it buys a look at the screen -- but it is ALSO the configuration page's"
+			note "password, and that page can write settings and restart the player, so"
+			note "set a real one before the unit is left unattended."
+			fix "printf 'RB_PASSWORD=<something>\\n' >> $RB_DEPLOY_ROOT/rb.local.conf"
 		fi
+	fi
+
+	# The two names can be set apart -- RB_VNC_PASSWORD derives from RB_PASSWORD unless it
+	# is set explicitly -- and if they have been, the viewer and the page stop sharing a
+	# credential without anything saying so. Worth a line, because the whole point of the
+	# pair is that one password covers both.
+	if [ "${RB_VNC_PASSWORD:-$RB_PASSWORD}" != "${RB_PASSWORD:-}" ]; then
+		warn "RB_VNC_PASSWORD is set to a DIFFERENT value from RB_PASSWORD"
+		note "the viewer uses RB_VNC_PASSWORD and the configuration page uses"
+		note "RB_PASSWORD, so the two surfaces no longer share a credential. Set only"
+		note "RB_PASSWORD and delete the other line to get them back together."
 	fi
 
 	# Read exactly as the server reads it (vnc_mode_parse): blanks and case are

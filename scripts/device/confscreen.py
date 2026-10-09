@@ -79,6 +79,7 @@ CONF_KEYS = (
     "RB_VNC_MODE",
     "RB_VNC_LIVE",
     "RB_VNC_INPUT",
+    "RB_PASSWORD",
     "RB_BOOTSCREEN",
     "RB_PREWARM",
     "RB_POINT_KIND",
@@ -473,7 +474,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     for k in CONF_KEYS:
         v = conf.get(k, "")
         shown = "(empty)" if v == "" else v
-        if k == "RB_VNC_PASSWORD":
+        if k in ("RB_PASSWORD", "RB_VNC_PASSWORD"):
             shown = "(set)"
         a("<tr><td class=k>%s</td><td>%s</td></tr>" % (esc(k), esc(shown)))
     lie = conf.get("RB_FB_LIE_BPP", "")

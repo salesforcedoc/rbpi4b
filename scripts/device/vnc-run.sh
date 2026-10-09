@@ -103,9 +103,10 @@ if [ -z "$RB_VNC_PASSWORD" ]; then
     # Screen Sharing will not connect to a server that offers no password at all, so
     # an empty password here is not "open", it is "does not work", and the error the
     # client shows does not mention passwords.
-    echo "vnc-run: WARNING: RB_VNC_PASSWORD is empty. macOS's Screen Sharing refuses" >&2
+    echo "vnc-run: WARNING: the password is empty (RB_VNC_PASSWORD, which resolves" >&2
+    echo "vnc-run:          from RB_PASSWORD, is unset). macOS's Screen Sharing refuses" >&2
     echo "vnc-run:          a server that does not ask for a password, so the client" >&2
-    echo "vnc-run:          will fail to connect. Set RB_VNC_PASSWORD in" >&2
+    echo "vnc-run:          will fail to connect. Set RB_PASSWORD in" >&2
     echo "vnc-run:          \$RB_DEPLOY_ROOT/rb.local.conf." >&2
 fi
 

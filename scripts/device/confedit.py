@@ -102,11 +102,13 @@ SCHEMA = [
     dict(key="RB_VNC_MODE", group="basic", type=E, choices=["raw", "hwjpeg"], restart="viewer",
          risk="low", label="Startup encoding",
          help="raw or hwjpeg. The live choice is the switch file, which the page sets."),
-    dict(key="RB_VNC_PASSWORD", group="basic", type=S, secret=True,
+    dict(key="RB_PASSWORD", group="basic", type=S, secret=True,
          pattern=r"^[A-Za-z0-9._@%+=:-]{1,63}$", restart="viewer", risk="medium",
-         label="VNC and page password",
-         help="Also the password for this page's writes. macOS Screen Sharing requires one. "
-              "No spaces or quotes, and it is visible in the process list."),
+         label="Page and VNC password",
+         help="One credential for both: what this page asks before writing a setting or "
+              "restarting the player, and what the viewer asks a VNC client for. macOS "
+              "Screen Sharing requires one. No spaces or quotes, and it is visible in the "
+              "process list."),
 
     # --- advanced: the measured-per-unit values ---
     dict(key="RB_POINT_SWAP_XY", group="advanced", type=B, restart="player", risk="low",
