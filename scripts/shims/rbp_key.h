@@ -34,10 +34,24 @@ void *get_key_manager(void);
 /* rbp's keycode path. send_rx_key() is the common case; the _f/_fl forms carry
  * a float parameter (knobs and faders are 10-bit integers plus a normalised
  * float, and rbp's handlers read one or the other). All three are no-ops when
- * rbp is not up yet or not there at all. */
+ * rbp is not up yet or not there at all.
+ *
+ * THIS IS ALSO WHERE KEY_DUMP RECORDS. send_rx_key_fl() is the one place every
+ * command reaches rbp, from every source -- the maps, pointsrc's taps, the
+ * bridge's own calls -- so it is the one place a recorder can see them all in
+ * one order. See keylog.h; keylog_state.h is the file it writes. The recording
+ * is off unless KEY_DUMP names a path, and a caller needs no gate for it. */
 void send_rx_key(int keycode, int op, int ch, long param);
 void send_rx_key_f(int keycode, int op, int ch, long param, float fval);
 void send_rx_key_fl(int keycode, int op, int ch, long param, float fval,
                     long lval);
+
+/* Label the commands this THREAD is about to send, for the key dump's `src=`
+ * field. Called once beside each dispatcher ("midi" in ctrlshim.c's
+ * dispatch, "touch" in pointsrc.c's pointer_report, "evdev" on the non-MIDI
+ * path); NULL means no label. Per-thread, so one source cannot relabel another's
+ * events, and per-library -- see the note in rbp_key.c -- so it always reaches
+ * the copy of send_rx_key_fl its own caller uses. */
+void keylog_from(const char *src);
 
 #endif /* RBPI4B_RBP_KEY_H */

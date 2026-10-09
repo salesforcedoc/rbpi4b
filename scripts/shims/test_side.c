@@ -190,7 +190,10 @@ static void test_geometry(void)
     CHECK(SZ_BTN_X0 == SZ_PAD && SZ_BTN_X1 == SZ_W - 1 - SZ_PAD,
           "the button boxes are not the panel's inner width");
     CHECK(SZ_SYNC_Y1 == SZ_SYNC_Y0 + SZ_BTN_H - 1, "the SYNC box is not SZ_BTN_H tall");
-    CHECK(SZ_NUDGE_Y1 == SZ_NUDGE_Y0 + SZ_BTN_H - 1, "a nudge box is not SZ_BTN_H tall");
+    CHECK(SZ_NUDGE_Y1 == SZ_NUDGE_Y0 + SZ_NUDGE_H - 1, "a nudge box is not SZ_NUDGE_H tall");
+    CHECK(SZ_NUDGE_H * 2 == SZ_BTN_H,
+          "the nudge pair is %d rows where the operator asked for half of SZ_BTN_H's %d",
+          SZ_NUDGE_H, SZ_BTN_H / 2);
     CHECK(SZ_CUE_Y1 == SZ_CUE_Y0 + SZ_BTN_H - 1, "the CUE box is not SZ_BTN_H tall");
     CHECK(SZ_PLAY_Y1 == SZ_PLAY_Y0 + SZ_BTN_H - 1, "the PLAY box is not SZ_BTN_H tall");
     CHECK(SZ_READ_Y1 == SZ_READ_Y0 + SZ_LINE - 1, "the readout is not one line tall");
@@ -542,11 +545,11 @@ static void test_gesture_open(void)
     lift(SZ_LEFT, 90, SZ_SYNC_Y0 + 10, &act, &val);
     CHECK(act == SZ_ACT_SYNC, "SYNC did not fire in the pass");
     press(SZ_LEFT, (SZ_NUDGE_P_X0 + SZ_NUDGE_P_X1) / 2, SZ_NUDGE_Y0 + 10, &act, &val);
-    CHECK(act == SZ_ACT_NUDGE_FWD, "the '+' cell did not start a forward bend");
-    CHECK(side_nudging(SZ_LEFT) == 1, "side_nudging() does not see the forward bend");
+    CHECK(act == SZ_ACT_NUDGE_FWD, "the '+' cell did not move the tempo forward");
+    CHECK(side_nudging(SZ_LEFT) == 1, "side_nudging() does not see the forward nudge");
     lift(SZ_LEFT, (SZ_NUDGE_P_X0 + SZ_NUDGE_P_X1) / 2, SZ_NUDGE_Y0 + 10, &act, &val);
-    CHECK(act == SZ_ACT_NUDGE_STOP, "the bend did not stop on the lift");
-    CHECK(side_nudging(SZ_LEFT) == 0, "side_nudging() still reports a bend after the lift");
+    CHECK(act == SZ_ACT_NUDGE_STOP, "the restore did not fire on the lift");
+    CHECK(side_nudging(SZ_LEFT) == 0, "side_nudging() still reports a nudge after the lift");
     press(SZ_LEFT, 90, SZ_PLAY_Y0 + 10, &act, &val);
     lift(SZ_LEFT, 90, SZ_PLAY_Y0 + 10, &act, &val);
     CHECK(act == SZ_ACT_PLAY, "PLAY did not fire at the end of the pass");
@@ -567,20 +570,21 @@ static void test_gesture_open(void)
     CHECK(side_is_open(SZ_LEFT), "a rolled-off press closed the drawer");
     side_reset_all();
 
-    /* A ROLL-OFF OFF A NUDGE CELL IS NOT A BUTTON PRESS, but it does stop the bend --
-     * which is the important half: rbp keeps bending until it is told otherwise, so a
-     * bend that outlived its press would slide the track with nothing able to stop it. */
+    /* A ROLL-OFF OFF A NUDGE CELL IS NOT A BUTTON PRESS, but it does put the tempo
+     * back -- which is the important half: the press moved the tempo and only the lift
+     * restores it, so a nudge that outlived its press would leave the tempo moved with
+     * nothing on the glass saying why. */
     reset_all();
     open_by_swipe(SZ_LEFT);
     lift(SZ_LEFT, SZ_SWIPE_PX, 600, &act, &val);
     press(SZ_LEFT, (SZ_NUDGE_M_X0 + SZ_NUDGE_M_X1) / 2, SZ_NUDGE_Y0 + 10, &act, &val);
-    CHECK(act == SZ_ACT_NUDGE_REV, "the '-' cell did not start a backward bend");
-    CHECK(side_nudging(SZ_LEFT) == -1, "side_nudging() does not see the backward bend");
+    CHECK(act == SZ_ACT_NUDGE_REV, "the '-' cell did not move the tempo back");
+    CHECK(side_nudging(SZ_LEFT) == -1, "side_nudging() does not see the backward nudge");
     move(SZ_LEFT, 90, SZ_PLAY_Y0 + 10, &act, &val);     /* wandered down to PLAY */
     lift(SZ_LEFT, 90, SZ_PLAY_Y0 + 10, &act, &val);
-    CHECK(act == SZ_ACT_NUDGE_STOP, "a wander off the nudge cell did not stop the bend");
-    CHECK(act != SZ_ACT_PLAY, "a bend that wandered onto PLAY fired the transport");
-    CHECK(side_nudging(SZ_LEFT) == 0, "side_nudging() still reports a bend after a wander");
+    CHECK(act == SZ_ACT_NUDGE_STOP, "a wander off the nudge cell did not restore the tempo");
+    CHECK(act != SZ_ACT_PLAY, "a nudge that wandered onto PLAY fired the transport");
+    CHECK(side_nudging(SZ_LEFT) == 0, "side_nudging() still reports a nudge after a wander");
     side_reset_all();
 
     /* THE OUTWARD SWEEP dismisses mid-press, without waiting for the lift. */
@@ -823,35 +827,35 @@ static void test_nudging(void)
 {
     int act = 0, val = 0;
 
-    /* Nothing is bending on a quiet system, on either side. */
+    /* Nothing is nudging on a quiet system, on either side. */
     reset_all();
     CHECK(side_nudging(SZ_LEFT) == 0 && side_nudging(SZ_RIGHT) == 0,
-          "side_nudging() reports a bend with nothing down");
+          "side_nudging() reports a nudge with nothing down");
 
-    /* Only a SHUT drawer's entry column has no bend: the state is a function of a
+    /* Only a SHUT drawer's entry column has no nudge: the state is a function of a
      * press ON a nudge cell, and a press in the entry column is not one. */
     press(SZ_LEFT, 10, 400, &act, &val);
-    CHECK(side_nudging(SZ_LEFT) == 0, "an entry-column press reported a bend");
+    CHECK(side_nudging(SZ_LEFT) == 0, "an entry-column press reported a nudge");
     lift(SZ_LEFT, 10, 400, &act, &val);
     side_reset_all();
 
-    /* Held: the bend is visible for the whole press, not just at its edges -- which is
+    /* Held: the nudge is visible for the whole press, not just at its edges -- which is
      * exactly what the caller's reconciler reads in the device-loss path. */
     reset_all();
     open_by_swipe(SZ_LEFT);
     lift(SZ_LEFT, SZ_SWIPE_PX, 600, &act, &val);
     press(SZ_LEFT, (SZ_NUDGE_P_X0 + SZ_NUDGE_P_X1) / 2, SZ_NUDGE_Y0 + 10, &act, &val);
-    CHECK(side_nudging(SZ_LEFT) == 1, "a held '+' does not read as a forward bend");
-    CHECK(side_nudging(SZ_RIGHT) == 0, "the left drawer's bend showed on the right");
+    CHECK(side_nudging(SZ_LEFT) == 1, "a held '+' does not read as a forward nudge");
+    CHECK(side_nudging(SZ_RIGHT) == 0, "the left drawer's nudge showed on the right");
     move(SZ_LEFT, (SZ_NUDGE_P_X0 + SZ_NUDGE_P_X1) / 2, SZ_NUDGE_Y0 + 40, &act, &val);
-    CHECK(side_nudging(SZ_LEFT) == 1, "the bend was lost on a later motion report");
+    CHECK(side_nudging(SZ_LEFT) == 1, "the nudge was lost on a later motion report");
 
     /* THE SAFETY NET: side_reset_all() is what the touch device going away calls, and
-     * the caller's side_bend_sync() reads this to decide what to send. A reset must
-     * therefore report "no bend" or a vanished finger would leave the track sliding. */
+     * the caller's side_nudge_sync() reads this to decide what to send. A reset must
+     * therefore report "no nudge" or a vanished finger would leave the tempo moved. */
     side_reset_all();
     CHECK(side_nudging(SZ_LEFT) == 0,
-          "side_reset_all() left a bend on -- a lost touch device would slide the track");
+          "side_reset_all() left a nudge on -- a lost touch device would leave the tempo moved");
     CHECK(!side_any_open(), "side_reset_all() left the drawer out");
 }
 
@@ -943,10 +947,14 @@ static void test_paint_refusals(void)
     v = mkview(20, 800);
     CHECK(!side_paint_ok(&v), "a drawer 20 device px wide was accepted: it cannot host"
           " its own labels");
-    v = mkview(60, 800);
-    CHECK(!side_paint_ok(&v), "a drawer 60 device px wide was accepted: a nudge cell"
-          " in it is %d px and the cross is %d",
-          (SZ_NUDGE_M_X1 - SZ_NUDGE_M_X0 + 1) * 60 / SZ_W, 2 * SP_SIGN_ARM + 1);
+    /* This is the refusal the HALF-HEIGHT nudge pair moved. 400 device rows still hosts
+     * the CUE box's line box (36 >= MENU_FONT_LINE) and the cells are still wide enough
+     * for the mark, so the mark's own HEIGHT -- the one bound that shrank with the cell
+     * (side_paint.h's SP_SIGN_ARM) -- is the only check left standing. */
+    v = mkview(180, 400);
+    CHECK(!side_paint_ok(&v), "a drawer 400 device rows tall was accepted: a nudge cell"
+          " in it is %d px tall and the cross is %d",
+          (SZ_NUDGE_Y1 - SZ_NUDGE_Y0 + 1) * 400 / SZ_H, 2 * SP_SIGN_ARM + 1);
 
     /* And nothing draws into one that was refused. */
     fill(0xa5a5u, 180, 100);
@@ -1109,6 +1117,69 @@ static void test_paint_pressed_is_local(void)
     CHECK(memcmp(plain, fb, sizeof plain) != 0, "pressing CUE changed nothing at all");
 }
 
+/* WHAT A LIT TRANSPORT LOOKS LIKE, which is the operator's ask of 2026-10-09 and the
+ * one part of it a picture can settle: *"the orange shade for a cue button and ... the
+ * correct green shade ... the sync frame should also be 1pixel thicker"*. The three
+ * lit controls are three different colours -- SYNC keeps the panel's blue accent, CUE
+ * takes MENU_CUE and PLAY MENU_PLAY -- and the highlight RING is SP_FRAME_LIT px thick
+ * where the dark ring is one.
+ *
+ * The column sampled is the box's centre, at the FIRST THREE ROWS of the box. Nothing
+ * but the frame is drawn there: the labels sit on a line box centred in a 72-row cell,
+ * so their first row is 24 rows down, and the nudge marks are not in these cells at
+ * all. So a row of the accent says "the ring reaches here" and a row of the face says
+ * "the ring stops", which is exactly the thickness.
+ *
+ * The DARK case is asserted in the same loop because the interesting failure is not
+ * "lit is the wrong colour" but "lit changed the ring's weight for the wrong reason" --
+ * a frame that was always 2 px would pass a lit-only check and would have quietly moved
+ * every unlit button's edge. */
+static void test_paint_lit_accents(void)
+{
+    static const struct { int hit, ly0, accent; const char *name; } btns[] = {
+        { SZ_HIT_SYNC, SZ_SYNC_Y0, MENU_BTN_PRESSED, "SYNC" },
+        { SZ_HIT_CUE,  SZ_CUE_Y0,  MENU_CUE,         "CUE"  },
+        { SZ_HIT_PLAY, SZ_PLAY_Y0, MENU_PLAY,        "PLAY" }
+    };
+    struct menu_view v = mkview(180, 800);
+    unsigned int face = menu_pixel(16, MENU_BTN);
+    unsigned int lab  = menu_pixel(16, MENU_LABEL);
+    int x = (SZ_BTN_X0 + SZ_BTN_X1) / 2;
+    int i, k;
+
+    CHECK(menu_pixel(16, MENU_CUE) != menu_pixel(16, MENU_PLAY),
+          "the CUE and PLAY accents are the same pixel value -- the two controls would"
+          " light identically");
+    CHECK(menu_pixel(16, MENU_CUE) != menu_pixel(16, MENU_BTN_PRESSED) &&
+          menu_pixel(16, MENU_PLAY) != menu_pixel(16, MENU_BTN_PRESSED),
+          "a transport accent is the panel's own blue -- the operator asked for a"
+          " different shade for CUE and for PLAY");
+    CHECK(SP_FRAME_LIT > 1, "SP_FRAME_LIT is not thicker than the dark ring");
+
+    for (i = 0; i < 3; i++) {
+        unsigned int acc = menu_pixel(16, btns[i].accent);
+        int y0 = btns[i].ly0;
+
+        fill(0xa5a5u, 180, 800);
+        side_paint(&v, SZ_LEFT, 0, 512, 0, 0, 0);
+        CHECK(fb[y0 * 180 + x] == lab, "%s dark: its ring is not MENU_LABEL", btns[i].name);
+        CHECK(fb[(y0 + 1) * 180 + x] == face,
+              "%s dark: its ring is thicker than the one pixel every other button has",
+              btns[i].name);
+
+        fill(0xa5a5u, 180, 800);
+        side_paint(&v, SZ_LEFT, 0, 512, btns[i].hit == SZ_HIT_SYNC,
+                   btns[i].hit == SZ_HIT_CUE, btns[i].hit == SZ_HIT_PLAY);
+        for (k = 0; k < SP_FRAME_LIT; k++)
+            CHECK(fb[(y0 + k) * 180 + x] == acc,
+                  "%s lit: row %d of its ring is %#06x, not the accent %#06x -- the"
+                  " highlight is not SP_FRAME_LIT px thick",
+                  btns[i].name, k, fb[(y0 + k) * 180 + x], acc);
+        CHECK(fb[(y0 + SP_FRAME_LIT) * 180 + x] == face,
+              "%s lit: its ring runs past SP_FRAME_LIT px", btns[i].name);
+    }
+}
+
 /* The mirror, and the absent frame. The mirror is the one thing this panel's drawing
  * can get wrong without any hit test noticing -- side_paint() works in PANEL-LOCAL x
  * and the plane is in SCREEN order -- and until 2026-10-06 the frame's thin bands were
@@ -1258,10 +1329,10 @@ static void test_paint_signs(void)
         }
     }
 
-    /* ...and on the page side_paint_ok() draws at its tightest: the mark still fits
-     * the scaled cells, on both drawers. 65 px is the first width that check passes
-     * (a nudge cell in it is 26 px, the mark 25), so this is the exact boundary the
-     * refusal is drawn at rather than an arbitrary small number. */
+    /* ...and on a page side_paint_ok() still draws, small enough to be worth checking:
+     * the mark still fits the scaled cells, on both drawers. (65 px is comfortably
+     * above the first width the guards accept -- MENU_FONT_LINE and "PLAY"'s 38 px make
+     * the label the binding check now, and the cell's own width the looser one.) */
     {
         struct menu_view small = mkview(65, 800);
         int fx0, fx1, cx;
@@ -1482,7 +1553,7 @@ static void test_two_hands(void)
     side_reset_all();
 
     /* A HIGHLIGHT IS A FACT ABOUT THE PANEL, so the second hand's press must show on
-     * it -- otherwise a bend would run under a panel that looked untouched. */
+     * it -- otherwise a nudge would move the tempo under a panel that looked untouched. */
     reset_all();
     CHECK(open_by_funnel(SZ_LEFT), "the left drawer did not open for the highlight test");
     press2(SZ_LEFT, lx, yL, &act, &val);
@@ -1493,10 +1564,10 @@ static void test_two_hands(void)
     CHECK(side_pressed(SZ_LEFT) == SZ_HIT_NONE,
           "the second hand's highlight outlived its press");
 
-    /* ...and the same for a BEND, which is the one control where losing sight of a
-     * finger slides the track: the caller reconciles side_nudging() on every report
-     * and turns any change into a speed-0 send, so a bend the primary hand cannot see
-     * is a bend that gets cancelled by the next report either hand makes. */
+    /* ...and the same for a NUDGE, which is the one control where losing sight of a
+     * finger leaves the tempo moved: the caller reconciles side_nudging() on every
+     * report and turns any change into a restore, so a nudge the primary hand cannot
+     * see is a nudge that gets put back by the next report either hand makes. */
     {
         const int nx = (SZ_NUDGE_P_X0 + SZ_NUDGE_P_X1) / 2;
         const int ny = (SZ_NUDGE_Y0 + SZ_NUDGE_Y1) / 2;
@@ -1506,15 +1577,15 @@ static void test_two_hands(void)
         CHECK(act == SZ_ACT_NUDGE_FWD,
               "the second hand's '+' cell sent act=%d, expected SZ_ACT_NUDGE_FWD", act);
         CHECK(side_nudging(SZ_LEFT) == 1,
-              "the second hand's bend is invisible -- the next report would cancel it");
+              "the second hand's nudge is invisible -- the next report would put it back");
         /* The primary hand reports something else entirely on the same panel, which is
          * a BG press at local x 170 -- outside every control, so it fires nothing. */
         move(SZ_LEFT, 170, 400, &act, &val);
         CHECK(side_nudging(SZ_LEFT) == 1,
-              "the primary hand's report cancelled the second hand's bend");
+              "the primary hand's report put back the second hand's nudge");
         lift2(SZ_LEFT, nx, ny, &act, &val);
         CHECK(side_nudging(SZ_LEFT) == 0,
-              "the second hand's bend outlived its press -- the track would keep sliding");
+              "the second hand's nudge outlived its press -- the tempo would stay moved");
     }
 
     /* THE SAFETY NET COVERS BOTH HANDS. side_reset_all() is what the touch device
@@ -1529,7 +1600,7 @@ static void test_two_hands(void)
     CHECK(side_pressed(SZ_LEFT) == SZ_HIT_NONE,
           "side_reset_all() left a highlight on the primary hand");
     CHECK(side_nudging(SZ_LEFT) == 0 && side_nudging(SZ_RIGHT) == 0,
-          "side_reset_all() left a bend on");
+          "side_reset_all() left a nudge on");
     /* ...and neither pointer is still latched: a fresh press on either lane is a
      * fresh press. */
     CHECK(open_by_funnel(SZ_LEFT), "the drawer would not reopen after the reset");
@@ -1657,6 +1728,7 @@ int main(void)
     test_paint_covers();
     test_paint_idempotent();
     test_paint_pressed_is_local();
+    test_paint_lit_accents();
     test_paint_mirror();
     test_paint_fader_cap();
     test_paint_signs();

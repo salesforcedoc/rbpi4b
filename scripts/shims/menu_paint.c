@@ -109,6 +109,11 @@ unsigned int menu_pixel(int bpp, int cls)
      * "selected" -- is (0,125,222) across 5 703. menu_paint.h says why they are here. */
     case MENU_FX_PLATE:      return MENU_TRIP(bpp, 32, 32, 32);
     case MENU_FX_SEL:        return MENU_TRIP(bpp, 0, 125, 222);
+    /* The drawers' two transport accents, and menu_paint.h says why they are here. The
+     * orange is rbp's own AUTO BEAT LOOP pad triple, sampled 2026-10-01; the green is a
+     * legible member of the same family as rbp's (26,255,0) cue-pad green. */
+    case MENU_CUE:           return MENU_TRIP(bpp, 255, 140, 0);   /* orange */
+    case MENU_PLAY:          return MENU_TRIP(bpp, 40, 210, 70);   /* green  */
     default:                 return 0;
     }
 }

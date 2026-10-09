@@ -73,12 +73,14 @@ CHROOT_MEDIA_PATH="${RB_CHROOT_MEDIA:-/media/usb1/sda1}"
 CH_MNT="$RB_CHROOT$CHROOT_MEDIA_PATH"
 FIFO=/tmp/udev_usb1
 LABEL=/tmp/udev_usb1.label
+UUID=/tmp/udev_usb1.uuid
 
 MNT2="${RB_MEDIA_MOUNT2:-$RB_DEPLOY_ROOT/media/usb2}/sda1"
 CHROOT_MEDIA_PATH2="${RB_CHROOT_MEDIA2:-/media/usb2/sda1}"
 CH_MNT2="$RB_CHROOT$CHROOT_MEDIA_PATH2"
 FIFO2=/tmp/udev_usb2
 LABEL2=/tmp/udev_usb2.label
+UUID2=/tmp/udev_usb2.uuid
 
 SLOT_COUNT=2
 LOG="${RB_LOG_DIR:-$RB_DEPLOY_ROOT/log}/usbwatch.log"
@@ -99,6 +101,7 @@ slot_chmnt() { [ "$1" = 2 ] && echo "$CH_MNT2"            || echo "$CH_MNT"; }
 slot_path()  { [ "$1" = 2 ] && echo "$CHROOT_MEDIA_PATH2" || echo "$CHROOT_MEDIA_PATH"; }
 slot_fifo()  { [ "$1" = 2 ] && echo "$FIFO2"              || echo "$FIFO"; }
 slot_label() { [ "$1" = 2 ] && echo "$LABEL2"             || echo "$LABEL"; }
+slot_uuid()  { [ "$1" = 2 ] && echo "$UUID2"              || echo "$UUID"; }
 
 # Which /dev node is mounted at a mount point right now (read-only; used by
 # status() so that reporting never probes, and so that the readiness witness does
@@ -393,6 +396,13 @@ attach() {
     # shim takes an empty or absent file as "leave rbp's own USB1/USB2 alone".
     # A device with no volume label is the same case, which is why the empty
     # answer removes the file rather than writing an empty one.
+    #
+    # THE UUID LIVES BESIDE IT, and it is not for the row. A label is what the
+    # operator reads and a UUID is what makes "is this the SAME stick?" answerable
+    # -- labels are frequently blank and not unique, and a key dump (KEY_DUMP,
+    # keylog.h) names its media so a recording can be checked before it is
+    # replayed. Same file discipline as the label and for the same reason: no
+    # device, no file.
     alabel=$(blkid -s LABEL -o value "/dev/$apart" 2>/dev/null)
     if [ -n "$alabel" ]; then
         printf '%s' "$alabel" > "$(slot_label "$aslot")" 2>/dev/null || true
@@ -400,6 +410,14 @@ attach() {
     else
         rm -f "$(slot_label "$aslot")"
         log "attach: slot $aslot: /dev/$apart has no volume label"
+    fi
+
+    auuid=$(blkid -s UUID -o value "/dev/$apart" 2>/dev/null)
+    if [ -n "$auuid" ]; then
+        printf '%s' "$auuid" > "$(slot_uuid "$aslot")" 2>/dev/null || true
+        log "attach: slot $aslot: uuid '$auuid'"
+    else
+        rm -f "$(slot_uuid "$aslot")"
     fi
 
     # The bind must exist BEFORE rbp looks at the stick's files (export.pdb and
@@ -417,8 +435,10 @@ detach() {
     log "detach: slot $dslot: notifying rbp"
     # The name goes before the umount, not after: the shim clears rbp's field on
     # its next 100 ms tick either way, and a name that outlives its device is the
-    # one thing this file must never be.
+    # one thing this file must never be. The uuid goes with it, for the same
+    # reason: a key dump's media condition must not name a device that is gone.
     rm -f "$(slot_label "$dslot")"
+    rm -f "$(slot_uuid "$dslot")"
     notify "$(slot_fifo "$dslot")" "umount $(slot_path "$dslot")"
     sleep 1
     if mountpoint -q "$dchmnt"; then umount -l "$dchmnt"; log "detach: slot $dslot: umount -l $dchmnt"; fi
@@ -516,7 +536,9 @@ status() {
     echo "slot 1:       $_s1 -> $MNT"
     echo "slot 2:       $_s2 -> $MNT2"
     echo "label 1:      $(cat "$LABEL" 2>/dev/null || echo none)"
+    echo "uuid 1:       $(cat "$UUID" 2>/dev/null || echo none)"
     echo "label 2:      $(cat "$LABEL2" 2>/dev/null || echo none)"
+    echo "uuid 2:       $(cat "$UUID2" 2>/dev/null || echo none)"
     echo "candidates:   $(list_media_sds | tr '\n' ' ')"
     echo "host mount 1: $MNT $(mountpoint -q "$MNT" && echo '(mounted)' || echo '(not mounted)')"
     echo "chroot bind 1:$CH_MNT $(mountpoint -q "$CH_MNT" && echo '(mounted)' || echo '(not mounted)')"

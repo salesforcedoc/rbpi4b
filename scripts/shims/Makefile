@@ -117,6 +117,48 @@ fader_state.o: fader_state.c rbp_vu.h
 rbp_transport.o: rbp_transport.c rbp_transport.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# pitch_state.o is the FIFTH object both libraries link, and for rbp_transport.o's
+# reason exactly: the deck's tempo-slider position is WRITTEN by knobshim's controller
+# maps (map_flx4.c, map_jp21.c) and READ by fbshim's pointsrc.c, which is loaded FIRST
+# in RB_LD_PRELOAD and so cannot call into knobshim at all. NO -fvisibility=hidden, and
+# NOT in either object list (CTRL_OBJS would hide it), exactly like fader_state.o and
+# rbp_transport.o -- the explicit rule below is what fixes the flag set.
+#
+# It also carries the nudge's arithmetic (clamp, dir+pct -> norm, norm -> the message's
+# two companions) as header inlines, so that the drawer's message and the fader's are
+# one definition and not two that agree by inspection.
+# `arm-linux-gnueabi-nm -D --defined-only knobshim.so fbshim.so | grep g_pitch_norm`
+# must show both defining it.
+pitch_state.o: pitch_state.c pitch_state.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# keylog_state.o is the SIXTH object both libraries link, and for fader_state.o's
+# exact reason, which is worth restating because here it decides whether the
+# feature works at all rather than whether one value is shared.
+#
+# There are TWO live copies of rbp_key.o -- one in fbshim.so (the touch path's
+# send_rx_key_fl) and one in knobshim.so (the maps') -- and the recorder is called
+# from inside send_rx_key_fl, so it is called from both. With a private FILE per
+# library the dump would be two dumps interleaved in one file: two headers, two
+# clock bases, two orders. So the recorder's state is NON-STATIC and
+# DEFAULT-VISIBILITY and linked into both, and the dynamic linker resolves every
+# reference to the first definition in the search order -- fbshim's, since
+# fbshim is first in RB_LD_PRELOAD. One recorder either way, and the arrangement
+# still works if the order is ever changed.
+#
+# So: NO -fvisibility=hidden, and NOT in CTRL_OBJS or FBSHIM_OBJS (both of whose
+# pattern rules hide). The explicit rule below is what fixes the flag set -- the
+# same trap rbp_transport.o's comment records, where putting an accessor in the
+# wrong list produced `undefined symbol` three seconds into a launch.
+#
+# `arm-linux-gnueabi-nm -D --defined-only knobshim.so fbshim.so | grep g_keylog`
+# must show both defining it, and `nm -D ... | grep keylog_record` likewise.
+keylog.o: keylog.c keylog.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+keylog_state.o: keylog_state.c keylog_state.h keylog.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # rbp_key.o is the second object both libraries link: the key path (are we rbp,
 # where its KeyManager is, how to send it a keycode -- see rbp_key.h). It is
 # deliberately NOT in either object list below, because those two lists are
@@ -204,12 +246,14 @@ CTRL_OBJS  := ctrlshim.o ctrl_map.o map_flx4.o map_jp21.o map_kbd.o evdev_io.o \
               rbp_vu.o midi_io.o controllers.o shimutil.o usb_label.o
 CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \
               midi_io.h shimutil.h ctrl_map.h mididump.h evdev_io.h syscalls.h \
-              shmstate.h plinn_scan.h controllers.h usb_label.h
+              shmstate.h plinn_scan.h controllers.h usb_label.h pitch_state.h
 knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o fader_state.o rbp_transport.o \
-             $(CTRL_HDRS) rbp_transport.h \
+             pitch_state.o keylog.o keylog_state.o $(CTRL_HDRS) rbp_transport.h \
+             pitch_state.h keylog.h keylog_state.h \
              $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
 	$(CC) $(CFLAGS) -shared -o $@ $(CTRL_OBJS) rbp_key.o shmstate.o \
-	    fader_state.o rbp_transport.o -lpthread -lm -lc $(LDFLAGS)
+	    fader_state.o rbp_transport.o pitch_state.o keylog.o keylog_state.o \
+	    -lpthread -lm -lc $(LDFLAGS)
 
 $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 	$(CC) $(CFLAGS) -fvisibility=hidden -c -o $@ $<
@@ -382,13 +426,15 @@ FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h touch_zone.h syscalls.h \
                menu_window_paint.h menu_keyboard.h browser_link.h side_zone.h \
                side_paint.h rbp_vu.h util_zone.h wave_zone.h prompt_zone.h \
                prompt_paint.h fx_zone.h fx_paint.h hc_zone.h usb_label.h \
-               fxpad_zone.h fxpad_paint.h
+               fxpad_zone.h fxpad_paint.h pitch_state.h
 
-fbshim.so: $(FBSHIM_OBJS) rbp_key.o fader_state.o rbp_transport.o \
-           $(FBSHIM_HDRS) rbp_transport.h \
+fbshim.so: $(FBSHIM_OBJS) rbp_key.o fader_state.o rbp_transport.o pitch_state.o \
+           keylog.o keylog_state.o $(FBSHIM_HDRS) rbp_transport.h pitch_state.h \
+           keylog.h keylog_state.h \
            $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
 	$(CC) $(CFLAGS) -shared -o $@ $(FBSHIM_OBJS) rbp_key.o fader_state.o \
-	    rbp_transport.o -lpthread -lm -lc $(LDFLAGS)
+	    rbp_transport.o pitch_state.o keylog.o keylog_state.o -lpthread -lm -lc \
+	    $(LDFLAGS)
 
 fb_shim.o: fb_shim.c pointsrc.h $(FBSHIM_HDRS)
 tscfake.o: tscfake.c tscfake.h pointsrc.h
@@ -646,7 +692,8 @@ pcmprobe: ../../tools/pcmprobe.c
 TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
          test_evdev test_cursor_dev test_menu test_side test_window test_keyboard \
          test_menu_dev test_util test_wave test_prompt test_fx test_hc test_fxpad \
-         test_led_table test_plinn_scan test_controllers test_usblabel test_netalias
+         test_led_table test_plinn_scan test_controllers test_usblabel test_netalias \
+         test_pitch test_keylog
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -811,6 +858,39 @@ test_netalias: test_netalias.c netalias.c netalias.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
 	    -Wall -Wextra -static -o $@ test_netalias.c netalias.c
 
+# test_pitch links the PRODUCTION pitch_state.c, and through its header the whole of
+# the nudge's arithmetic: the clamp, dir+pct -> norm, and the two companions the tempo
+# message carries. That arithmetic is the change's only soft number, and it is not one
+# to eyeball on the glass -- five percent of a fader's travel is ~0.3% of tempo at
+# rbp's default range.
+#
+# The message half is pinned AGAINST test_flx4.c's own rows rather than re-derived:
+# the drawer and the FLX4's fader must send the same values for the same position, and
+# those rows already fix center=511, top=1022 and bottom=0. Note 1022 and not 1023 --
+# the fader's travel tops out at norm 0.99988, and only a nudge clamped to exactly 1.0
+# reaches 1023, which is what keeps the bound in the header from being dead code.
+test_pitch: test_pitch.c pitch_state.c pitch_state.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_pitch.c pitch_state.c
+
+# test_keylog links the PRODUCTION keylog.c -- not a copy of the format -- for the
+# same reason test_midi links the production dump: the thing that has to be right
+# is the round trip, and a fixture written against a re-implementation would pin
+# the test rather than the format. keylog.c is pure (keylog.h says why), so it
+# needs nothing but libc and can run on the host.
+#
+# What it pins, in the order the reasons matter: that a formatted line parses back
+# to the same call, floats and the hexadecimal keycode included (a replay that
+# rounded a fader's normalised float would not be the same performance); that the
+# timestamp survives at microsecond resolution and that a sub-millisecond gap is
+# NOT quantised away, which is the whole point of KEY_DUMP timing against
+# MIDI_DUMP's; that a growing dump's half-written tail is skipped rather than
+# fatal; and that a line from a later version, carrying a field this reader does
+# not know, still parses.
+test_keylog: test_keylog.c keylog.c keylog.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
+	    -Wall -Wextra -static -o $@ test_keylog.c keylog.c
+
 # test_prompt links the PRODUCTION prompt_zone.c and prompt_paint.c, and menu_paint.c
 # with them because the box's palette comes from menu_pixel() -- one table, so the
 # chooser cannot drift into colours the band and the drawers do not have. menu_zone.c is
@@ -889,7 +969,8 @@ test_audio: test_audio.c s24pack.c s24pack.h mirror_policy.c mirror_policy.h \
 #
 # MIDI_FIXTURE is absolute rather than relative to the working directory, so
 # `make -C scripts/shims test` works from the repository root as well.
-MIDI_TEST_OBJS := test_midi.o map_jp21.o ctrl_map.o mididump.o shimutil.o shmstate.o
+MIDI_TEST_OBJS := test_midi.o map_jp21.o ctrl_map.o mididump.o shimutil.o shmstate.o \
+                  pitch_state.o
 
 test_midi: $(MIDI_TEST_OBJS) tests/midi_jp21.dump
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -922,7 +1003,7 @@ test_midi.o: FORCE test_midi.c ctrl_map.h mididump.h shmstate.h rbp_abi.h \
 # tables. It costs one object and no new stubs -- the two maps' rbp calls are the
 # same set, already stubbed below.
 FLX4_TEST_OBJS := test_flx4.o map_flx4.o map_jp21.o ctrl_map.o mididump.o \
-                  shimutil.o shmstate.o
+                  shimutil.o shmstate.o pitch_state.o
 
 test_flx4: $(FLX4_TEST_OBJS) tests/midi_flx4.dump
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
@@ -1193,6 +1274,18 @@ check: $(SHARED)
 	  echo "   (the edge drawer reads what the LED thread writes: see rbp_transport.h)"; rc=1; \
 	else \
 	  echo "-- rbp_transport: default visibility, defined by both"; \
+	fi; \
+	echo "== and the pitch state, for the same reason =="; \
+	pmiss=""; for n in g_pitch_norm g_pitch_seen pitch_state_set; do \
+	  for f in fbshim.so knobshim.so; do \
+	    $(CROSS)nm -D --defined-only $$f 2>/dev/null | grep -q " $$n$$" || pmiss="$$pmiss $$n($$f)"; \
+	  done; \
+	done; \
+	if [ -n "$$pmiss" ]; then \
+	  echo "!! FAIL -- not defined by BOTH fbshim.so and knobshim.so:$$pmiss"; \
+	  echo "   (the drawer nudges from the position the maps publish: see pitch_state.h)"; rc=1; \
+	else \
+	  echo "-- pitch_state: default visibility, defined by both"; \
 	fi; \
 	exit $$rc
 

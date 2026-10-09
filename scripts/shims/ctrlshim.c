@@ -34,6 +34,8 @@
 #include "rbp_vu.h"
 #include "midi_io.h"
 #include "mididump.h"
+#include "keylog.h"        /* the key dump's format; keylog_state.c writes it */
+#include "keylog_state.h"
 #include "evdev_io.h"
 #include "ctrl_map.h"
 #include "controllers.h"   /* the surface table: the default map, the keepalive */
@@ -197,6 +199,10 @@ static void ctrl_dispatch(const struct snd_seq_event *ev)
 
      if (!get_key_manager())
           return;
+     /* The key dump's label for whatever this event turns into. Set here rather
+      * than in the map because a map is a table and this is a property of the
+      * path the event arrived on. */
+     keylog_from("midi");
      if (g_midi->event)
           g_midi->event(ev);
 }
@@ -211,6 +217,7 @@ static void ctrl_input_dispatch(int type, int code, int value)
 {
      if (!get_key_manager())
           return;
+     keylog_from("evdev");
      if (g_evdev->input)
           g_evdev->input(type, code, value);
 }
@@ -242,6 +249,45 @@ static void *replay_thread(void *arg)
      return NULL;
 }
 
+/* ---- KEY_DUMP / KEY_REPLAY ---- */
+
+/* One recorded command, back into rbp. Straight to send_rx_key_fl(): a key dump
+ * holds the keycodes themselves, so a replay needs neither a map nor a
+ * sequencer nor a controller -- it drives the same call the shim's own maps do,
+ * which is what makes it a replay of the commands rbp received rather than of
+ * one build's opinion about which note means which control. */
+static void replay_key_event(const struct keylog_event *ev)
+{
+     send_rx_key_fl(ev->key, ev->op, ev->ch, ev->param, ev->fval, ev->lval);
+}
+
+/* KEY_REPLAY: drive a recorded key dump through send_rx_key_fl. Runs alongside
+ * the live path rather than instead of it, exactly like MIDI_REPLAY, and -- with
+ * KEY_DUMP set as well -- is itself recorded with fresh timestamps, which is a
+ * legitimate way to re-time a dump. */
+static void *key_replay_thread(void *arg)
+{
+     const char *path = arg;
+     double speed;
+     int n;
+
+     for (int i = 0; i < 300 && !get_key_manager(); i++)
+          usleep(100000);
+     if (!get_key_manager()) {
+          klog("knobshim2: KEY_REPLAY %s: KeyManager never became ready\n", path);
+          return NULL;
+     }
+     speed = env_dnum("KEY_REPLAY_SPEED", 1.0);
+     klog("knobshim2: KEY_REPLAY %s at speed %.2f\n", path, speed);
+     keylog_from("replay");
+     n = keylog_replay(path, speed, replay_key_event);
+     if (n < 0)
+          klog("knobshim2: KEY_REPLAY %s: cannot open\n", path);
+     else
+          klog("knobshim2: KEY_REPLAY %s: %d events\n", path, n);
+     return NULL;
+}
+
 /* ---- threads ---- */
 
 static void *midi_thread(void *arg)
@@ -256,6 +302,10 @@ static void *midi_thread(void *arg)
 
      verbose = env_on("KNOB_VERBOSE", 0);
      dump_open();
+     /* KEY_DUMP: the other end of the same intent as MIDI_DUMP, and the one that
+      * survives a map change -- see keylog.h. Opened here, before the maps, so a
+      * dump from a run that died early still has its header. */
+     keylog_open();
 
      g_midi = pick_map("MIDI_MAP", midi_maps,
                        (unsigned)(sizeof midi_maps / sizeof midi_maps[0]),
@@ -281,6 +331,15 @@ static void *midi_thread(void *arg)
           note_map_n, abs_map_n, (void *)&g_speaker_gain,
           (void *)&g_cue_gain, (void *)&g_cue_mix);
 
+     /* The selections, into the key dump's header. The recorder cannot know them
+      * (it is shared between the two libraries and this is knobshim's business),
+      * and a dump is only interpretable beside the maps that produced its
+      * keycodes' meaning -- the keycodes themselves are the same regardless, which
+      * is why the dump replays without these, but a reader downstream wants to
+      * know what the operator was using. */
+     keylog_note("shim maps MIDI_MAP=%s EVDEV_MAP=%s", g_midi->name,
+                 g_evdev->name);
+
      /* The evdev reader belongs to the EVDEV_MAP selection, never to the MIDI
       * one -- which is the whole of the fix for "the keyboard does nothing while
       * the FLX4 works": the map being asked about non-MIDI sources is now the
@@ -301,6 +360,11 @@ static void *midi_thread(void *arg)
 
      replay = env_text("MIDI_REPLAY", NULL);
      if (replay && pthread_create(&tid, NULL, replay_thread, (void *)replay) == 0)
+          pthread_detach(tid);
+
+     replay = env_text("KEY_REPLAY", NULL);
+     if (replay && pthread_create(&tid, NULL, key_replay_thread,
+                                  (void *)replay) == 0)
           pthread_detach(tid);
 
      for (int i = 0; i < 300; i++) {

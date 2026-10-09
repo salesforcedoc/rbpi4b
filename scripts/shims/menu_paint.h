@@ -121,7 +121,24 @@ enum {
      * palette. Its black cell and its white ink need no class of their own -- MENU_FILL
      * is (0,0,0) exactly, and MENU_LABEL is a hair off white. */
     MENU_FX_PLATE,      /* rbp's BEAT FX plate (32,32,32): the picker's bed */
-    MENU_FX_SEL         /* the colour rbp fills a SELECTED box with (0,125,222) */
+    MENU_FX_SEL,        /* the colour rbp fills a SELECTED box with (0,125,222) */
+    /* THE TWO TRANSPORT ACCENTS, and they are the only colours here that are neither
+     * the band's nor rbp's. The drawers light a CUE and a PLAY from rbp's own LED state
+     * (side_paint.h), and until 2026-10-09 they lit in MENU_BTN_PRESSED like SYNC --
+     * one accent for three controls that are three colours on the hardware. The
+     * operator asked for the difference to be visible: *"the orange shade for a cue
+     * button and ... the correct green shade"*. So the lit frame and label of CUE take
+     * MENU_CUE and of PLAY take MENU_PLAY, while SYNC keeps the blue accent.
+     *
+     * They live HERE, with the rest of the palette, for the reason the OFF pair and the
+     * FX pair do: menu_pixel() is the one place a pixel value is decided, and a colour
+     * chosen at a call site is a colour that can drift from every other use of it. The
+     * orange is rbp's OWN -- (255,140,0) is what it fills an AUTO BEAT LOOP pad with,
+     * sampled off the live panel 2026-10-01 -- and the green is the same family pulled
+     * down off rbp's neon (26,255,0) cue-pad green, so it reads as a frame on a dark
+     * face rather than as a light source. */
+    MENU_CUE,           /* the CUE accent: orange */
+    MENU_PLAY           /* the PLAY accent: green */
 };
 
 /* Everything the painter needs to know about the framebuffer, measured by the

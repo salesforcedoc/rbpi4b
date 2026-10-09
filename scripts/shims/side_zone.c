@@ -191,8 +191,8 @@ int side_pressed(int side)
      * press that has been released out of it. Both pointers are asked, primary
      * first: a highlight is a fact about the PANEL, and either hand can put one
      * there. (A second finger on a button cannot be the only thing highlighted and
-     * be invisible to the painter -- the panel would look untouched while a bend ran
-     * under it.) */
+     * be invisible to the painter -- the panel would look untouched while a nudge was
+     * moving the tempo under it.) */
     for (ptr = 0; ptr < SZ_PTRS; ptr++) {
         if (!st[side][ptr].swallow || !st[side][ptr].was_down)
             continue;
@@ -215,16 +215,16 @@ void side_tap_point(int side, int *x, int *y)
         *y = st[side][SZ_PTR_MAIN].start_y;
 }
 
-/* Is a bend running on this side, and which way? -1 back, +1 forward, 0 none.
+/* Is a nudge running on this side, and which way? -1 '-' held, +1 '+' held, 0 none.
  *
- * This is the single source of truth for the bend, and it is DERIVED rather than
+ * This is the single source of truth for the nudge, and it is DERIVED rather than
  * remembered -- from the press that is down and the cell it began on -- because the
- * failure mode is asymmetric: a bend left running after its press ended is a track
- * that keeps sliding under the operator's hands, and nothing they can do on the glass
- * stops it. Reading it back off the same fields the gesture already uses means there
- * is no second copy to fall out of step. The drawer must still be out, which it always
- * is for a press of ours on a panel, but stating it is free and it makes the answer
- * correct even if that ever changes. */
+ * failure mode is asymmetric: a press that ended without its lift reaching us leaves
+ * the tempo moved, and nothing the operator can do on the glass puts it back. Reading
+ * it back off the same fields the gesture already uses means there is no second copy to
+ * fall out of step. The drawer must still be out, which it always is for a press of
+ * ours on a panel, but stating it is free and it makes the answer correct even if that
+ * ever changes. */
 int side_nudging(int side)
 {
     int ptr;
@@ -235,8 +235,8 @@ int side_nudging(int side)
         return 0;
     /* BOTH POINTERS, primary first. The caller turns any CHANGE in this answer into
      * the matching send, so a pointer this function could not see would have its
-     * bend cancelled on the next report -- the exact failure the field exists to
-     * prevent, arriving from the other hand. */
+     * nudge ended -- and the tempo put back -- on the next report: the exact failure
+     * the field exists to prevent, arriving from the other hand. */
     for (ptr = 0; ptr < SZ_PTRS; ptr++) {
         struct side_st *s = &st[side][ptr];
 
@@ -314,12 +314,13 @@ int side_feed(int side, int ptr, int down, int x, int y, int *act, int *value)
                         (s->press_hit == SZ_HIT_CUE)  ? SZ_ACT_CUE : SZ_ACT_PLAY;
                 else if (s->press_hit == SZ_HIT_NUDGE_M ||
                          s->press_hit == SZ_HIT_NUDGE_P)
-                    /* THE BEND ALWAYS ENDS, and it is emitted whether or not the
-                     * finger is still on the cell it started on: rbp keeps bending
-                     * until it is told speed 0, and a bend that outlives its press is
-                     * the one failure here the operator could not undo by lifting a
-                     * finger. A slide-off therefore cancels the bend and fires no
-                     * button -- a bend that wandered is not a press. */
+                    /* THE NUDGE ALWAYS ENDS, and the restore is emitted whether or
+                     * not the finger is still on the cell it started on: the press
+                     * moved the tempo and only the lift puts it back, so a restore
+                     * that outlives its press is the one failure here the operator
+                     * could not undo by lifting a finger. A slide-off therefore
+                     * cancels the nudge and fires no button -- a nudge that wandered
+                     * is not a press. */
                     a = SZ_ACT_NUDGE_STOP;
             } else if (!sz_open[side]) {
                 /* Began in the entry column and the drawer is still shut, so it
@@ -409,12 +410,13 @@ int side_feed(int side, int ptr, int down, int x, int y, int *act, int *value)
             if (value)
                 *value = v;
         } else if (s->press_hit == SZ_HIT_NUDGE_M || s->press_hit == SZ_HIT_NUDGE_P) {
-            /* THE BEND STARTS HERE AND IS NOT REPEATED. rbp holds the speed until it
-             * is told otherwise, so one message per press is the whole protocol --
-             * there is no repeat clock in this module and none is wanted: a repeat
-             * would be a rate the operator cannot control, and the hold time IS the
-             * bend. side_nudging() derives the truth from `press_hit` and `was_down`
-             * so the stop cannot be lost. */
+            /* THE NUDGE MOVES THE TEMPO HERE, AND IT DOES NOT REPEAT. The press sends
+             * one position and the LIFT puts the fader back, so one message per edge
+             * is the whole protocol -- there is no repeat clock in this module and
+             * none is wanted: a repeat would be a step the operator could not control,
+             * and how far the tempo moves is the caller's SIDE_NUDGE_PCT and not how
+             * long the cell was held. side_nudging() derives the truth from `press_hit`
+             * and `was_down` so the restore cannot be lost. */
             if (act)
                 *act = (s->press_hit == SZ_HIT_NUDGE_P) ? SZ_ACT_NUDGE_FWD
                                                         : SZ_ACT_NUDGE_REV;

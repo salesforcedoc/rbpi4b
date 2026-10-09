@@ -33,6 +33,7 @@
 #include "rbp_bridge.h"
 #include "rbp_led.h"       /* led_loop_armed */
 #include "rbp_vu.h"        /* g_fader, g_fader_seen */
+#include "pitch_state.h"   /* g_pitch_norm: what the edge drawers' nudge moves from */
 #include "ctrl_map.h"
 
 static int knob_scale = 1;
@@ -476,6 +477,10 @@ static void handle_pitch(int ch, int cc, int val)
      if (v10 < 0) v10 = 0;
      if (v10 > 1023) v10 = 1023;
 
+     /* Same publish as map_flx4.c's, for the same reason: the drawer nudges FROM the
+      * position rbp was told, and it cannot read a knobshim symbol -- see
+      * pitch_state.h. Here that is the post-TEMPO_REV norm and not the raw fader. */
+     pitch_state_set(idx, norm);
      send_rx_key_fl(K_TEMPO_SLIDER, OP_VALUE, sch, (long)v10, norm, (long)pos);
      if (tempo_verbose)
           klog("knobshim2: pitch ch%d (deck %d) pos=%d -> tempo norm=%.3f v10=0x%03x\n",

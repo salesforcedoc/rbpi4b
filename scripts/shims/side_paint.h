@@ -33,12 +33,27 @@
  * own ends so it never hangs out of the well at either extreme. */
 #define SP_HANDLE_H  34
 
+/* HOW THICK A LIT BUTTON'S HIGHLIGHT RING IS, in device px. One more than the
+ * unlit/pressed frame (sp_frame's 1), which is the operator's *"the cue button
+ * highlight frame 1pixel thicker ... the sync frame should also be 1pixel thicker"*.
+ * A pressed button keeps the 1 px ring whatever rbp has lit, so the finger's own
+ * feedback stays a function of the press alone (test_side.c pins that). */
+#define SP_FRAME_LIT 2
+
 /* THE NUDGE MARKS: half-length and weight, in 1:1 DEVICE pixels like the glyphs
  * beside them. They are drawn as bars and not set in the font because the atlas has
  * no '+' at all (side_paint.c), so the two cells have to match by construction -- and
  * they are the tightest thing the panel has to host, which is why side_paint_ok()
- * measures a nudge cell against them. */
-#define SP_SIGN_ARM    12
+ * measures a nudge cell against them.
+ *
+ * THE ARM CAME DOWN FROM 12 WHEN THE CELL WENT TO HALF HEIGHT (SZ_NUDGE_H). The mark
+ * is square -- both bars are `arm` long -- so a 25 px cross does not fit the 36-row
+ * cell a 1280x800 panel gives, let alone a short panel's: side_paint_ok() would have
+ * refused the drawer outright below ~556 device rows, where before it drew. 9 makes a
+ * 19 px cross, which fits the cell at every size this port targets and still leaves
+ * the two marks unmistakable -- and it is the mark, not the guard, that gives way: a
+ * control with a smaller sign is a control, and a drawer that will not draw is not. */
+#define SP_SIGN_ARM    9
 #define SP_SIGN_THICK  4
 
 /* Is this view something side_paint() can draw into? menu_paint.h's menu_view_ok()

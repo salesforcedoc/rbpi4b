@@ -46,6 +46,9 @@
  * shims so that "where it reads it" is this same array. fader_state.c says why that
  * object exists at all. */
 #include "rbp_vu.h"
+#include "pitch_state.h"  /* g_pitch_norm: the fader a nudge cell moves from, and the
+                           * shared-object arrangement that lets fbshim read a
+                           * knobshim-published position at all */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1334,82 +1337,89 @@ static void hc_fire(int deck, int pad)
  */
 
 /* ---------------------------------------------------------------------------
- * THE NUDGE, which is rbp's JOG and nothing else.
+ * THE NUDGE, WHICH IS THE TEMPO SLIDER AND NOT A BEND.
  *
- * There is NO bend, pitch-bend or nudge keycode in rbp's table -- the only mechanism
- * it has for "push the track a little" is the jog wheel's rotate message, which is the
- * whole reason this borrows map_flx4.c's flx4_jog() rather than inventing anything:
+ * rbp has no nudge keycode and does not need one: it has a TEMPO SLIDER, and the
+ * FLX4's own pitch fader drives it with an absolute position --
  *
- *   send_rx_key_fl(K_JOG_ROT 0x4305, OP_ROTATE, ch, 0, speed, vpos)
- *                                                            (rev/s)  (16-bit)
+ *   send_rx_key_fl(K_TEMPO_SLIDER 0x4109, OP_VALUE, ch, v10, norm, pos)
+ *                                                             [-1..+1] 14-bit
  *
- * TWO THINGS ABOUT THAT CONTRACT DRIVE THE CODE BELOW.
+ * -- which is map_flx4.c's flx4_pitch(), the call this borrows rather than inventing
+ * anything, and the one map_jp21.c makes too. So the drawer's '-' and '+' are, at the
+ * wire, a hand on that fader: the press moves it and the release puts it back.
  *
- * 1. rbp KEEPS BENDING UNTIL IT IS TOLD SPEED 0. A jog message starts a bend at a
- *    signed rate and nothing in rbp ends it -- flx4_jog_idle() exists for exactly this
- *    reason on the hardware path (it fires a speed-0 message once the wheel has been
- *    still for JOG_IDLE_MS). So the drawer's nudge is a START on the press and a STOP
- *    on the release, and the stop is emitted whether or not the finger is still on the
- *    cell it began on. A bend left running is a track that slides out from under the
- *    operator with nothing on the glass able to stop it.
+ * THE RELEASE READS THE FADER AT THAT MOMENT rather than restoring a value captured at
+ * the press, and the difference is deliberate. If the operator moves the real fader
+ * during the hold, the fader's own messages have already taken the tempo there, and a
+ * release that restored a stale capture would yank the tempo back and fight the hand
+ * that had just moved it. Reading at the release is right in both cases -- and it is
+ * the same number when the fader never moved, which is the only case a bench shows.
  *
- * 2. THE SPEED'S MAGNITUDE IS A CALIBRATION, NOT A DERIVATION. The FLX4 computes it
- *    from how fast the platter turns; a button has no speed, so one has to be chosen,
- *    and rbp's own mapping from rev/s to tempo bend is not known here. The default is
- *    deliberately small and the knob is SIDE_NUDGE_SPEED so it can be settled on the
- *    glass in one restart rather than in a rebuild -- which is the honest state of
- *    this number, and the drill on the unit is what will fix it.
+ * The position comes from pitch_state.o, which exists precisely because the writer is
+ * knobshim.so's map and this is fbshim.so, loaded FIRST: see that header. With no
+ * controller attached the published value is the fader's centre, which is where rbp's
+ * own tempo slider cold-starts, so the pair still works on the machine the drawers
+ * exist for.
  *
- * `nudge_running[]` is the bend each side is making RIGHT NOW (-1 back, +1 forward, 0
- * none) and `nudge_pos[]` is the 16-bit position the last message carried, which the
- * contract wants alongside the speed. The running state is what makes this idempotent:
- * the edges come from side_zone.c's acts, and side_bend_sync() reconciles them against
- * side_nudging() on the paths where no report will arrive to deliver an edge.
+ * The size is the one soft number, and it is a calibration settled on the glass in one
+ * restart rather than in a rebuild: SIDE_NUDGE_PCT, PERCENT OF THE FADER'S TRAVEL --
+ * see pitch_state.h for why that unit and not tempo points.
+ *
+ * `nudge_running[]` is the cell each side is holding RIGHT NOW (-1 back, +1 forward, 0
+ * none). It is what makes this idempotent: the edges come from side_zone.c's acts, and
+ * side_nudge_sync() reconciles them against side_nudging() on the paths where no report
+ * will arrive to deliver an edge. Without it, a finger lost with the touch device would
+ * leave the tempo moved with nothing on the glass able to put it back.
  * ------------------------------------------------------------------------- */
-#define SZ_NUDGE_SPEED_DEFAULT  0.35
+#define SZ_NUDGE_PCT_DEFAULT  5.0
 
-static int          nudge_running[2];
-static unsigned int nudge_pos[2];
+static int nudge_running[2];
 
-static void side_bend(int side, int dir)
+static void side_nudge(int side, int want)
 {
-    int ch = side_channel(side);
-    double speed = env_double("SIDE_NUDGE_SPEED", SZ_NUDGE_SPEED_DEFAULT);
+    float pct = (float)env_double("SIDE_NUDGE_PCT", SZ_NUDGE_PCT_DEFAULT);
+    float fader, norm;
+    int ch, v10;
 
     if (side != SZ_LEFT && side != SZ_RIGHT)
         return;
-    if (dir == nudge_running[side])
-        return;                      /* already bending that way: one message is the whole protocol */
-    nudge_running[side] = dir;
+    if (want == nudge_running[side])
+        return;              /* already doing that: one message per edge is the whole
+                              * protocol, and there is no repeat clock here or wanted */
+    nudge_running[side] = want;
 
-    if (dir != 0)
-        nudge_pos[side] = (unsigned int)(nudge_pos[side] +
-                                         (dir > 0 ? 128u : (unsigned int)-128)) & 0xFFFFu;
+    ch = side_channel(side);
+    fader = g_pitch_norm[side];             /* the fader's own position, RIGHT NOW */
+    norm = pitch_nudge_norm(fader, want, pct);
+    v10 = pitch_v10_from_norm(norm);
 
-    pointsrc_log("pointsrc: side %s nudge %s -> key %#x rotate speed %+.2f ch%d pos %u",
+    /* The log states the fader it moved FROM as well as what it sent, because those
+     * two numbers are the whole diagnosis: a nudge that "does nothing" is usually one
+     * that was clamped at the end of the travel, or one taken from a fader no surface
+     * has ever reported. */
+    pointsrc_log("pointsrc: side %s nudge %s -> key %#x op %d ch%d norm %+.3f"
+                 " (fader %+.3f%s, pct %.2f)",
                  side ? "right" : "left",
-                 dir > 0 ? "forward" : (dir < 0 ? "back" : "stop"),
-                 K_JOG_ROT, dir * speed, ch, nudge_pos[side]);
-    send_rx_key_fl(K_JOG_ROT, OP_ROTATE, ch, 0, (float)(dir * speed),
-                   (long)nudge_pos[side]);
+                 want > 0 ? "forward" : (want < 0 ? "back" : "restore"),
+                 K_TEMPO_SLIDER, OP_VALUE, ch, (double)norm, (double)fader,
+                 g_pitch_seen[side] ? "" : ", no fader seen", (double)pct);
+    send_rx_key_fl(K_TEMPO_SLIDER, OP_VALUE, ch, (long)v10, norm,
+                   (long)pitch_pos_from_norm(norm));
 }
 
 /* The reconciler, for the paths where no report will arrive. Called after
  * side_reset_all(), which is where a finger can stop existing without a release edge:
  * the touch device going away, and the menu being switched off under a held press. In
  * both, side_zone.c has already forgotten the press, so side_nudging() reads 0 and
- * this is what actually stops the track. It is idempotent, so calling it on a quiet
- * system sends nothing. */
-static void side_bend_sync(void)
+ * this is what actually puts the tempo back. It is idempotent, so calling it on a
+ * quiet system sends nothing. */
+static void side_nudge_sync(void)
 {
     int i;
 
-    for (i = 0; i < 2; i++) {
-        int want = side_nudging(i);
-
-        if (want != nudge_running[i])
-            side_bend(i, want);
-    }
+    for (i = 0; i < 2; i++)
+        side_nudge(i, side_nudging(i));
 }
 
 static void side_act(int side, int act, int value)
@@ -1436,13 +1446,13 @@ static void side_act(int side, int act, int value)
         send_rx_key(K_PLAY, OP_RELEASE, ch, 0);
         break;
     case SZ_ACT_NUDGE_REV:
-        side_bend(side, -1);
+        side_nudge(side, -1);
         break;
     case SZ_ACT_NUDGE_FWD:
-        side_bend(side, +1);
+        side_nudge(side, +1);
         break;
     case SZ_ACT_NUDGE_STOP:
-        side_bend(side, 0);
+        side_nudge(side, 0);
         break;
     case SZ_ACT_FADER:
         /* The value is logged for every change -- a full-height drag is a few hundred
@@ -1789,6 +1799,17 @@ static void pointer_report(int down, int x, int y, int allow_menu, int held_ms)
     int verdict = MZ_FEED_NONE;
     int side = -1, sact = SZ_ACT_NONE, svalue = 0;
 
+    /* Everything below that turns a finger into a keycode is labelled "touch"
+     * for the key dump. Set once, here, rather than beside each of the ~15 sends
+     * (this is the one entry for the absolute pointer path, and the second
+     * contact goes through pointer_report_alt -- see its own label), and it is
+     * the label that makes the dump answer the question MIDI_DUMP cannot: which
+     * of these commands came off the glass. A report that reaches rbp as a
+     * finger of its own (tscfake_emit, at the bottom) sends no keycode and so
+     * writes no record -- rbp's own widget handling is not a command the shim
+     * gave it. */
+    keylog_from("touch");
+
     /* THE USB STOP CHOOSER FIRST, before everything else including the waveform
      * swipe, and unconditionally -- not behind `allow_menu`. While the box is up it
      * owns every report (prompt_zone.h), and a report it did not take would reach rbp
@@ -2118,6 +2139,11 @@ static void pointer_report_alt(int down, const struct point_xform *x, int rx, in
 {
     int lx, ly;
     int side = -1, act = SZ_ACT_NONE, value = 0;
+
+    /* The second contact's own label, for the same reason pointer_report() sets
+     * one: this path is not reached through it, and its writes (a drawer's fader,
+     * its nudge pair) are commands off the glass like any other. */
+    keylog_from("touch");
 
     if (!menu_enabled)
         return;
@@ -2693,10 +2719,10 @@ static void *reader_thread(void *arg)
          * continuation of a gesture whose beginning rbp never saw, so the release that
          * follows would fire a pad the operator never aimed at. */
         hc_reset();
-        /* ...and the bend, which is the one piece of drawer state rbp holds rather
-         * than this process: the finger went away without a release, so no STOP edge
-         * will ever be delivered and the track would keep sliding. */
-        side_bend_sync();
+        /* ...and the nudge, which is the one piece of drawer state rbp holds rather
+         * than this process: the finger went away without a release, so no RESTORE
+         * edge will ever be delivered and the tempo would stay moved. */
+        side_nudge_sync();
         if (log_debug)
             pointsrc_log("pointsrc: %s went away; rescanning", path);
     }
@@ -2724,9 +2750,9 @@ int pointsrc_start(void)
                             * untouched stream, and a drawer cannot be opened while
                             * it is set -- the funnel never offers it a report */
     if (!menu_enabled)
-        side_bend_sync();  /* and stop any bend a held nudge cell left running:
-                            * this runs at start-up, where "the drawer was reset"
-                            * has to mean "so was the track" */
+        side_nudge_sync();  /* and put back any tempo a held nudge cell left moved:
+                             * this runs at start-up, where "the drawer was reset"
+                             * has to mean "so was the fader" */
     if (!menu_enabled)
         util_reset();      /* and the UTILITY gesture: it is offered the same
                             * reports as the rest of the menu, so POINT_MENU=0

@@ -126,7 +126,7 @@
  *
  *   12.. 35   CH n        the title
  *   44..115   SYNC        full width
- *  128..199   -  |  +     the nudge pair, side by side
+ *  128..163   -  |  +     the nudge pair, side by side, HALF SZ_BTN_H
  *  206..229   value       the fader's readout
  *  240..600   fader       the track, top = loud
  *  628..699   CUE         full width
@@ -135,6 +135,15 @@
  * Every block is a multiple of SZ_LINE (24) plus its padding, so the panel reads as
  * a column rather than as five unrelated numbers, and the whole stack ends at 783 --
  * SZ_PAD rows clear of the bottom edge, the same margin the title leaves at the top.
+ *
+ * THE NUDGE PAIR IS THE ONE BLOCK THAT IS NOT SZ_BTN_H -- the operator asked for it
+ * at half height (*"the +/- buttons should be half of their current height"*,
+ * 2026-10-09), so it keeps its top edge and gives up its bottom half. The rows BELOW
+ * it do not move: the space it gave up is now a gap between the nudge pair and the
+ * fader's readout, which is where a gap reads as separation between two groups. That
+ * was chosen over pulling the readout and the fader up, which would have grown the
+ * fader's own 360 px of travel -- a change to how the fader you are riding FEELS, and
+ * not something this request asked for.
  * ------------------------------------------------------------------------- */
 
 /* The common button box: full inner width, and SZ_BTN_H tall. 72 rows is the same
@@ -153,16 +162,27 @@
 #define SZ_SYNC_Y0     44
 #define SZ_SYNC_Y1     (SZ_SYNC_Y0 + SZ_BTN_H - 1)    /* 115 */
 
-/* THE NUDGE PAIR, side by side and full width between them. Two cells of
- * (SZ_BTN_X1 - SZ_BTN_X0 + 1 - SZ_NUDGE_GAP) / 2 = 70 px, which is wide enough for a
- * thumb and for the drawn bar; the 8 px seam between them is what stops a press that
- * straddles the middle from being ambiguous. The marks are DRAWN, not set: the atlas
- * carries '-' (menu_font.h) and has no '+' at all, and a pair where one sign came
- * from the font and the other from two rectangles would not match -- side_paint.c
- * draws both as bars for exactly that reason. */
+/* THE NUDGE PAIR, side by side and full width between them, AND HALF THE HEIGHT of
+ * every other button. Two cells of (SZ_BTN_X1 - SZ_BTN_X0 + 1 - SZ_NUDGE_GAP) / 2 = 70
+ * px -- the height does not touch their width -- which is wide enough for a thumb and
+ * for the drawn bar; the 8 px seam between them is what stops a press that straddles
+ * the middle from being ambiguous. The marks are DRAWN, not set: the atlas carries '-'
+ * (menu_font.h) and has no '+' at all, and a pair where one sign came from the font and
+ * the other from two rectangles would not match -- side_paint.c draws both as bars for
+ * exactly that reason.
+ *
+ * ITS CELL IS NOW THE PANEL'S TIGHTEST VERTICAL TARGET, which is what keeps
+ * SP_SIGN_ARM down to a mark that fits in it (side_paint.h): at 36 logical rows a
+ * 1280x800 panel gives the cell 36 device rows, so the drawn cross is the thing that
+ * decides whether side_paint_ok() will draw the drawer at all on a SHORT panel. */
 #define SZ_NUDGE_GAP   8
+#define SZ_NUDGE_H     36     /* HALF of SZ_BTN_H -- the operator's ask */
 #define SZ_NUDGE_Y0    128
-#define SZ_NUDGE_Y1    (SZ_NUDGE_Y0 + SZ_BTN_H - 1)   /* 199 */
+#define SZ_NUDGE_Y1    (SZ_NUDGE_Y0 + SZ_NUDGE_H - 1) /* 163 */
+#define SZ_NUDGE_M_X0  SZ_BTN_X0                      /* 16  */
+#define SZ_NUDGE_M_X1  ((SZ_BTN_X0 + SZ_BTN_X1 - SZ_NUDGE_GAP) / 2)   /* 85  */
+#define SZ_NUDGE_P_X0  (SZ_NUDGE_M_X1 + 1 + SZ_NUDGE_GAP)             /* 94  */
+#define SZ_NUDGE_P_X1  SZ_BTN_X1                                      /* 163 */
 #define SZ_NUDGE_M_X0  SZ_BTN_X0                      /* 16  */
 #define SZ_NUDGE_M_X1  ((SZ_BTN_X0 + SZ_BTN_X1 - SZ_NUDGE_GAP) / 2)   /* 85  */
 #define SZ_NUDGE_P_X0  (SZ_NUDGE_M_X1 + 1 + SZ_NUDGE_GAP)             /* 94  */
@@ -175,10 +195,11 @@
  * and DOWN 8 rows past the track for the same reason at the loud end.
  *
  * ITS ENDS ARE DISJOINT FROM EVERY BUTTON: the lane's top (206) is below the nudge
- * pair's last row (199) and its bottom (608) is above CUE's first (628), so a drag
- * can never begin a button press and a button press can never start a drag. That is
- * the same guarantee the old layout made with PLAY, kept by arithmetic: test_side.c
- * asserts both gaps.
+ * pair's last row (163 -- it was 199 until the pair went to half height, so the gap the
+ * operator's change opened is 42 rows rather than 6) and its bottom (608) is above
+ * CUE's first (628), so a drag can never begin a button press and a button press can
+ * never start a drag. That is the same guarantee the old layout made with PLAY, kept by
+ * arithmetic: test_side.c asserts both gaps.
  *
  * VERTICAL, track at the top = loud, which is rbp_vu.h's convention (1023 = at the
  * top) and the hardware's. */
@@ -240,12 +261,12 @@
  *
  * SZ_HIT_NUDGE_M AND _P ARE THE '-' AND '+' CELLS, in the operator's left-to-right
  * reading order: MINUS is the left cell, PLUS the right one. They are not "back" and
- * "forward" in this module -- that mapping is a fact about rbp's jog, not about the
- * panel, and it lives in the caller's send. */
+ * "forward" in this module -- that mapping is a fact about rbp's tempo slider, not
+ * about the panel, and it lives in the caller's send. */
 #define SZ_HIT_NONE    0   /* not on the panel */
 #define SZ_HIT_SYNC    1
-#define SZ_HIT_NUDGE_M 2   /* the '-' cell: bend the track back   */
-#define SZ_HIT_NUDGE_P 3   /* the '+' cell: bend the track forward */
+#define SZ_HIT_NUDGE_M 2   /* the '-' cell: move the tempo back   */
+#define SZ_HIT_NUDGE_P 3   /* the '+' cell: move the tempo forward */
 #define SZ_HIT_CUE     4
 #define SZ_HIT_PLAY    5
 #define SZ_HIT_FADER   6   /* the grab lane */
@@ -256,19 +277,21 @@
  * There is no OPEN/CLOSE action: whether the drawer is out is state the driver
  * reads through side_is_open(), and the caller does not act on it.
  *
- * THE NUDGE IS THREE ACTIONS BECAUSE rbp's BEND HAS NO END OF ITS OWN. A
- * K_JOG_ROT/OP_ROTATE message starts a bend at a signed speed and rbp KEEPS BENDING
- * until it is told speed 0 (map_flx4.c's flx4_jog_idle() is that stop, and it is why
- * the FLX4 works at all). So the pair needs a start in each direction and one stop
- * that is direction-agnostic -- and the stop must be emitted on the RELEASE edge, on
- * a slide-off, on the drawer closing and on the touch device vanishing, which is why
- * side_nudging() exists to reconcile it rather than three call sites each
- * remembering. */
+ * THE NUDGE IS THREE ACTIONS BECAUSE THE PRESS MOVES THE TEMPO AND ONLY THE LIFT PUTS
+ * IT BACK. The pair is a hand on the tempo slider -- pointsrc.c sends
+ * K_TEMPO_SLIDER/OP_VALUE, the same message the FLX4's own pitch fader sends, with the
+ * fader's position moved by +-SIDE_NUDGE_PCT percent of its travel -- so the pair needs
+ * a move down and a move up, and ONE restore that is direction-agnostic because putting
+ * the fader back does not care which cell was held. That restore must be emitted on the
+ * RELEASE edge, on a slide-off, on the drawer closing and on the touch device vanishing:
+ * every one of those is a finger that stopped existing with the tempo still moved, and
+ * nothing on the glass could then put it back. That is why side_nudging() exists to
+ * reconcile it rather than four call sites each remembering. */
 #define SZ_ACT_NONE        0
 #define SZ_ACT_SYNC        1   /* send K_SYNC press+release on this side's channel */
-#define SZ_ACT_NUDGE_REV   2   /* start a backward bend (the '-' cell) */
-#define SZ_ACT_NUDGE_FWD   3   /* start a forward bend (the '+' cell) */
-#define SZ_ACT_NUDGE_STOP  4   /* end any bend: speed 0 */
+#define SZ_ACT_NUDGE_REV   2   /* the '-' cell: move the tempo slider back */
+#define SZ_ACT_NUDGE_FWD   3   /* the '+' cell: move the tempo slider forward */
+#define SZ_ACT_NUDGE_STOP  4   /* the lift: put the tempo slider back */
 #define SZ_ACT_CUE         5   /* send K_CUE press+release on this side's channel */
 #define SZ_ACT_PLAY        6   /* send K_PLAY press+release on this side's channel */
 #define SZ_ACT_FADER       7   /* send K_FADER/OP_VALUE = *value on this side's channel */
@@ -344,8 +367,8 @@ int side_fader_pct(int v);
  *                                       on. A press on the FADER lane jumps to the
  *                                       landing y and sends that value AT ONCE (the
  *                                       operator's "jump to where you touch"); a
- *                                       press on either nudge cell starts a BEND in
- *                                       that cell's direction.
+ *                                       press on either nudge cell moves the tempo
+ *                                       slider in that cell's direction.
  *   while down, armed & shut         -- opens on inward travel dx >= SZ_SWIPE_PX AND
  *                                       dx > |dy|: predominantly horizontal, so a
  *                                       vertical drag from the edge is not a swipe
@@ -360,11 +383,11 @@ int side_fader_pct(int v);
  *   release, started out             -- fires SYNC, CUE or PLAY only if the press
  *                                       began AND ended on the same box (slide-off
  *                                       cancels, menu_zone.h's fire-on-release
- *                                       rule). A press that began on a NUDGE cell
- *                                       ends the bend (SZ_ACT_NUDGE_STOP) whether or
+ *                                       rule). A press that began on a NUDGE cell puts
+ *                                       the tempo back (SZ_ACT_NUDGE_STOP) whether or
  *                                       not the finger is still on the cell, and does
  *                                       NOT fire the button a slide-off landed on --
- *                                       a bend that wandered is not a button press.
+ *                                       a nudge that wandered is not a button press.
  *                                       The ONE exception to fire-on-release is a press
  *                                       that began on the FADER lane: the value has
  *                                       already been sent.
@@ -400,21 +423,23 @@ int side_fader_pct(int v);
  *
  * `ptr` is WHICH FINGER (SZ_PTR_MAIN / SZ_PTR_ALT). It selects one press's own
  * bookkeeping and nothing else -- the gesture rules above are identical for both, so
- * the second contact gets the whole drawer: it can ride a fader, press SYNC, start a
- * bend, swipe a shut drawer out and sweep one away. Only the state is separate. */
+ * the second contact gets the whole drawer: it can ride a fader, press SYNC, hold a
+ * nudge cell, swipe a shut drawer out and sweep one away. Only the state is separate. */
 int side_feed(int side, int ptr, int down, int x, int y, int *act, int *value);
 
-/* THE BEND, RECONCILED RATHER THAN REMEMBERED. Returns the bend THIS side should
- * currently be making: -1 while a nudge cell is held, +1 likewise, 0 when none is.
+/* THE NUDGE, RECONCILED RATHER THAN REMEMBERED. Returns what THIS side's nudge is
+ * doing right now: -1 while the '-' cell is held, +1 while the '+' cell is, 0 when
+ * neither is.
  *
- * It exists because rbp keeps bending until told speed 0, so "is a bend running" is
- * state that can be lost -- by a slide-off, by the panel closing, or by the touch
- * device vanishing with a finger still down. The caller calls this on every report
- * path and once in the device-loss path (beside side_reset_all()) and turns any
- * change into the matching send, so there is exactly one place that can be wrong
- * instead of four. side_feed()'s SZ_ACT_NUDGE_* answers are the edges of the same
- * state and are how a caller that acts only on reports gets told; this is how a
- * caller that has to reconcile gets the truth. */
+ * It exists because the moved tempo is state rbp holds rather than this process, so
+ * "a cell is held" can be lost -- by a slide-off, by the panel closing, or by the touch
+ * device vanishing with a finger still down -- and a tempo left moved has nothing on
+ * the glass able to put it back. The caller calls this on every report path and once in
+ * the device-loss path (beside side_reset_all()) and turns any change into the matching
+ * send, so there is exactly one place that can be wrong instead of four. side_feed()'s
+ * SZ_ACT_NUDGE_* answers are the edges of the same state and are how a caller that acts
+ * only on reports gets told; this is how a caller that has to reconcile gets the
+ * truth. */
 int side_nudging(int side);
 
 /* The funnel's ONE call: consult the drawers and report which one answered.

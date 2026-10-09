@@ -392,6 +392,65 @@ into measurements.
 where it came from and what is still unverified — and the runbook for turning a
 dump into a correction of them.
 
+## The key dump (the other end of the same wire)
+
+A MIDI dump records what a **surface** sent. A key dump records what **rbp was
+told**, and the two are not the same recording:
+
+* a touch the shim turns into a keycode — a QUANTIZE tap, a drawer's SYNC, a hot
+  cue pad, the USB STOP chooser — is not a sequencer event, so a MIDI dump has
+  nothing to record it as;
+* the note→keycode table lives in a map, so replaying a MIDI dump through today's
+  map replays today's *interpretation* of those notes rather than the commands
+  rbp received — which makes it the wrong instrument for "what did this build do
+  to that gesture during the show";
+* a MIDI replay needs a sequencer and a working map. A key replay needs rbp.
+
+So the recorder sits in `send_rx_key_fl()` (`rbp_key.c`), the one call every
+command reaches rbp through — from the maps, from `pointsrc.c`'s taps, and from
+`rbp_bridge.c`'s own calls — and it writes them in one ordered stream.
+
+* `RB_KEY_DUMP=<file>` — **off unless set**, like `MIDI_DUMP`. One line per
+  command, flushed as written:
+
+  ```
+  # rbpi4b key dump v1 -- t is seconds since the first event; op 0=press ...
+  # when 2026-10-09T09:04:11Z epoch 1791… mono_us 8…  pid 437
+  # rbp /root/pdj/rbp size 8123456
+  # shim maps MIDI_MAP=flx4 EVDEV_MAP=kbd
+  # media usb1 uuid='1A2B-3C4D' label='SANDISK' usb2 uuid='' label=''
+  0.000000 op=0 key=0x410e ch=1 param=0 f=0 l=0 src=midi
+  0.083214 op=2 key=0x410e ch=1 param=0 f=0 l=0 src=midi
+  ```
+
+  `t` is **microseconds**, from a real `CLOCK_MONOTONIC` microsecond clock — not
+  `MIDI_DUMP`'s milliseconds with three zeroes appended. A performance is a
+  timing, and a replay that quantised every gap to a millisecond would not be
+  one. `src` says which path sent it (`midi`, `touch`, `evdev`, `replay`), which
+  is the question a MIDI dump cannot answer at all.
+* `RB_KEY_REPLAY=<file>` — feeds a dump back into rbp's KeyManager through the
+  same call, with no controller, no map and no sequencer. `KEY_REPLAY_SPEED`
+  scales the recorded gaps (default 1.0; `0` ignores them). With `KEY_DUMP` set
+  as well, a replay is itself recorded with fresh timestamps — a legitimate way
+  to re-time a recording.
+
+**The `# media` line is the replay condition.** A key dump is deck-relative: it
+says "deck 1, RELOOP" and never names the track. So the header names the media
+the performance was made against — slot, filesystem UUID and volume label, the
+UUID written beside the label by `usb-watch.sh` — and re-emits the line whenever
+the media changes, so the last one before an event is the one that event played
+against. To replay a recording, put the **same stick, with the same files, in the
+same slot, and load the same track the same way**; the keycodes will do the rest.
+Check the uuid, not the label — labels are frequently blank and never unique.
+
+The limits, named: the dump records the *commands*, not rbp's own UI actions (a
+tap on a widget rbp owns natively emits no keycode and so writes no line — that
+is `tscfake_emit`, not a command the shim gave rbp), and it records a command
+only when the call is really made, so a send from a process where the KeyManager
+is not up yet is absent rather than recorded as an intention. `make test` pins the
+round trip, the sub-millisecond timing and the half-written-tail rule in
+`test_keylog`.
+
 ## Env, and the one rule for it
 
 `RB_<NAME>` in `rb.conf` becomes `<NAME>` in the launched environment; that
@@ -1249,7 +1308,7 @@ controller or a byte of MIDI:
 | Drawer control | Sends | Notes |
 |---|---|---|
 | **SYNC** | `K_SYNC 0x4112`, press + release | on the side's channel: 1 = left/deck 1, 2 = right/deck 2 |
-| **−/+ nudge** | `K_JOG_ROT 0x4305` with **`OP_ROTATE`** and a signed rev/s | see below — the *only* bend mechanism rbp has |
+| **−/+ nudge** | `K_TEMPO_SLIDER 0x4109` with **`OP_VALUE`** — a *position*, moved **±5% of the fader's travel** | see below — a move on the press and the lift puts it back |
 | **CUE** | `K_CUE 0x4102`, press + release | same channel argument |
 | **PLAY** | `K_PLAY 0x4101`, press + release | same channel argument |
 | **fader** | `K_FADER 0x501e` via `send_rx_key_f(..., OP_VALUE, ch, v, v/1023.0f)` | **absolute**, `v` 0..1023, top = full |
@@ -1293,19 +1352,46 @@ The three travel from `rbp_led.c` whether or not a controller is attached, so a 
 with no FLX4 is not dark just where it matters — and `LED_DISABLE`, which names the
 *panel*, no longer stops that read (`rbp_led.c`).
 
-**The nudge is not a keycode and there is no macro that would make it one.** `0x4305` is
-the jog's rotation, reached through `send_rx_key_fl(K_JOG_ROT, OP_ROTATE, ch, 0,
-speed /*rev/s, clamped to ±8*/, (long)vpos)`, and it is the same call the FLX4's own jog
-makes (CC `0x11`/`0x31`, above). Two properties decide the whole design:
+**The nudge is not a keycode either, and it is the tempo slider's own message.**
+`K_TEMPO_SLIDER 0x4109` with `OP_VALUE` is a **position** — the identical call the
+FLX4's own pitch fader makes (above), float `norm` in `[-1, +1]` with a 14-bit `pos`
+companion. The drawer moves that position by a step and then puts it back:
 
-* **rbp keeps bending at the last speed until it is told zero.** So the drawer sends the
-  speed once on the down edge — the hold time *is* the bend — and a **stop** (speed
-  `0.00`) on every path where the finger leaves, including the two where no release
-  report arrives at all: the device going away, and `POINT_MENU=0` at startup. A missing
-  stop is a track that runs away, which is why `side_nudging()` derives the truth from
-  the press state rather than trusting an edge to arrive.
-* **The speed is a rate, not a step**, so a tap nudges by however long it was held.
-  Default `0.35` rev/s, exposed as `SIDE_NUDGE_SPEED` for calibration on the glass.
+* **The press sends the fader's position plus or minus the step.** `-` moves toward
+  slower, `+` toward faster, and the message goes out **once** on the down edge. There is
+  no repeat clock here and none is wanted: a repeat would be a rate the operator could
+  not control, and how far the tempo moves is the step and not how long the cell was
+  held.
+* **The lift sends the fader's own position back**, read **at the release** rather than
+  captured at the press — so moving the real fader during the hold makes the restore
+  agree with the hand instead of yanking the tempo back and fighting it. And when the
+  fader did not move, the two are the same number.
+* **The step is a fraction of travel and not a number of tempo points**, because **the
+  shim is never told rbp's tempo range.** `K_TEMPO_RANGE 0x4107` is rbp's own ±6/±10/
+  ±16/WIDE setting, it is set in rbp's menu, and an FLX4 has no range button — so
+  nothing on the wire ever reports it. Travel is the only unit the shim has, which is
+  why *5%* means 5% of the fader and not 5 tempo points: at rbp's default ±6% range the
+  step is about **0.3%** of tempo, at ±10% about **0.5%**, at ±16% about **0.8%**. One
+  knob, three tempos, no way to read which from here.
+
+```
+RB_ENV SIDE_NUDGE_PCT      percent of the fader's travel, default 5.0
+```
+
+`side_nudging(side)` derives (-1 back, +1 forward, 0 none) from the press state rather
+than remembering it, so the restore cannot be lost; `pointsrc.c`'s `side_nudge_sync()`
+reconciles a running nudge against it on the two paths where no release report will ever
+arrive — the touch device going away, and start-up with `POINT_MENU=0`. A step near
+either end of the fader clamps **onto** the end rather than past it, and the restore
+ignores `SIDE_NUDGE_PCT` entirely, so turning the knob down to zero must still not
+disable the release.
+
+**What the position *is* is shared between two shims.** The drawer nudges *from* the
+position rbp was last told, and the only thing that knows it is the map that sent it —
+so `map_flx4.c`/`map_jp21.c` publish the post-`TEMPO_REV` norm into `pitch_state.c`, one
+object linked into both `fbshim.so` and `knobshim.so`, and `fbshim.so` loads first and
+cannot call into the other. That is `fader_state.c`'s arrangement for the channel fader,
+repeated; `make check` fails if either shim stops defining it.
 
 The fader is the same call the FLX4's own fader makes, so a two-deck machine with no
 controller attached has a working channel fader again — and, since rbp builds its

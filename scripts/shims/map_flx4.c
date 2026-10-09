@@ -130,6 +130,7 @@
 #include "rbp_abi.h"
 #include "rbp_bridge.h"
 #include "rbp_vu.h"         /* g_fader / g_fader_seen: the meter scaling input */
+#include "pitch_state.h"    /* g_pitch_norm: what the edge drawers' nudge moves from */
 #include "ctrl_map.h"
 
 /* ---- receive channels, 0-based (the list's channel minus one) -------------
@@ -760,6 +761,11 @@ static void flx4_pitch(int ch, int cc, int val)
      int v10 = (int)((norm + 1.0f) * 511.5f);
      if (v10 < 0) v10 = 0;
      if (v10 > 1023) v10 = 1023;
+     /* PUBLISH WHAT RBP IS BEING TOLD, and after TEMPO_REV rather than before: the
+      * drawer's nudge is a move FROM the position rbp has, so the published value has
+      * to be the one in the message. pitch_state.h carries the arrangement that lets
+      * fbshim.so -- which loads first and cannot call in here -- read it. */
+     pitch_state_set(idx, norm);
      send_rx_key_fl(K_TEMPO_SLIDER, OP_VALUE, s->sch, (long)v10, norm, (long)pos);
      if (tempo_verbose)
           klog("knobshim2: pitch ch%d (deck %d) pos=0x%04x -> norm=%.3f v10=%d\n",

@@ -1834,10 +1834,10 @@ the mirror exists and every other rule is written once.
 | Region | left panel (local x) | right panel |
 |---|---|---|
 | panel | x 0..179, y 0..799 | x 1100..1279, y 0..799 |
-| title `CH 1` / `CH 2` | x 16..163, y 12..31 | mirrored |
+| title `CH 1` / `CH 2` | x 16..163, y 12..35 | mirrored |
 | **SYNC** | x 16..163, y 44..115 | mirrored |
-| **nudge** `-` / `+` | `-` x 16..85, `+` x 94..163, y 128..199 | mirrored |
-| value readout `0`..`100` | x 66..113, y 206..225 | mirrored |
+| **nudge** `-` / `+` | `-` x 16..85, `+` x 94..163, y 128..163 | mirrored |
+| value readout `0`..`100` | x 66..113, y 206..229 | mirrored |
 | fader track (drawn) | x 74..105, y 240..600 | mirrored |
 | fader **grab lane** | x 44..135, y 206..608 | mirrored |
 | **CUE** | x 16..163, y 628..699 | mirrored |
@@ -1867,6 +1867,33 @@ on" and "a finger is on me" stay two different pictures. The full table, where e
 the three comes from, and why a blink is resolved in the LED thread rather than by each
 painter: `08-controls.md`.
 
+**The three lit accents are three colours, and a lit frame is two pixels (2026-10-09).**
+The operator: *"can you make the cue button highlight frame 1pixel thicker and the orange
+shade for a cue button and the same for the play but the correct green shade? the sync
+frame should also be 1pixel thicker"*. Until then all three lit in the panel's own blue
+(`MENU_BTN_PRESSED`), which is one accent for three controls that are three colours on
+the hardware. Now **SYNC keeps the blue, CUE takes `MENU_CUE` (orange, rbp's own
+(255,140,0) AUTO BEAT LOOP pad colour) and PLAY takes `MENU_PLAY` (green)** — two palette
+classes added to `menu_paint.h`, so a call site cannot name a colour the palette has not
+agreed to. The lit ring is `SP_FRAME_LIT` (2 px) and the unlit and pressed rings stay
+1 px, so the highlight reads as a ring at the panel's scale **and the pressed picture
+stays independent of whether rbp has the control lit** — `test_side.c`'s
+`test_paint_pressed_is_local` pins exactly that, and `test_paint_lit_accents` pins the
+three colours and both thicknesses by sampling the ring's own rows. The palette change
+is purely additive: a class that is unused changes no other picture, and no painter
+enumerates the enum.
+
+**The nudge pair is HALF height (2026-10-09).** *"the +/- buttons should be half of their
+current height"* — `SZ_NUDGE_H` is 36 against every other button's `SZ_BTN_H` 72, so the
+pair keeps its top edge (128) and gives up its bottom half (the row ends at 163, was
+199). **Nothing below it moves**: the readout stays at 206 and the fader keeps its 360 px
+of travel — pulling them up would have changed how the fader you are riding *feels*,
+which this request did not ask for, so the space the pair gave up is simply a 42-row gap.
+The drawn `±` mark is square, so a short cell constrains it vertically; `SP_SIGN_ARM`
+came down 12 → 9 to keep a 19 px cross fitting the 36-row cell at every panel size this
+port targets, which matters because `side_paint_ok()` refuses a drawer whose nudge cell
+cannot host the mark — the mark gives way, not the guard.
+
 CUE and PLAY are **stacked full-width** rather than side by side: the inner width is
 148 px, and two 74 px cells would put "PLAY" against the atlas's own 65 px worst case
 ("USB STOP") with nothing to spare — a transport button is not where a 9 px margin is
@@ -1876,8 +1903,8 @@ wanted.
 on the side swipe menus adjust the layout accordingly"*, which is the same restyle the
 band and the USB STOP chooser had the day before: the drawer is now the black
 `MENU_FILL` bed edge to edge, and the only white on it is what each control draws for
-itself — SYNC's and the transport's one-pixel `sp_frame`, the nudge cells', the fader
-cap's, the well's. **No layout number moved**, and that is deliberate rather than
+itself — SYNC's and the transport's `sp_frame` (1 px dead and pressed, 2 px lit),
+the nudge cells', the fader cap's, the well's. **No layout number moved**, and that is deliberate rather than
 lazy: the padding the frame was standing in for is `SZ_PAD`, 16 px in from the panel's
 outer edge, which is what holds the title, SYNC and the transport off the glass's edge
 and was already there — see the table above, where every full-width control is
@@ -1975,9 +2002,10 @@ The band, unlike a drawer, keeps its own tap-away dismissal: a stated divergence
 A release fires a button only for a press that began **and** ended on the same box
 (roll-off cancels). The **nudge pair is the exception and it is deliberate**: a nudge
 press *always* emits `SZ_ACT_NUDGE_STOP` on release, whether or not the finger is still
-on the cell it started on. rbp keeps bending until it is told speed 0, so a bend that
-outlived its press is the one failure here the operator could not undo by lifting a
-finger; a wanders-off bend therefore cancels and fires no button.
+on the cell it started on. The press moved the tempo and only the lift puts it back, so
+a nudge that outlived its press is the one failure here the operator could not undo by
+lifting a finger — the tempo would simply stay moved, with nothing on the glass saying
+why. A wanders-off nudge therefore puts the tempo back and fires no button.
 
 ### SYNC, the nudge pair, and the fader
 
@@ -1985,21 +2013,34 @@ finger; a wanders-off bend therefore cancels and fires no button.
 press + release on the side's channel. Plain press/release, and it fires **on the
 lift**, like every other button here.
 
-**The nudge pair is a bend, and there is no nudge keycode.** `K_JOG_ROT 0x4305` with
-`OP_ROTATE` is the only mechanism rbp exposes: a signed rev/s float, with the position
-argument bumped 128 per change. The bend **starts** on the nudge cell's down edge and
-**stops** on its release — one message each, no repeat clock — because rbp holds the
-speed until it is told otherwise. The magnitude is the acknowledged unknown in this
-change and it is exposed for calibration on the glass:
+**The nudge pair moves the tempo slider, and there is no nudge keycode.** `K_TEMPO_SLIDER
+0x4109` with `OP_VALUE` is a **position** — the identical message the FLX4's own pitch
+fader sends. The press sends the fader's position **moved**, the lift sends the fader's
+position **back**, and each edge is one message with no repeat clock. Two things decide
+the design:
+
+* **The step is a fraction of the fader's travel, not a number of tempo points**, because
+  **the shim is never told rbp's tempo range** — `K_TEMPO_RANGE 0x4107` (rbp's own
+  ±6/±10/±16/WIDE) is set in rbp's menu, and an FLX4 has no range button, so nothing on
+  the wire ever reports it. At rbp's default ±6% range the 5% step is about **0.3%** of
+  tempo; at ±10% about 0.5%; at ±16% about 0.8%.
+* **The restore reads the fader at the RELEASE, not at the press**, so a hand that moves
+  the real fader during the hold is agreed with rather than fought — and when the fader
+  did not move, the two readings are the same number. The step near either end of the
+  fader clamps onto the end, and the restore ignores the size knob entirely, so setting
+  it to zero must not disable the release.
 
 ```
-RB_ENV SIDE_NUDGE_SPEED    rev/s, default 0.35
+RB_ENV SIDE_NUDGE_PCT      percent of the fader's travel, default 5.0
 ```
 
 `side_nudging(side)` derives (-1 back, +1 forward, 0 none) from the press state rather
-than remembering it, so the stop cannot be lost; `pointsrc.c`'s `side_bend_sync()`
-reconciles the running bend against it on the two paths where no report will ever
-arrive — the touch device going away, and start-up with `POINT_MENU=0`.
+than remembering it, so the restore cannot be lost; `pointsrc.c`'s `side_nudge_sync()`
+reconciles a running nudge against it on the two paths where no release report will ever
+arrive — the touch device going away, and start-up with `POINT_MENU=0`. The position it
+nudges *from* is `pitch_state.c`, one object linked into both `fbshim.so` and
+`knobshim.so` because the map that sent it lives in the other one; the fader's
+`fader_state.c` arrangement, repeated.
 
 **CUE and PLAY** are plain keycodes — `K_CUE 0x4102`, `K_PLAY 0x4101` — sent as press +
 release on `side_channel()` (1 for left, 2 for right) with **no `usleep`**, unlike the
@@ -2277,16 +2318,36 @@ pointsrc: side left SYNC  -> key 0x4112 ch1
 pointsrc: side right SYNC -> key 0x4112 ch2
 ```
 
-**Request 4 — the nudge, and the half that is safety-critical.** The bend starts on the
-down edge and **stops on the lift**; rbp holds the last speed until it is told zero, so
-a missing stop would leave the track running away:
+**Request 4 — the nudge, and the half that is safety-critical.** The press moves the
+tempo slider and **the lift puts it back**. Measured on the unit 2026-10-08 by injection
+through the panel's own node, after the operator's own ask (*"make it do a + or - 5% on
+the current pitch fader and then set it back to whatever it is on release"*) replaced the
+older bend. No controller was attached, so the base is the default and the log says so:
 
 ```
-pointsrc: side left nudge forward -> key 0x4305 rotate speed +0.35 ch1 pos 128
-pointsrc: side left nudge stop    -> key 0x4305 rotate speed +0.00 ch1 pos 128
-pointsrc: side right nudge back   -> key 0x4305 rotate speed -0.35 ch2 pos 65408
-pointsrc: side right nudge stop   -> key 0x4305 rotate speed +0.00 ch2 pos 65408
+pointsrc: side left nudge forward -> key 0x4109 op 5 ch1 norm +0.050 (fader +0.000, no fader seen, pct 5.00)
+pointsrc: side left nudge restore -> key 0x4109 op 5 ch1 norm +0.000 (fader +0.000, no fader seen, pct 5.00)
+pointsrc: side left nudge back    -> key 0x4109 op 5 ch1 norm -0.050 (fader +0.000, no fader seen, pct 5.00)
+pointsrc: side left nudge restore -> key 0x4109 op 5 ch1 norm +0.000 (fader +0.000, no fader seen, pct 5.00)
 ```
+
+`op 5` is `OP_VALUE`; the message is `K_TEMPO_SLIDER 0x4109` on the side's channel, the
+same call the FLX4's pitch fader makes. `fader +0.000` is the centre, which is where
+rbp's own tempo slider cold-starts and what a drawer on a unit with no controller reads;
+with an FLX4 attached it is that fader's position instead.
+
+**And rbp acts on it.** A press that is *held* — driven into the node with no release,
+which `poke.py` cannot do because its `finally:` always sends one — changes rbp's own
+picture and nothing else. Comparing `/dev/fb0` at rest against the same capture held on
+'+', **all 396** differing bytes lie inside a **73 × 23 px box at x 397..469, y 681..703**
+— rbp's tempo readout — with **zero** outside it, while the rest-against-rest control
+differs in 802 bytes **all** inside y 605..625, the UI's free-running blink band. The
+'+' and '−' holds differ from each other in that same box by 32 bytes, and **after the
+release the frame matches the resting one everywhere outside the blink band** — which is
+the restore, read off rbp rather than off the log.
+
+The arithmetic under these lines is pinned host-side by `test_pitch.c` (36 checks),
+including a full 16384-position round-trip of the 14-bit companion.
 
 **The fader reaches rbp's mixer.** The objective half of the proof is not the log line
 but the shared array the mixer reads, taken out of the running process:
