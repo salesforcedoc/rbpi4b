@@ -88,6 +88,12 @@ SCHEMA = [
          help="Whether the viewer service comes back after a power cut. Set by the "
               "enable/disable on its row under services -- this is the install-time mirror of "
               "that choice, which install.sh re-applies."),
+    dict(key="RB_VNC_WEB", group="basic", type=B, restart="service:rblive4-webvnc", risk="low",
+         label="Web client at boot",
+         help="Whether the noVNC page on :5903 comes back after a power cut. Set by the "
+              "enable/disable on its row under services -- this is the install-time mirror of "
+              "that choice. It is ALSO gated on the viewer: with RB_VNC=0 there is no RFB port "
+              "for the bridge to reach, so an install disables it again."),
     dict(key="RB_BOOTSCREEN", group="basic", type=B, restart="service:rblive4-boot", risk="low",
          label="Boot progress screen",
          help="Draws the launcher's stages on the framebuffer from first light until rbp "

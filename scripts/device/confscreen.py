@@ -80,6 +80,10 @@ BOOT_UNIT = os.environ.get("RB_BOOT_UNIT", "rblive4-boot")
 # never be waited for (see service_action) and the services table must not offer to stop the
 # thing serving the page.
 CONF_UNIT = os.environ.get("RB_CONF_UNIT", "rblive4-conf")
+# The web client's bridge. It is a unit like any other and belongs in the same table -- it was
+# missing from it, which made it the one service on the unit that could be neither started nor
+# enabled from the page that exists to do exactly that.
+WEBVNC_UNIT = os.environ.get("RB_WEBVNC_UNIT", "rblive4-webvnc")
 RESTART_LOCK = os.environ.get("RB_CONF_RESTART_LOCK",
                               os.path.join(RUN_DIR, "conf-restart.lock"))
 # Two restarts inside this many seconds are refused. Measured on `.239`: two overlapping
@@ -106,14 +110,15 @@ REFRESH_S = int(os.environ.get("RB_CONF_REFRESH_S", "5"))
 # against: a unit name arrives from a form and becomes an argument to systemctl, so the only
 # names that may reach an argv array are these. Built from the constants above rather than
 # retyped, so a unit cannot be listed here under a spelling the rest of the file does not use.
-UNITS = (PLAYER_UNIT, BOOT_UNIT, VIEWER_UNIT, "healthwatch", CONF_UNIT)
+UNITS = (PLAYER_UNIT, BOOT_UNIT, VIEWER_UNIT, WEBVNC_UNIT, "healthwatch", CONF_UNIT)
 
 # THE INSTALL-TIME MIRROR OF A BOOT CHOICE. install.sh decides whether to install some units
 # enabled or disabled from an RB_* line, so a bare `systemctl enable` is a choice the next
 # install would quietly undo. Where such a line exists the button writes it too: the two
 # mechanisms are kept in step rather than left to disagree in silence, which is a trap that
 # would only spring weeks later, on an install.
-BOOT_SETTING = {VIEWER_UNIT: "RB_VNC", BOOT_UNIT: "RB_BOOTSCREEN"}
+BOOT_SETTING = {VIEWER_UNIT: "RB_VNC", BOOT_UNIT: "RB_BOOTSCREEN",
+                WEBVNC_UNIT: "RB_VNC_WEB"}
 
 # THE UNITS THE PAGE WILL NOT DISABLE, WITH THE REASON. They still show the pair -- both
 # states, the one in force drawn as pressed -- but their `disabled` button is itself disabled:
@@ -144,6 +149,23 @@ VNC_KEYS = ("RB_VNC", "RB_VNC_PORT", "RB_VNC_HTTP_PORT", "RB_VNC_FPS", "RB_VNC_M
 RBP_KEYS = ("RB_PREWARM", "RB_POINT_KIND", "RB_MIDI_MAP", "RB_AUDIO_DEV", "RB_BOOTSCREEN",
             "RB_FB_LIE_BPP", "RB_VERBOSE", "RB_CONF_HTTP_PORT")
 CONF_KEYS = VNC_KEYS + RBP_KEYS
+
+
+def conf_keys():
+    """Every key the page can show a value for: the list above, PLUS every key in the editor's
+    schema.
+
+    DERIVED, NOT LISTED, and that is a fix rather than tidiness. `conf_values()` only fetches
+    the keys it is handed, and the settings table renders whatever the schema holds -- so a key
+    added to the schema and forgotten here reads as ``(empty)``. Silently: RB_VNC_WEB was set
+    to 1 on this unit and the page said "(empty)" for it, which is what an unset key looks
+    like. A list that has to be kept in step with another list will not be."""
+    keys = list(CONF_KEYS)
+    if confedit:
+        for e in confedit.SCHEMA:
+            if e["key"] not in keys:
+                keys.append(e["key"])
+    return tuple(keys)
 
 
 def _text(path, default="", limit=None):
@@ -1504,7 +1526,7 @@ class Handler(BaseHTTPRequestHandler):
         """Everything the page and its fragment both need, gathered once. The frame RATE is
         computed from the interval between calls, so the poll IS the frame sampler -- which
         is why this is gathered per request rather than cached."""
-        return (conf_values(), rbp_pid(), frames_since_last(), unit_facts(),
+        return (conf_values(conf_keys()), rbp_pid(), frames_since_last(), unit_facts(),
                 {u: unit_state(u) for u in UNITS},
                 {n: switch_state(n) for n in ("live", "mode", "input")},
                 player_depth(), self.headers.get("Host", ""))

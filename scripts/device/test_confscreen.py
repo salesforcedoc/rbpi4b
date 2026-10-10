@@ -315,6 +315,9 @@ def test_pure(m):
         check(m.rbp_pid() != 4001, "edb_streamd is NOT mistaken for the player")
         check(m.cpu_ticks(4242) == 300, "utime+stime read past the (comm) field")
         check(m.frame_count() == 40, "the frame counter counts DS_HW lines")
+        check("RB_VNC_WEB" in m.conf_keys(),
+              "and conf_keys() covers the schema, so a key it added cannot render as "
+              "(empty) while the unit has it set")
         check(m.player_depth() == 32, "the layer-format word reads as 32 bpp")
 
         with open(os.path.join(env["RB_CHROOT"], "root/pdj/rbp"), "r+b") as f:
@@ -803,9 +806,14 @@ def test_services(env, port):
 
     _s, page = get(port, "/")
     services = page.split("section id=services")[1].split("</section>")[0]
-    for u in ("rblive4-boot", "healthwatch", "rblive4-conf", "rblive4-vnc"):
+    for u in ("rblive4-boot", "healthwatch", "rblive4-conf", "rblive4-vnc",
+              "rblive4-webvnc"):
         check(('name=unit value="%s"' % u) in services,
               "a row button posts the unit name: %s" % u)
+    wrow = [r for r in services.split("<tr>") if ">rblive4-webvnc</td>" in r][0]
+    check("action=/boot" in wrow,
+          "and the web client's bridge has a row of its own -- it was the one service with no "
+          "row at all")
     prow = [r for r in services.split("<tr>") if ">rblive4</td>" in r][0]
     check("action=/service" not in prow,
           "and the PLAYER has no /service form at all -- it keeps its own guarded path")
@@ -890,6 +898,12 @@ def test_services(env, port):
           "be undone by the next install")
     check("--now" not in log and "restart rblive4" not in log,
           "WITHOUT starting or stopping anything: enable writes the symlink and stops there")
+    s, _b, _h = post(port, "/boot", {"unit": "rblive4-webvnc", "action": "off"})
+    check(s == 303, "the web client can be disabled from its own row")
+    check("systemctl disable rblive4-webvnc" in open(calls).read(),
+          "which asks systemd to disable it")
+    check("RB_VNC_WEB=0" in open(conf).read(),
+          "and writes its install-time mirror, so an install cannot quietly undo it")
     s, _b, _h = post(port, "/boot", {"unit": "rblive4-vnc", "action": "wibble"})
     check(s == 400, "an action that is neither is 400")
     s, _b, _h = post(port, "/boot", {"unit": "sshd", "action": "on"})
