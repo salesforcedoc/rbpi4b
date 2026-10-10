@@ -1354,13 +1354,21 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     jdev_v, jdev_d = eff("jpeg_dev", conf.get("RB_VNC_JPEG_DEV", "") or "/dev/video11")
     jq_v, jq_d = eff("jpeg_quality", conf.get("RB_VNC_JPEG_QUALITY", "") or "0")
 
-    def swfield(name, value, lo, hi):
-        """A number in a box and a button, for a switch whose value is a number."""
+    def swfield(name, value, lo, hi, note=""):
+        """A number in a box, a button, and THE RANGE IT TAKES written beside it.
+
+        THE RANGE IS THE POINT. `[ 12 ] set` says nothing about whether 60 is allowed, and
+        these two are the switches whose useful values are a band rather than a word -- the
+        pairs above say what they take by showing both options, and a number box has to say it
+        in words. A slider would show the same thing under the mouse, but a box keeps the value
+        exact, works with the script blocked, and does not need a second control to read it
+        back."""
         if not auth["writes"]:
             return ""
         return ('<form method=post action=/switch><input type=hidden name=name value="%s">'
                 '<input name=value type=number min="%d" max="%d" value="%s" size=3> '
-                '<button>set</button></form>' % (esc(name), lo, hi, esc(value)))
+                '<button>set</button></form><span class=dim> %d&ndash;%d%s</span>'
+                % (esc(name), lo, hi, esc(value), lo, hi, esc(note)))
 
     def swpair(name, options, current):
         """A pair for a /switch row: one hidden field naming the switch, one button per value."""
@@ -1379,7 +1387,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
       % cell(jdev_v, jdev_d,
              swpair("jpeg_dev", (("/dev/video11", "video"), ("/dev/video31", "image")), jdev_v)))
     a("<tr><td class=k>JPEG quality</td><td class=v>%s</td></tr>"
-      % cell(jq_v, jq_d, swfield("jpeg_quality", jq_v, 0, 100)))
+      % cell(jq_v, jq_d, swfield("jpeg_quality", jq_v, 0, 100, " (0 = the encoder's own)")))
 
     # THE PAGE'S OWN PREFERENCE, in the same shape as the switches above it -- a pair with the
     # value in force as pressed -- because a reader should not have to know which of these rows

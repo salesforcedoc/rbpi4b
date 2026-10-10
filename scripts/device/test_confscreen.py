@@ -659,6 +659,12 @@ def test_write_path(env, port):
     check('name=value value="/dev/video31"' in vsec and 'name=value value="/dev/video11"' in vsec,
           "the encoder row offers both nodes as a pair, with the one in force pressed")
     check("action=/switch" in vsec, "and all three post to /switch")
+    check("1&ndash;30" in vsec,
+          "the frame rate row names the range it takes -- a box alone said nothing about "
+          "whether 60 was allowed")
+    check("0&ndash;100" in vsec, "and so does the quality row")
+    check("(0 = the encoder&#x27;s own)" in vsec or "0 = the encoder" in vsec,
+          "with the one value on the quality that is not a quality explained")
 
     fs = os.path.join(env["RB_RUN_DIR"], "vnc.fps")
     s, _b, _h = post(port, "/switch", {"name": "fps", "value": "30"})
