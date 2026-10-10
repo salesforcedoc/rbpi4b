@@ -19,23 +19,43 @@ into real presses on the glass — including the top-menu strip, where raw x 188
 **Measured, 2026-10-09**, by reading those routes. Closing that is part of this work: when the
 write path lands, the viewer's page moves to loopback-only and this page owns the LAN port.
 
-## What it does today: nothing but look
+## What it does
 
-**This landing is read-only.** No request changes a byte of the unit's state; there is no
-write path, no password and no restart button yet, and `POST /` is refused by method (405)
-rather than by a check inside a handler that could later be got wrong. The configuration
-form, its authentication and its restart button are the next landing.
+**It reads, and it acts — behind a password that can be turned off.** Reads are open on the LAN.
+Every write is a POST that needs a session: `/login` against `RB_PASSWORD` (read live from the conf),
+a 128-bit id held in memory behind an `HttpOnly; SameSite=Strict` cookie, a per-session CSRF value in
+every form, a cross-origin POST refused, a GET on a write endpoint answered **405 by method**, logins
+rate-limited, and an EMPTY password **failing closed** with 503. `RB_CONF_AUTH=0` removes the password
+entirely — and then the page says so at the top of its actions and `doctor.sh` warns, because that is a
+choice rather than an accident, not a silent switch.
 
-It shows:
+It shows one section at a time, navigated from the left:
 
 | section | what it is, and where it comes from |
 |---|---|
-| **player** | the pid (found by walking `/proc/*/cmdline` for the loader plus an argv ending `/rbp`, skipping `edb_streamd`), the frame count, and the frame **rate** |
-| **services** | `is-active` and `is-enabled` for `rblive4`, `rblive4-boot`, `rblive4-vnc`, `healthwatch`, `rblive4-conf` |
+| **player** | the pid (found by walking `/proc/*/cmdline` for the loader plus an argv ending `/rbp`, skipping `edb_streamd`), how long it has been **running** (field 22 of `/proc/<pid>/stat` ÷ `SC_CLK_TCK`), the frame count, and the frame **rate** |
+| **services** | `is-active` and `is-enabled` for `rblive4`, `rblive4-boot`, `rblive4-vnc`, `healthwatch`, `rblive4-conf` — and **the restart button**, because this is where you look when the player is wrong |
 | **launcher** | the tail of `/run/rblive4/boot.log` and the last `boot.stage` — the same stage stream the boot screen paints |
 | **viewer** | the three live switch files (`vnc.live`, `vnc.mode`, `vnc.input`), whether the RFB and viewer-page ports answer, and the preview (pointed at the viewer, which owns the capture) |
+| **actions** | sign in or out, **enable/disable the viewer**, and **start/stop sharing** |
 | **unit** | uptime, load, memory, SoC temperature, `get_throttled` decoded into words, free space, the last health line |
-| **settings** | the resolved values of the curated knobs, read-only, plus the depth pair and whether it agrees |
+| **vnc settings** | the viewer's own knobs, read-only for now |
+| **rbp settings** | the player's and the unit's, read-only for now, plus the depth pair and whether it agrees |
+
+The sections are a real nav rather than a long scroll: one is shown at a time, and their ids live
+*inside* the regions the poll re-reads, so the left-hand links keep pointing at something after every
+refresh.
+
+### The restart is two steps, and it is serialised
+
+The button answers with a question — a **real page**, not a script dialog, and it works with the script
+blocked — because this is the one control that acts on something the operator can *see*. Confirming it
+starts `rblive4-boot` **first** and then restarts `rblive4`, so the screen is narrated rather than
+simply blank for fifteen seconds. It is serialised by an `flock` **and a 20-second cooldown**, because
+two overlapping `systemctl restart rblive4` invocations **wedge rbp on this unit** — measured, and the
+reason this button was not built with the others; a second press is refused with the reason shown on
+the page, at the button. Nothing it runs names the player path, because `start-rb.sh`'s `cleanup()`
+kills by cmdline match.
 
 ### The frame counter is the number that matters
 
@@ -72,11 +92,17 @@ not offer to change either.
 **The refresh re-reads the data, it does not reload the page.** A `<meta http-equiv=refresh>` was the
 first version, and it resets the scroll position and discards anything half-typed into the sign-in box
 every few seconds — to update some numbers. So the page carries one small inline script that fetches
-`/data` (the live halves, drawn by the *same* function as the first load, so they cannot drift) and swaps
-its contents into `#data1`/`#data2`. The interactive part — the sign-in box and the buttons — is
-deliberately outside those regions, which is the point. The page is complete without the script: the first
-load has every figure in the HTML, so a browser that blocks it shows a correct page that simply does not
-update itself. Still no CDN, no framework, no build step.
+`/data` (drawn by the *same* function as the first load, so the page and its updates cannot drift) and
+replaces **only the section being looked at**. That last part is not an optimisation: the first version
+swapped the whole content region, which re-created every section — and the ones that were hidden come
+back *without* `hidden`, so for an instant all eight were on screen, every five seconds. **It looked
+exactly like a page reload**, which is the thing this was built to stop. The other sections keep what
+they had and are refreshed when you switch to them.
+
+The interactive part — the sign-in box and the buttons — is deliberately outside the re-read regions,
+which is the point: re-fetching them is what ate a half-typed password. And the page is complete without
+the script: the first load has every figure in the HTML, so a browser that blocks it shows a correct page
+that simply does not update itself. Still no CDN, no framework, no build step.
 
 **The credential is `RB_PASSWORD`, and it is one password for two surfaces** — the page's
 writes, and the viewer's VNC clients. It defaults to `password` so the feature works out of
@@ -102,15 +128,16 @@ stopped — because that is the check that separates "no player" from "a player 
 nothing", and it asserts that a POST writes nothing and that `rb.local.conf` is byte-identical
 after every request.
 
-## Not done yet (the next landing)
+## Not done yet
 
 Stated plainly so that nobody reads this page as more than it is:
 
-* **no write path** — nothing is edited, no password, no restart button;
-* **the viewer's page is still on the LAN** and still unauthenticated, because it has not yet
-  moved to loopback-only;
-* **no TLS** and **no privilege drop** — the service runs as root, as every unit here does,
-  so an authenticated write endpoint running as root is the residual risk to design away when
-  the write path lands;
-* the display-path knobs, the audio-mirror trio (`rb.conf` states a change needs the shim
-  rebuilt, not a restart) and the Pro DJ Link knobs are deliberately out of scope.
+* **the settings are read-only** — the form that would write them through `confedit.py` is the next
+  landing. `confedit` itself is written and tested (87 checks) and called by nothing yet; today
+  `RB_CONF_AUTH` and `RB_PASSWORD` are set by hand in `rb.local.conf`;
+* **the viewer's page is still on the LAN, unauthenticated** — its `/session`, `/input` and `/mode`
+  are state-changing GETs, and moving it to loopback-only is the next landing;
+* **no TLS**, and **no privilege drop** — the service runs as root, as every unit here does, so the
+  write path that has landed runs as root too;
+* the display-path knobs, the audio-mirror trio (`rb.conf` states a change needs the shim rebuilt,
+  not a restart) and the Pro DJ Link knobs are deliberately out of scope.

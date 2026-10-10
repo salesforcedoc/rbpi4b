@@ -78,6 +78,14 @@ LOGIN_MAX_FAILS = int(os.environ.get("RB_CONF_LOGIN_MAX", "5"))
 LOGIN_WINDOW_S = int(os.environ.get("RB_CONF_LOGIN_WINDOW_S", "60"))
 COOKIE = "rblive4conf"
 VIEWER_UNIT = os.environ.get("RB_VNC_UNIT", "rblive4-vnc")
+PLAYER_UNIT = os.environ.get("RB_PLAYER_UNIT", "rblive4")
+BOOT_UNIT = os.environ.get("RB_BOOT_UNIT", "rblive4-boot")
+RESTART_LOCK = os.environ.get("RB_CONF_RESTART_LOCK",
+                              os.path.join(RUN_DIR, "conf-restart.lock"))
+# Two restarts inside this many seconds are refused. Measured on `.239`: two overlapping
+# `systemctl restart rblive4` invocations -- mine and the operator's landing together --
+# wedge rbp outright, and one clean restart immediately after paints normally.
+RESTART_COOLDOWN_S = int(os.environ.get("RB_CONF_RESTART_COOLDOWN_S", "20"))
 
 # Sessions live in MEMORY ONLY. This process is the only thing that needs them, and a page
 # restart should not leave a browser holding a credential the unit has forgotten.
@@ -99,24 +107,14 @@ REFRESH_S = int(os.environ.get("RB_CONF_REFRESH_S", "5"))
 UNITS = ("rblive4", "rblive4-boot", "rblive4-vnc", "healthwatch", "rblive4-conf")
 
 # The settings the page reports today and will edit in the next slice. Read-only here.
-CONF_KEYS = (
-    "RB_VNC",
-    "RB_VNC_PORT",
-    "RB_VNC_HTTP_PORT",
-    "RB_VNC_FPS",
-    "RB_VNC_MODE",
-    "RB_VNC_LIVE",
-    "RB_VNC_INPUT",
-    "RB_PASSWORD",
-    "RB_CONF_AUTH",
-    "RB_BOOTSCREEN",
-    "RB_PREWARM",
-    "RB_POINT_KIND",
-    "RB_MIDI_MAP",
-    "RB_AUDIO_DEV",
-    "RB_FB_LIE_BPP",
-    "RB_VERBOSE",
-)
+# The settings, in the two groups the operator asked for. The split is by what they are
+# ABOUT -- the viewer's own knobs against everything the player and the unit use -- because
+# that is how they get looked for. CONF_KEYS is the union, and it is what the page fetches.
+VNC_KEYS = ("RB_VNC", "RB_VNC_PORT", "RB_VNC_HTTP_PORT", "RB_VNC_FPS", "RB_VNC_MODE",
+            "RB_VNC_LIVE", "RB_VNC_INPUT", "RB_PASSWORD")
+RBP_KEYS = ("RB_PREWARM", "RB_POINT_KIND", "RB_MIDI_MAP", "RB_AUDIO_DEV", "RB_BOOTSCREEN",
+            "RB_FB_LIE_BPP", "RB_VERBOSE", "RB_CONF_AUTH", "RB_CONF_HTTP_PORT")
+CONF_KEYS = VNC_KEYS + RBP_KEYS
 
 
 def _text(path, default="", limit=None):
@@ -483,6 +481,60 @@ def share_set(on):
     return True, ("sharing on -- the screen is being served" if on else "sharing off")
 
 
+def restart_player():
+    """Ask systemd for exactly ONE restart of the player, and refuse a second one too soon.
+
+    The lock and the cooldown are not politeness. Two overlapping `systemctl restart
+    rblive4` invocations wedge rbp on this unit -- measured, with the survivor coming up
+    blank and staying blank -- and the two that did it were seconds apart, which is why the
+    cooldown is longer than the call it guards.
+
+    Nothing here names the player path: `start-rb.sh`'s cleanup() kills by cmdline match, so
+    a command line that mentions it can kill its own caller."""
+    try:
+        import fcntl
+    except ImportError:
+        return False, "fcntl is not available, so a restart cannot be serialised"
+    import time as _time
+    fd = None
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        fd = os.open(RESTART_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        return False, "a restart is already in progress"
+    try:
+        last = _text(RESTART_LOCK).strip()
+        try:
+            last = float(last)
+        except ValueError:
+            last = 0.0
+        waited = _time.time() - last
+        if last and waited < RESTART_COOLDOWN_S:
+            return False, ("a restart happened %d s ago; wait %d s and try again"
+                           % (waited, RESTART_COOLDOWN_S - waited))
+        # The boot screen FIRST. `systemctl restart rblive4` does not pull in
+        # rblive4-boot.service (Before= with nothing requiring it), so without this the
+        # restart blanks the screen and shows nothing at all for ~15 s. Best effort: a unit
+        # that is not installed is not a reason to refuse the restart.
+        if conf_values(("RB_BOOTSCREEN",)).get("RB_BOOTSCREEN", "1") != "0":
+            _run_rc([SYSTEMCTL, "start", BOOT_UNIT], timeout=10)
+        rc, out = _run_rc([SYSTEMCTL, "restart", PLAYER_UNIT], timeout=30)
+        if rc != 0:
+            return False, "systemctl restart returned %d: %s" % (rc, out)
+        try:
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, ("%f\n" % _time.time()).encode())
+        except OSError:
+            pass
+        return True, "restart requested -- the player is coming back now"
+    finally:
+        os.close(fd)          # closing the fd releases the flock
+
+
 # --- sessions -----------------------------------------------------------------------
 #
 # A session is a random id in an HttpOnly, SameSite=Strict cookie, mapped IN MEMORY to a
@@ -566,9 +618,9 @@ footer { margin-top: 28px; color: #6b7480; font-size: 12px; }
 #nav b { color: #8b94a3; font-weight: normal; margin-bottom: 8px; }
 #nav a { color: #a9b4c2; text-decoration: none; padding: 3px 0; }
 #nav a:hover { color: #eceff4; }
+#nav a.on { color: #eceff4; font-weight: bold; }
 #main { min-width: 0; flex: 1 1 auto; }
 h2 { scroll-margin-top: 14px; }
-h2:target { color: #d8dee9; border-bottom-color: #4a5568; }
 @media (max-width: 720px) {
   #layout { display: block; }
   #nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 0 14px;
@@ -589,20 +641,64 @@ h2:target { color: #d8dee9; border-bottom-color: #4a5568; }
 # does not update itself. RB_CONF_REFRESH_S=0 leaves the script out entirely.
 POLL_JS = """
 <script>
+// TWO SMALL JOBS, and both are here because neither can be done in CSS alone.
+//
+// 1. THE TABS. The nav shows one section at a time. With the script blocked every section is
+//    shown -- that is the page's "complete without it" property, not a broken fallback.
+// 2. THE POLL. It re-reads the DATA, because a meta refresh threw away the scroll position and
+//    anything half-typed into the sign-in box every few seconds.
+//
+// IT SWAPS ONLY THE SECTION YOU ARE LOOKING AT. The first version replaced the whole content
+// region on every tick, which re-created every section -- and the ones you cannot see come back
+// WITHOUT `hidden`, so for an instant the page showed all eight at once, every five seconds. It
+// looked exactly like a page reload, which is the very thing this was built to stop. The other
+// sections keep what they had and are refreshed when you switch to them.
 (function () {
-  var ms = %d * 1000;
-  if (!ms) { return; }
+  var tabs = [].slice.call(document.querySelectorAll('#nav a[href^="#"]'));
+  var sections = [].slice.call(document.querySelectorAll('main section'));
+  var current = (location.hash || '#player').slice(1);
+
+  function known(id) {
+    return sections.some(function (s) { return s.id === id; });
+  }
+
+  function applyTab() {
+    var here = known(current);
+    sections.forEach(function (s) { s.hidden = here && s.id !== current; });
+    tabs.forEach(function (a) {
+      a.classList.toggle('on', a.getAttribute('href') === '#' + current);
+    });
+  }
+
   function tick() {
     fetch('/data', {cache: 'no-store'}).then(function (r) { return r.text(); }).then(function (t) {
       var box = document.createElement('div');
       box.innerHTML = t;
-      ['data1', 'data2'].forEach(function (id) {
-        var fresh = box.querySelector('#' + id), here = document.getElementById(id);
-        if (fresh && here) { here.innerHTML = fresh.innerHTML; }
-      });
+      var fresh = box.querySelector('#' + current);
+      var here = document.getElementById(current);
+      if (fresh && here) { here.innerHTML = fresh.innerHTML; }
     }).catch(function () {});
   }
-  setInterval(tick, ms);
+
+  function go(id) {
+    current = known(id) ? id : 'player';
+    applyTab();
+    history.replaceState(null, '', '#' + current);
+    tick();               // the section you just opened may not have been read for a while
+  }
+
+  tabs.forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      go(a.getAttribute('href').slice(1));
+    });
+  });
+  // Any other fragment change -- an in-content link, the back button -- switches too.
+  window.addEventListener('hashchange', function () { go((location.hash || '#player').slice(1)); });
+
+  applyTab();
+  var ms = %d * 1000;
+  if (ms) { setInterval(tick, ms); }
   var flash = document.querySelector('.flash');
   if (flash) { setTimeout(function () { flash.style.display = 'none'; }, 8000); }
 })();
@@ -626,12 +722,24 @@ def player_state(pid, frames, rate):
     return "ok", "rbp is running and painting"
 
 
+def _conf_rows(a, conf, keys):
+    """The value rows for one settings group. A secret is never printed -- `(set)` or
+    `(empty)` is all the page says about it, whatever `RB_PASSWORD` currently is."""
+    for k in keys:
+        v = conf.get(k, "")
+        shown = "(empty)" if v == "" else v
+        if k in ("RB_PASSWORD", "RB_VNC_PASSWORD"):
+            shown = "(set)"
+        a("<tr><td class=k>%s</td><td>%s</td></tr>" % (esc(k), esc(shown)))
+
+
 def render_actions(a, auth):
     """The interactive half: sign in, and the two buttons. Kept OUT of the live region on
     purpose -- re-fetching this would throw away anything half-typed into the sign-in box,
     which is the whole reason the page polls the data instead of reloading itself. Nothing
     here changes on its own: signing in navigates, and the buttons navigate."""
-    a('<h2 id=actions>actions</h2>')
+    a('<section id=actions>')
+    a("<h2>actions</h2>")
     if not auth["writes"]:
         a('<div class=note>The config editor is not installed beside this page, so nothing '
           'here will write. Re-run install.sh.</div>')
@@ -678,6 +786,7 @@ def render_actions(a, auth):
           '<div class=note>The live switch the viewer re-reads each turn. No restart, and '
           'it works whether or not the viewer is running.</div></td></tr>')
         a("</table>")
+    a("</section>")
 
 
 def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="", auth=None,
@@ -711,7 +820,8 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         for anchor, label in (("player", "player"), ("services", "services"),
                               ("launcher", "launcher"), ("viewer", "viewer"),
                               ("actions", "actions"), ("unit", "unit"),
-                              ("settings", "settings")):
+                              ("vncsettings", "vnc settings"),
+                              ("rbpsettings", "rbp settings")):
             a('<a href="#%s">%s</a>' % (anchor, esc(label)))
         a("</nav><main id=main>")
 
@@ -719,7 +829,8 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
 
     # --- the player, first, because it is the thing that is either working or not ---
     cls, words = player_state(pid, frames, rate)
-    a('<h2 id=player>player</h2>')
+    a('<section id=player>')
+    a("<h2>player</h2>")
     a('<div class="state %s">%s</div>' % (cls, esc(words)))
     a("<table>")
     a("<tr><td class=k>pid</td><td>%s</td></tr>" % esc(pid if pid is not None else "&mdash;"))
@@ -733,26 +844,45 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     lt = tail(RBP_LOG, 6)
     if lt:
         a("<pre>%s</pre>" % esc("\n".join(lt)))
+    a("</section>")
 
     # --- services ---
-    a('<h2 id=services>services</h2><table><tr><th>unit</th><th>active</th><th>enabled</th></tr>')
+    a('<section id=services>')
+    a("<h2>services</h2><table><tr><th>unit</th><th>active</th><th>enabled</th></tr>")
     for u in UNITS:
         act, en = services.get(u, ("unknown", "unknown"))
         c = "ok" if act == "active" else ("dim" if act in ("inactive", "unknown") else "bad")
         a("<tr><td>%s</td><td class=%s>%s</td><td class=dim>%s</td></tr>"
           % (esc(u), c, esc(act), esc(en)))
     a("</table>")
+    # The restart lives HERE because this is where you look when the player is wrong: the
+    # row above says whether rblive4 is up, and the button that fixes it is under it.
+    if auth["writes"] and auth["signed_in"]:
+        a('<div class=note>Restarting stops the player and starts it again. The screen goes '
+          'dark for about fifteen seconds, and the boot screen draws its stages while it '
+          'comes back. A set in progress stops.</div>')
+        a('<form method=post action=/restart>'
+          '<input type=hidden name=csrf value="%s">'
+          '<button name=step value=ask>Restart the player&hellip;</button></form>'
+          % esc(auth["csrf"]))
+    elif auth["writes"]:
+        a('<div class=note>Restarting the player needs the password -- sign in under '
+          '<a href="#actions">actions</a>.</div>')
+    a("</section>")
 
     # --- the launcher's own account of the last start ---
     stage = _text(BOOT_STAGE).strip()
     blog = tail(BOOT_LOG, 14)
-    a('<h2 id=launcher>launcher</h2>')
+    a('<section id=launcher>')
+    a("<h2>launcher</h2>")
     if stage:
         a('<div class=note>last boot-screen stage: %s</div>' % esc(stage))
     a("<pre>%s</pre>" % esc("\n".join(blog) if blog else "(no %s)" % BOOT_LOG))
+    a("</section>")
 
     # --- the viewer, and its switches ---
-    a('<h2 id=viewer>viewer</h2><table>')
+    a('<section id=viewer>')
+    a("<h2>viewer</h2><table>")
     a("<tr><td class=k>sharing (vnc.live)</td><td>%s</td></tr>" % esc(switches.get("live")))
     a("<tr><td class=k>encoding (vnc.mode)</td><td>%s</td></tr>" % esc(switches.get("mode")))
     a("<tr><td class=k>pointer injection (vnc.input)</td><td>%s</td></tr>"
@@ -775,6 +905,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         a('<div class=shot><img src="//%s:%s/preview.mjpg" alt="screen preview"></div>'
           % (esc(host_only), esc(pg)))
 
+    a("</section>")
     a("</div>")                      # end of the first live half
 
     if not data_only:
@@ -783,7 +914,8 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a('<div id=data2>')
 
     # --- the unit ---
-    a('<h2 id=unit>unit</h2><table>')
+    a('<section id=unit>')
+    a("<h2>unit</h2><table>")
     if "uptime" in facts:
         a("<tr><td class=k>uptime</td><td>%.0f s</td></tr>" % facts["uptime"])
     if "load" in facts:
@@ -809,16 +941,18 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     if hl:
         a("<tr><td class=k>health (last)</td><td>%s</td></tr>" % esc(hl[-1]))
     a("</table>")
+    a("</section>")
 
-    # --- settings, as resolved -- the surface the next slice makes editable ---
-    a('<h2 id=settings>settings <span class=dim>(shown read-only; the form is the next slice)'
-      "</span></h2><table>")
-    for k in CONF_KEYS:
-        v = conf.get(k, "")
-        shown = "(empty)" if v == "" else v
-        if k in ("RB_PASSWORD", "RB_VNC_PASSWORD"):
-            shown = "(set)"
-        a("<tr><td class=k>%s</td><td>%s</td></tr>" % (esc(k), esc(shown)))
+    # --- the settings, in the two groups the operator asked for: what the VIEWER is, and
+    # what the player and the unit are. Both are shown read-only; the form is the next slice.
+    a('<section id=vncsettings>')
+    a('<h2>vnc settings <span class=dim>(shown read-only)</span></h2><table>')
+    _conf_rows(a, conf, VNC_KEYS)
+    a("</table></section>")
+
+    a('<section id=rbpsettings>')
+    a('<h2>rbp settings <span class=dim>(shown read-only)</span></h2><table>')
+    _conf_rows(a, conf, RBP_KEYS)
     lie = conf.get("RB_FB_LIE_BPP", "")
     a("<tr><td class=k>player's layer format word</td><td>%s</td></tr>"
       % esc(("not readable" if depth is None else "%s bpp" % depth)))
@@ -830,6 +964,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a("</table>")
     a('<div class=note>The depth pair is shown and never editable: it is half of the '
       'player build, and a value that disagrees is rbp SIGSEGV to a black screen.</div>')
+    a("</section>")
     a("</div>")                      # end of the second live half
 
     if not data_only:
@@ -934,7 +1069,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.data())
         elif path == "/healthz":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
-        elif path in ("/login", "/logout", "/vnc", "/share"):
+        elif path in ("/login", "/logout", "/vnc", "/share", "/restart"):
             # A state change is never a GET. Refused as a METHOD here, so that no handler
             # can later be got wrong into acting on one -- which is the bug the viewer's
             # own page has, where /session, /input and /mode are state-changing GETs.
@@ -959,6 +1094,8 @@ class Handler(BaseHTTPRequestHandler):
                                      % COOKIE)
         elif path in ("/vnc", "/share"):
             self._action(path, form)
+        elif path == "/restart":
+            self._restart(form)
         else:
             self._send(404, self._msg("no such page here",
                                       'Try <a href="/">/</a> instead.'))
@@ -1035,28 +1172,72 @@ class Handler(BaseHTTPRequestHandler):
                 {n: switch_state(n) for n in ("live", "mode", "input")},
                 player_depth(), self.headers.get("Host", ""))
 
-    def page(self):
+    def _auth(self, conf, consume_flash=False):
+        """The auth state for one render. `consume_flash` is what makes a flash show once:
+        the page takes it and clears it, while the poll -- which must not consume anything --
+        only reads it."""
         s = self._session()
-        conf, pid, (frames, rate), facts, services, switches, depth, host = self._context()
         required = conf.get("RB_CONF_AUTH", "1") != "0"
-        auth = {"signed_in": (not required) or s is not None,
-                "required": required,
-                "csrf": (s or {}).get("csrf", ""),
-                "flash": (s or {}).get("flash", ""),
-                "writes": writes_available(),
-                # From the values already gathered above, so a poll costs no extra fork.
-                "password_set": bool(conf.get("RB_PASSWORD", ""))}
-        if s:
-            s["flash"] = ""       # a flash is shown once, on the page after the write
-        return render(conf, pid, frames, rate, facts, services, switches, depth, host, auth)
+        out = {"signed_in": (not required) or s is not None,
+               "required": required,
+               "csrf": (s or {}).get("csrf", ""),
+               "flash": (s or {}).get("flash", ""),
+               "writes": writes_available(),
+               # From the values already gathered, so a poll costs no extra fork.
+               "password_set": bool(conf.get("RB_PASSWORD", ""))}
+        if s and consume_flash:
+            s["flash"] = ""
+        return out
+
+    def _restart(self, form):
+        """TWO STEPS, and the confirm is a real page rather than a script dialog: this is the
+        one control on this page that acts on something the operator can SEE, and it blanks
+        the screen for a quarter of a minute. Pressing it by accident should cost one more
+        click, and the confirm has to work with the script blocked, like everything else
+        here."""
+        s = self._session()
+        if auth_required():
+            if s is None:
+                self._send(401, self._msg("sign in first",
+                            "Restarting the player needs the password."))
+                return
+            if not secrets.compare_digest(form.get("csrf", "").encode(), s["csrf"].encode()):
+                self._send(403, self._msg("stale form",
+                            "That form did not come from this session. Reload the page."))
+                return
+        if form.get("step", "ask") != "go":
+            csrf = ('<input type=hidden name=csrf value="%s">'
+                    % esc((s or {}).get("csrf", "")))
+            self._send(200, self._msg(
+                "restart the player?",
+                "This stops rbp and starts it again. The screen goes dark for about fifteen "
+                "seconds, the boot screen draws its stages while it comes back, and a set in "
+                "progress stops."
+                "<p><form method=post action=/restart>" + csrf +
+                "<button name=step value=go>Yes, restart it</button></form> "
+                '<a href="/#services">no, leave it alone</a></p>'))
+            return
+        ok, msg = restart_player()
+        if s is not None:
+            s["flash"] = ("restart FAILED: " if not ok else "restart: ") + msg
+        print("confscreen: restart -> %s%s" % ("" if ok else "FAILED: ", msg), flush=True)
+        # Land on the services tab, where the button was: the rows show the player coming
+        # back, and with auth off there is no session to flash a message into.
+        self._redirect("/#services")
+
+    def page(self):
+        conf, pid, (frames, rate), facts, services, switches, depth, host = self._context()
+        return render(conf, pid, frames, rate, facts, services, switches, depth, host,
+                      self._auth(conf, consume_flash=True))
 
     def data(self):
         """Just the live halves. NO session work here on purpose: this is fetched every few
-        seconds by the page's own script, so it must not consume a flash, clear a session or
-        otherwise change any state -- it only reads."""
+        seconds by the page's own script, so it must not consume a flash or change any state
+        -- but it DOES carry the auth state, because the restart button lives in the services
+        half and its CSRF value has to be right in a fragment too."""
         conf, pid, (frames, rate), facts, services, switches, depth, host = self._context()
         return render(conf, pid, frames, rate, facts, services, switches, depth, host,
-                      data_only=True)
+                      self._auth(conf), data_only=True)
 
 
 def main():

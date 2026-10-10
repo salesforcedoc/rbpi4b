@@ -351,17 +351,39 @@ def test_page(env, port):
     check("http-equiv=refresh" not in body, "there is no meta refresh anywhere")
     check("/data" in body and "<script>" in body,
           "the page's own script fetches /data instead")
-    check("id=data1" in body and "id=data2" in body, "and swaps both live halves by id")
+    check("id=data1" in body and "id=data2" in body, "the live data sits in two regions")
+    check("getElementById(current)" in body and "data1', 'data2'" not in body,
+          "and the poll replaces ONLY the section being looked at -- swapping the two regions "
+          "whole re-created every section, and the hidden ones came back visible for an "
+          "instant on every tick, which is what made it look like a page reload")
     check("running for" in body and "20m 24s" in body,
           "and the player section says how long rbp has been RUNNING (starttime, not the "
           "box's uptime)")
 
-    print("\n== the sections are navigable from the left ==")
-    anchors = re.findall(r'href="#([a-z0-9]+)"', body)
-    check(len(anchors) >= 6, "the nav links the sections (%s)" % ", ".join(anchors))
-    missing = [a for a in anchors if ("id=%s" % a) not in body]
-    check(not missing, "and every link has a target on the page (%s)" % (missing or "none"))
-    check("<nav id=nav>" in body, "the nav is a real element, before the content")
+    print("\n== the sections are tabs down the left ==")
+    # The NAV only: the page also carries in-content links (#actions, from the services
+    # screen's sign-in hint), and counting those would be counting the wrong thing.
+    nav = body.split("<nav id=nav>")[1].split("</nav>")[0]
+    anchors = re.findall(r'href="#([a-z0-9]+)"', nav)
+    check(anchors == ["player", "services", "launcher", "viewer", "actions", "unit",
+                      "vncsettings", "rbpsettings"],
+          "the nav lists every section, in page order (%s)" % ", ".join(anchors))
+    missing = [a for a in anchors if ("section id=%s" % a) not in body]
+    check(not missing,
+          "and each one is a <section>, so the nav can show it alone (%s)"
+          % (missing or "none"))
+    check("<nav id=nav>" in body, "the nav is a real element")
+    check("classList" in body, "and the script marks which one you are looking at")
+
+    print("\n== settings, split in two ==")
+    vnc = body.split("section id=vncsettings")[1].split("</section>")[0]
+    rbp = body.split("section id=rbpsettings")[1].split("</section>")[0]
+    check("RB_VNC_FPS" in vnc and "RB_PASSWORD" in vnc,
+          "vnc settings holds the viewer's own knobs")
+    check("RB_VNC_FPS" not in rbp, "and the viewer's knobs are not in rbp settings")
+    check("RB_PREWARM" in rbp and "RB_POINT_KIND" in rbp,
+          "rbp settings holds the player's")
+    check("depth pair agrees" in rbp, "including the depth pair, which is the player's build")
 
     print("\n== the frame counter decides the state ==")
     frames0 = "running and painting" in body or "too soon" in body
@@ -460,9 +482,9 @@ def test_data_fragment(env, port):
     check("action=/vnc" not in frag, "and not the buttons either")
     check('id=data1' in frag and 'id=data2' in frag,
           "both live halves, under the ids the script swaps")
-    check("id=nav" not in frag and 'href="#' not in frag,
+    check("id=nav" not in frag and "<nav" not in frag,
           "and NO nav in it: the poll must never inject a second one")
-    check("id=player" in frag and "id=settings" in frag,
+    check("id=player" in frag and "id=rbpsettings" in frag,
           "while the section ids it does carry keep the left-hand links working after a "
           "swap")
 
@@ -560,6 +582,11 @@ def test_write_path(env, port):
                      origin="http://evil.example")
     check(s == 403, "a cross-origin POST is refused")
 
+
+def test_rate_limit(env, port):
+    """LAST, and it has to be: it leaves this client's logins refused for a minute, so
+    anything after it that needs to sign in gets a 429 -- which is exactly how this suite
+    first reported a missing restart button."""
     print("\n== and the rate limit ==")
     codes = [post(port, "/login", {"pw": "nope"})[0] for _ in range(7)]
     check(codes[0] == 401, "a wrong password is still 401 to begin with")
@@ -631,6 +658,56 @@ def test_no_auth(root, port):
         p.wait(timeout=5)
 
 
+def test_restart(env, port):
+    """The restart is TWO STEPS and it is serialised -- because two overlapping restarts wedge
+    rbp on this unit, measured, and that is why this button was not built with the others."""
+    print("\n== the restart button lives on the services screen ==")
+    calls = env["FAKE_LOG"]
+    if os.path.exists(calls):
+        os.unlink(calls)
+
+    s, _b, _h = post(port, "/restart", {"step": "go"})
+    check(s == 401, "restarting with no session is 401")
+
+    s, _b, h = post(port, "/login", {"pw": "password"})
+    cookie = cookie_of(h)
+    _s, page = get_with(port, "/", cookie)
+    services = page.split("section id=services")[1].split("</section>")[0]
+    check("Restart the player" in services, "the button is in the services section")
+    csrf = csrf_of(services)
+    check(bool(csrf), "with a CSRF value in its form")
+
+    print("\n== it asks first ==")
+    s, body, _h = post(port, "/restart", {"step": "go", "csrf": "0" * 32}, cookie=cookie)
+    check(s == 403, "a wrong CSRF value is refused before anything runs")
+    s, body, _h = post(port, "/restart", {"step": "ask", "csrf": csrf}, cookie=cookie)
+    check(s == 200, "the button answers with a question, not an action")
+    check("restart the player?" in body, "which says what it will do")
+    check("fifteen seconds" in body, "including that the screen goes dark")
+    log = open(calls).read() if os.path.exists(calls) else ""
+    check("restart rblive4" not in log, "and nothing has been restarted yet")
+
+    print("\n== and only then restarts ==")
+    s, _b, _h = post(port, "/restart", {"step": "go", "csrf": csrf}, cookie=cookie)
+    check(s == 303, "confirming restarts and redirects")
+    log = open(calls).read() if os.path.exists(calls) else ""
+    check("systemctl start rblive4-boot" in log and "restart rblive4" in log
+          and log.index("rblive4-boot") < log.index("restart rblive4"),
+          "the boot screen is started FIRST, in that order, so the restart is narrated "
+          "like a boot")
+    check("/root/pdj" not in log and "rbp -a" not in log,
+          "with no command line naming the player path (the cmdline-kill trap)")
+
+    print("\n== and a second one too soon is refused ==")
+    s, _b, _h = post(port, "/restart", {"step": "go", "csrf": csrf}, cookie=cookie)
+    check(s == 303, "it redirects rather than acting")
+    _s, page = get_with(port, "/", cookie)
+    check("restart happened" in page and "wait" in page,
+          "and the page says why: a restart just happened")
+    check(open(calls).read().count("restart rblive4") == 1,
+          "and systemd was NOT asked a second time")
+
+
 def main():
     m = load_module()
 
@@ -645,6 +722,8 @@ def main():
         test_page(env, port)
         test_data_fragment(env, port)
         test_write_path(env, port)
+        test_restart(env, port)
+        test_rate_limit(env, port)      # last: it refuses this client's logins for a minute
 
         test_states(tempfile.mkdtemp(prefix="confscreen-states."), free_port())
         test_no_password(tempfile.mkdtemp(prefix="confscreen-nopass."), free_port())
