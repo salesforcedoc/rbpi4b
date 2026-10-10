@@ -651,6 +651,38 @@ def test_write_path(env, port):
     check(s == 400, "while a value that is neither on nor off is 400")
     check(open(inp).read() == "off\n", "with the file untouched")
 
+    print("\n== the three live switches that are not pairs ==")
+    _s, page = get(port, "/")
+    vsec = page.split("section id=viewer")[1].split("</section>")[0]
+    for label in ("frame rate", "JPEG encoder", "JPEG quality"):
+        check(label in vsec, "the viewer settings table has a %s row" % label)
+    check('name=value value="/dev/video31"' in vsec and 'name=value value="/dev/video11"' in vsec,
+          "the encoder row offers both nodes as a pair, with the one in force pressed")
+    check("action=/switch" in vsec, "and all three post to /switch")
+
+    fs = os.path.join(env["RB_RUN_DIR"], "vnc.fps")
+    s, _b, _h = post(port, "/switch", {"name": "fps", "value": "30"})
+    check(s == 303, "setting the frame rate redirects")
+    check(open(fs).read() == "30\n", "and the switch file the viewer reads every turn says so")
+    s, _b, _h = post(port, "/switch", {"name": "fps", "value": "0"})
+    check(s == 400, "a rate outside 1..30 is 400")
+    s, _b, _h = post(port, "/switch", {"name": "fps", "value": "fast"})
+    check(s == 400, "and so is one that is not a number")
+    check(open(fs).read() == "30\n", "with the file untouched by either")
+
+    jd = os.path.join(env["RB_RUN_DIR"], "vnc.jpeg_dev")
+    s, _b, _h = post(port, "/switch", {"name": "jpeg_dev", "value": "/dev/video30"})
+    check(s == 400, "an encoder node that is not one of the two is 400")
+    s, _b, _h = post(port, "/switch", {"name": "jpeg_dev", "value": "/dev/video31"})
+    check(s == 303 and open(jd).read() == "/dev/video31\n", "the image encoder is taken")
+    jq = os.path.join(env["RB_RUN_DIR"], "vnc.jpeg_quality")
+    s, _b, _h = post(port, "/switch", {"name": "jpeg_quality", "value": "101"})
+    check(s == 400, "a quality above 100 is 400")
+    s, _b, _h = post(port, "/switch", {"name": "jpeg_quality", "value": "12"})
+    check(s == 303 and open(jq).read() == "12\n", "and 12 is taken")
+    s, _b, _h = post(port, "/switch", {"name": "nonsense", "value": "1"})
+    check(s == 400, "a switch this page does not have is 400")
+
     print("\n== the preview image is the page's own to show ==")
     pv = os.path.join(env["RB_RUN_DIR"], "conf.preview")
     _s, page = get(port, "/")

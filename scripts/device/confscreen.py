@@ -529,6 +529,29 @@ def mode_set(value):
     return True, "encoding now %s -- the viewer picks it up on its next turn" % value
 
 
+def _sw_int(lo, hi):
+    """A validator for an integer switch: the word to write, or None to refuse."""
+    def check(v):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return None
+        return str(n) if lo <= n <= hi else None
+    return check
+
+
+# THE LIVE SWITCHES THIS PAGE CAN WRITE, AND THE ONLY PLACE THEIR VALUES ARE CHECKED. Every row
+# in the viewer settings table that is not an on/off pair is backed by an entry here, so a
+# control cannot exist without a validator -- and adding one means adding both, in one place,
+# rather than three near-identical handlers that drift apart. The names are the switch file's:
+# set_switch writes /run/rblive4/vnc.<name>, which is what vncserve reads each turn.
+LIVE_SWITCHES = {
+    "fps": _sw_int(1, 30),
+    "jpeg_dev": lambda v: v if v in ("/dev/video11", "/dev/video31") else None,
+    "jpeg_quality": _sw_int(0, 100),
+}
+
+
 def preview_on():
     """Whether this page embeds the preview image. Off unless the file says otherwise: the
     stream costs the viewer a frame per tick while it is open, and a page that is cheap to leave
@@ -1322,6 +1345,42 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
       % cell(mode_v, mode_d, pair("/mode", "value", ("raw", "hwjpeg"), mode_v)))
     a("<tr><td class=k>pointer injection (vnc.input)</td><td class=v>%s</td></tr>"
       % cell(inp_v, inp_d, pair("/input", "value", ("on", "off"), inp_v)))
+    # AND THE THREE THAT ARE LIVE WITHOUT BEING PAIRS: a rate, an encoder node and a quality.
+    # They are switch files like the ones above -- the page writes them, the viewer reads them
+    # every turn -- so a change lands on the NEXT FRAME and can be judged on the preview below,
+    # rather than after a restart. A missing file falls back to the RB_VNC_* value the viewer
+    # was started with, which is what a missing file means everywhere on this page.
+    fps_v, fps_d = eff("fps", conf.get("RB_VNC_FPS", "") or "12")
+    jdev_v, jdev_d = eff("jpeg_dev", conf.get("RB_VNC_JPEG_DEV", "") or "/dev/video11")
+    jq_v, jq_d = eff("jpeg_quality", conf.get("RB_VNC_JPEG_QUALITY", "") or "0")
+
+    def swfield(name, value, lo, hi):
+        """A number in a box and a button, for a switch whose value is a number."""
+        if not auth["writes"]:
+            return ""
+        return ('<form method=post action=/switch><input type=hidden name=name value="%s">'
+                '<input name=value type=number min="%d" max="%d" value="%s" size=3> '
+                '<button>set</button></form>' % (esc(name), lo, hi, esc(value)))
+
+    def swpair(name, options, current):
+        """A pair for a /switch row: one hidden field naming the switch, one button per value."""
+        if not auth["writes"]:
+            return ""
+        return ('<form method=post action=/switch><input type=hidden name=name value="%s">%s'
+                '</form>'
+                % (esc(name),
+                   "".join('<button name=value value="%s"%s>%s</button>'
+                           % (esc(v), " class=cur" if v == current else "", esc(label))
+                           for v, label in options)))
+
+    a("<tr><td class=k>frame rate</td><td class=v>%s</td></tr>"
+      % cell(fps_v, fps_d, swfield("fps", fps_v, 1, 30)))
+    a("<tr><td class=k>JPEG encoder</td><td class=v>%s</td></tr>"
+      % cell(jdev_v, jdev_d,
+             swpair("jpeg_dev", (("/dev/video11", "video"), ("/dev/video31", "image")), jdev_v)))
+    a("<tr><td class=k>JPEG quality</td><td class=v>%s</td></tr>"
+      % cell(jq_v, jq_d, swfield("jpeg_quality", jq_v, 0, 100)))
+
     # THE PAGE'S OWN PREFERENCE, in the same shape as the switches above it -- a pair with the
     # value in force as pressed -- because a reader should not have to know which of these rows
     # writes a file the viewer reads and which one only writes a file this page reads.
@@ -1495,8 +1554,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.data())
         elif path == "/healthz":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
-        elif path in ("/share", "/mode", "/input", "/preview", "/restart", "/service", "/boot",
-                      "/set"):
+        elif path in ("/share", "/mode", "/input", "/preview", "/switch", "/restart", "/service",
+                      "/boot", "/set"):
             # A state change is never a GET. Refused as a METHOD here, so that no handler
             # can later be got wrong into acting on one -- which is the bug the viewer's
             # own page has, where /session, /input and /mode are state-changing GETs.
@@ -1521,6 +1580,8 @@ class Handler(BaseHTTPRequestHandler):
             self._input(form)
         elif path == "/preview":
             self._preview(form)
+        elif path == "/switch":
+            self._switch(form)
         elif path == "/restart":
             self._restart(form)
         elif path == "/service":
@@ -1598,6 +1659,30 @@ class Handler(BaseHTTPRequestHandler):
         ok, msg = preview_set(action == "on")
         set_flash(("preview: " if ok else "FAILED: ") + msg)
         print("confscreen: preview %s -> %s%s" % (action, "" if ok else "FAILED: ", msg),
+              flush=True)
+        self._redirect("/#viewer")
+
+    def _switch(self, form):
+        """One of the live switches that is not an on/off pair: the capture ceiling, and the
+        encoder's node and quality.
+
+        ONE HANDLER, NOT THREE, because the only thing that differs between them is the
+        validator -- and the validator lives in LIVE_SWITCHES, which is also what the table is
+        built from. A value this switch does not take is a 400 and the file is not touched."""
+        name = form.get("name", "")
+        check = LIVE_SWITCHES.get(name)
+        if check is None:
+            self._send(400, self._msg("bad request", "No switch by that name."))
+            return
+        value = check(form.get("value", ""))
+        if value is None:
+            self._send(400, self._msg("bad request",
+                        "That is not a value this switch takes."))
+            return
+        ok, why = set_switch(name, value)
+        set_flash(("switch: " if ok else "FAILED: ") +
+                  (why if why else "%s is now %s" % (name, value)))
+        print("confscreen: switch %s=%s -> %s" % (name, value, "ok" if ok else "FAILED"),
               flush=True)
         self._redirect("/#viewer")
 

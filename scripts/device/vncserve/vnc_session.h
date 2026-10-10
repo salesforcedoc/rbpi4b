@@ -91,6 +91,14 @@ struct vnc_session_opts {
      * that matters (the cold-boot blank screen) and why the page has to stay up
      * anyway. NULL for `live_path` means VNC_LIVE_PATH. */
     const char *live_path;
+
+    /* THE THREE LIVE SWITCHES THAT ARE NOT ON/OFF, read every turn like the mode file. NULL
+     * means "no switch", which is what a test wants and what the encoder's own defaults then
+     * stand for. A file that is missing -- and /run is cleared at boot, so they all are --
+     * means keep what we were started with, the same rule the live and mode switches follow. */
+    const char *fps_path;
+    const char *jpeg_dev_path;
+    const char *jpeg_quality_path;
     int default_live;            /* VNC_LIVE_OFF or VNC_LIVE_ON */
 };
 

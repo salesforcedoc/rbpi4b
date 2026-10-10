@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -231,6 +232,36 @@ static int comp_encoding_for(const struct client *c,
  * unsigned long long and not unsigned long: `long` is four bytes on this unit's
  * 32-bit userland, so a millisecond CLOCK_MONOTONIC kept in one wraps every 49
  * days -- which would be a mysterious once-a-month hang rather than a bug. */
+/* One line out of a switch file, without its newline. 1 if there was one to read.
+ *
+ * NOT mtime-CACHED, unlike vnc_live_get: that one is consulted from several places and caches
+ * to keep them consistent, while this is read at the top of the turn the switch is used in.
+ * Two opens a turn is nothing next to the 2 MB capture those turns are for.
+ *
+ * MISSING IS THE ORDINARY STATE -- /run is cleared at every boot -- so it is not an error and
+ * not a reason to log. It means "keep what we were started with". */
+static int read_switch_line(const char *path, char *out, size_t n)
+{
+    int fd;
+    ssize_t r;
+    size_t k = 0;
+
+    if (!path || !*path || n == 0)
+        return 0;
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    r = read(fd, out, n - 1);
+    close(fd);
+    if (r <= 0)
+        return 0;
+    out[r] = '\0';
+    while (k < (size_t)r && out[k] != '\n' && out[k] != '\r')
+        k++;
+    out[k] = '\0';
+    return 1;
+}
+
 static unsigned long long now_ms(void)
 {
     struct timespec ts;
@@ -1208,6 +1239,7 @@ int vnc_session_run(const struct vnc_session_opts *o)
     struct frame fr;
     int ls = -1, i;
     unsigned long long next_tick;
+    int fps = o->fps > 0 ? o->fps : 1;   /* the capture ceiling -- a live switch; see the loop */
     struct vnc_mode mode;
     struct vnc_live live;
     struct vnc_jpeg *jpeg = NULL;
@@ -1273,7 +1305,7 @@ int vnc_session_run(const struct vnc_session_opts *o)
 
     vlog("vnc input starts %s, switch file %s", vnc_input_name(insw.on), insw.path);
 
-    next_tick = now_ms() + 1000 / (o->fps > 0 ? o->fps : 1);
+    next_tick = now_ms() + 1000 / fps;
     fr.last_report = now_ms();
 
     for (;;) {
@@ -1282,6 +1314,44 @@ int vnc_session_run(const struct vnc_session_opts *o)
         unsigned long long now = now_ms();
         int timeout;
         int r;
+        char sw[64];
+
+        /* THE SWITCHES THAT ARE NOT ON/OFF, read at the top of every turn. Three things the
+         * operator changes on the viewer settings page and expects to SEE straight away: the
+         * capture ceiling, and which encoder at what quality. */
+        if (read_switch_line(o->fps_path, sw, sizeof sw)) {
+            int v = atoi(sw);
+            if (v >= 1 && v <= 30 && v != fps) {
+                vlog("fps: %d -> %d (switch file %s)", fps, v, o->fps_path);
+                fps = v;
+                hst.fps = fps;
+            }
+        }
+        /* AND THE ENCODER CAN BE SWAPPED WITHOUT DROPPING A CLIENT. The handle is the only
+         * thing that names the node, so destroying it frees the device and the next frame
+         * comes from the new one -- which is what makes the change visible on the preview
+         * rather than only after a restart. A failed reopen is not special: vnc_jpeg holds the
+         * reason, backs off, and retries the pair it was given, exactly as at startup. */
+        if (jpeg) {
+            char want_dev[64];
+            int want_q = vnc_jpeg_quality(jpeg);
+
+            snprintf(want_dev, sizeof want_dev, "%s", vnc_jpeg_dev(jpeg));
+            if (read_switch_line(o->jpeg_dev_path, sw, sizeof sw) &&
+                !strncmp(sw, "/dev/video", 10))
+                snprintf(want_dev, sizeof want_dev, "%s", sw);
+            if (read_switch_line(o->jpeg_quality_path, sw, sizeof sw)) {
+                int v = atoi(sw);
+                if (v >= 0 && v <= 100)
+                    want_q = v;
+            }
+            if (strcmp(want_dev, vnc_jpeg_dev(jpeg)) != 0 ||
+                want_q != vnc_jpeg_quality(jpeg)) {
+                vlog("jpeg: the switch moved -- reopening on %s at quality %d", want_dev, want_q);
+                vnc_jpeg_destroy(jpeg);
+                jpeg = vnc_jpeg_create(fr.w, fr.h, want_dev, want_q);
+            }
+        }
 
         /* This turn's JPEG, if the encoder was asked for one. It points into the
          * encoder's own mapping and is valid only until the next call, so every
@@ -1555,14 +1625,14 @@ int vnc_session_run(const struct vnc_session_opts *o)
             if (vnc_http_preview_wanted(http))
                 live++;
             if (!live)
-                next_tick = now + (unsigned long long)(1000 / (o->fps > 0 ? o->fps : 1));
+                next_tick = now + (unsigned long long)(1000 / fps);
             else if (want_soon)
                 next_tick = now;
         }
 
         if (cap && now >= next_tick) {
             frame_tick(&fr, cap);
-            next_tick = now + (unsigned long long)(1000 / (o->fps > 0 ? o->fps : 1));
+            next_tick = now + (unsigned long long)(1000 / fps);
 
             /* IS A JPEG WANTED THIS TICK? Two things can want one, and they want it for
              * different reasons. The preview wants it whenever the page is open, in

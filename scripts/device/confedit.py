@@ -101,8 +101,9 @@ SCHEMA = [
     dict(key="RB_VNC_PORT", group="basic", type=I, lo=1024, hi=65535, restart="viewer",
          risk="low", label="VNC (RFB) port", help="The port a VNC client connects to."),
     dict(key="RB_VNC_FPS", group="basic", type=I, lo=1, hi=30, restart="viewer", risk="low",
-         label="VNC frame rate",
-         help="Capture ceiling while a client or the page preview is watching."),
+         label="Frame rate at boot",
+         help="The capture ceiling the viewer STARTS at. The LIVE one is the frame rate row "
+              "under viewer settings, which lands on the next frame rather than a restart."),
     dict(key="RB_VNC_ZLIB_LEVEL", group="basic", type=I, lo=0, hi=9, restart="viewer",
          risk="low", label="Compression level",
          help="Deflate level for zlib. 0 sends every frame raw and costs the most bandwidth."),
@@ -111,16 +112,19 @@ SCHEMA = [
          help="raw or hwjpeg. The live choice is the switch file, which the page sets."),
     dict(key="RB_VNC_JPEG_DEV", group="basic", type=E,
          choices=["/dev/video11", "/dev/video31"], restart="viewer", risk="medium",
-         label="JPEG encoder",
-         help="Which encoder makes the preview and the hwjpeg frames. /dev/video11 -- the "
+         label="JPEG encoder at boot",
+         help="Which encoder the viewer STARTS on; the LIVE one is the JPEG encoder row under "
+              "viewer settings, beside the preview it changes. /dev/video11 -- the "
               "video encoder -- is what this unit has always used and has NO quality control. "
               "/dev/video31 -- the image encoder -- has one, and streams at 60-65 fps "
               "measured. It also produces about four times the bytes for the same screen, so "
               "choosing it means choosing a quality below as well."),
     dict(key="RB_VNC_JPEG_QUALITY", group="basic", type=I, lo=0, hi=100, restart="viewer",
          risk="low",
-         label="JPEG quality",
-         help="0 leaves the encoder's own default alone, which is the only correct value on "
+         label="JPEG quality at boot",
+         help="The quality the viewer STARTS on; the LIVE one is the JPEG quality row under "
+              "viewer settings. 0 leaves the encoder's own default alone, which is the only "
+              "correct value on "
               "/dev/video11 (it refuses the control). On /dev/video31, 1-100: measured here on "
               "the live screen, 182 KB a frame at 80, 132 at 60, 104 at 40, 72 at 20 -- "
               "against the video encoder's ~45 KB."),

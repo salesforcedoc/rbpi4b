@@ -68,6 +68,11 @@ void vnc_jpeg_destroy(struct vnc_jpeg *j);
 /* Is the encoder streaming right now? */
 int vnc_jpeg_ok(const struct vnc_jpeg *j);
 
+/* WHAT THIS HANDLE WAS MADE WITH, so a caller can tell whether a switch has moved under it.
+ * The strings are the ones it was handed, not the ones the driver echoed back. */
+const char *vnc_jpeg_dev(const struct vnc_jpeg *j);
+int vnc_jpeg_quality(const struct vnc_jpeg *j);
+
 /* One line, for the log and for the web page: either what the encoder is doing, or
  * why it is not. Never NULL. */
 const char *vnc_jpeg_status(const struct vnc_jpeg *j);

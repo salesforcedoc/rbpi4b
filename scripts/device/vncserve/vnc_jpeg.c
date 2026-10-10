@@ -305,6 +305,9 @@ struct vnc_jpeg *vnc_jpeg_create(int w, int h, const char *dev, int quality)
 
 int vnc_jpeg_ok(const struct vnc_jpeg *j) { return j->ok; }
 
+const char *vnc_jpeg_dev(const struct vnc_jpeg *j) { return j->dev; }
+int vnc_jpeg_quality(const struct vnc_jpeg *j) { return j->quality; }
+
 const char *vnc_jpeg_status(const struct vnc_jpeg *j)
 {
     return j->why[0] ? j->why : "no status";

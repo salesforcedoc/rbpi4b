@@ -54,6 +54,13 @@ fi
 : "${RB_VNC_PASSWORD:=}"
 : "${RB_VNC_MODE:=raw}"
 : "${RB_VNC_MODE_FILE:=/run/rblive4/vnc.mode}"
+# The LIVE forms of the three settings that are otherwise startup-only: the capture ceiling,
+# and the encoder's node and quality. The page writes these and the server reads them every
+# turn, so a change lands on the next frame rather than at the next restart -- which is what
+# lets the operator judge a quality on the preview with their own eyes.
+: "${RB_VNC_FPS_FILE:=/run/rblive4/vnc.fps}"
+: "${RB_VNC_JPEG_DEV_FILE:=/run/rblive4/vnc.jpeg_dev}"
+: "${RB_VNC_JPEG_Q_FILE:=/run/rblive4/vnc.jpeg_quality}"
 # The deflate level for the compressing encodings (Tight 7 and zlib 6 -- one code
 # path, see vncserve.c). 1 is zlib's own default and measured at 8% of one core for
 # a live Screen Sharing client; 0 disables compression and sends everything Raw,
@@ -131,4 +138,7 @@ exec "$BIN" \
     --zlib-level "$RB_VNC_ZLIB_LEVEL" \
     --jpeg-dev "$RB_VNC_JPEG_DEV" \
     --jpeg-quality "$RB_VNC_JPEG_QUALITY" \
+    --fps-file "$RB_VNC_FPS_FILE" \
+    --jpeg-dev-file "$RB_VNC_JPEG_DEV_FILE" \
+    --jpeg-quality-file "$RB_VNC_JPEG_Q_FILE" \
     --log "${RB_LOG_DIR:-$RB_DEPLOY_ROOT/log}/vncserve.log"

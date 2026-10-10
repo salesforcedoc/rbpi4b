@@ -502,6 +502,9 @@ int main(int argc, char **argv)
      * default quality, which is not settable and does not need to be. */
     const char *jpeg_dev = NULL;
     int jpeg_quality = 0;
+    /* And the LIVE forms of all three, which is what the viewer settings page writes: a switch
+     * file each, read every turn. NULL means "no switch", so the values above simply stand. */
+    const char *fps_file = NULL, *jpeg_dev_file = NULL, *jpeg_qual_file = NULL;
     const char *bindaddr = NULL, *logpath = NULL, *mode_file = NULL;
     const char *input_file = NULL, *input_dev = NULL, *live_file = NULL;
     const char *password = getenv("RB_VNC_PASSWORD");
@@ -557,6 +560,10 @@ int main(int argc, char **argv)
             zlib_level = v;
         }
         else if (!strcmp(argv[i], "--jpeg-dev") && i + 1 < argc) jpeg_dev = argv[++i];
+        else if (!strcmp(argv[i], "--fps-file") && i + 1 < argc) fps_file = argv[++i];
+        else if (!strcmp(argv[i], "--jpeg-dev-file") && i + 1 < argc) jpeg_dev_file = argv[++i];
+        else if (!strcmp(argv[i], "--jpeg-quality-file") && i + 1 < argc)
+            jpeg_qual_file = argv[++i];
         else if (!strcmp(argv[i], "--jpeg-quality") && i + 1 < argc) {
             /* 0 means "leave the node's own default alone", which is the only correct value
              * for a node that has no such control. */
@@ -729,6 +736,9 @@ int main(int argc, char **argv)
         opts.zlib_level = zlib_level;
         opts.jpeg_dev = jpeg_dev;
         opts.jpeg_quality = jpeg_quality;
+        opts.fps_path = fps_file;
+        opts.jpeg_dev_path = jpeg_dev_file;
+        opts.jpeg_quality_path = jpeg_qual_file;
         opts.input_path = input_file;
         opts.input_dev = input_dev;
         opts.default_input = default_input;
