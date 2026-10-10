@@ -1096,7 +1096,10 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         # that says nothing about a lock it does not have is not hiding anything; doctor.sh
         # reports it for anyone who wants it in words.
         a('<div id=layout><nav id=nav><b>%s</b>' % esc(hostname()))
-        for anchor, label in (("player", "player"), ("services", "services"),
+        # The tab is called `status`; inside it the headings are still `player`,
+        # `device info` and `boot info`, each naming the block it opens. The tab is the
+        # whole of "how is it doing"; `player` was only ever the first third of that.
+        for anchor, label in (("player", "status"), ("services", "services"),
                               ("viewer", "viewer settings"),
                               ("vncsettings", "vnc settings"),
                               ("rbpsettings", "rbp settings")):

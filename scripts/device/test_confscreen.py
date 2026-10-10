@@ -404,6 +404,10 @@ def test_page(env, port):
         check(("section id=%s" % gone) not in body and ("#%s" % gone) not in body,
               "with no %s section or tab left anywhere" % gone)
     check("<footer>" not in body, "and no footer -- the page names no doc to go and read")
+    check('href="#player">status<' in nav,
+          "and that tab is labelled status -- its headings name the blocks inside it")
+    check("<h2>player</h2>" in body,
+          "so `player` is still a heading, of the first block rather than of the tab")
     check("<nav id=nav>" in body, "the nav is a real element")
     check("classList" in body, "and the script marks which one you are looking at")
 
