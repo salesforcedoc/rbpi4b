@@ -166,7 +166,7 @@ fi
 # reader standing at the machine finds the installer that made the tree, not a
 # gap where it used to be. Copying a running shell script is fine -- sh reads it
 # a line at a time and holds its own descriptor.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh bootscreen.py confscreen.py install.sh uninstall.sh rb.conf; do
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh bootscreen.py confscreen.py confedit.py install.sh uninstall.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"

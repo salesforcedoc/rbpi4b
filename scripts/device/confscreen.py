@@ -33,8 +33,21 @@ import os
 import socket
 import subprocess
 import sys
+import secrets
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# The editor for rb.local.conf, imported from beside this file rather than reimplemented.
+# It is the one module that knows how to write that file safely -- validated, locked,
+# backed up, and preserving every byte that is not the value being changed -- and the write
+# path is the part of this page that can do damage, so it uses the tested one. If it is
+# missing, writes are refused rather than attempted some other way.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import confedit
+except Exception:
+    confedit = None
 
 # --- where everything is -----------------------------------------------------------
 # Device defaults, every one of them overridable so the test can run this off the unit.
@@ -57,6 +70,20 @@ HOSTNAME_FILE = os.environ.get("RB_HOSTNAME_FILE", "/etc/hostname")
 
 PORT = int(os.environ.get("RB_CONF_HTTP_PORT", "5904"))
 BIND = os.environ.get("RB_CONF_BIND", "0.0.0.0")
+
+# --- the write path's own places ---------------------------------------------------
+LOCAL_CONF = os.environ.get("RB_LOCAL_CONF", os.path.join(DEPLOY_ROOT, "rb.local.conf"))
+SESSION_TTL_S = int(os.environ.get("RB_CONF_SESSION_S", str(8 * 3600)))
+LOGIN_MAX_FAILS = int(os.environ.get("RB_CONF_LOGIN_MAX", "5"))
+LOGIN_WINDOW_S = int(os.environ.get("RB_CONF_LOGIN_WINDOW_S", "60"))
+COOKIE = "rblive4conf"
+VIEWER_UNIT = os.environ.get("RB_VNC_UNIT", "rblive4-vnc")
+
+# Sessions live in MEMORY ONLY. This process is the only thing that needs them, and a page
+# restart should not leave a browser holding a credential the unit has forgotten.
+# {sid: {"csrf": ..., "exp": ..., "flash": ...}}
+_SESSIONS = {}
+_LOGIN_FAILS = {}          # client address -> monotonic times of recent failures
 
 # The frame counter. This string is the whole frame-rate instrument on this unit; it is
 # written once per frame with no message, so a line count IS a frame count.
@@ -332,6 +359,129 @@ def hostname():
     return h or socket.gethostname()
 
 
+# --- the write path -----------------------------------------------------------------
+#
+# Every action below is reached ONLY through a POST carrying a session and a CSRF value,
+# and each one does exactly one of two things: writes rb.local.conf through confedit, or
+# hands systemd a CONSTANT argv. No value from a request is ever interpolated into a
+# command line, and no command line here names the player path -- start-rb.sh's cleanup()
+# kills by cmdline match, so a command that mentions it can kill its own caller.
+
+
+def password():
+    """The credential, read LIVE from the conf so that changing it on this page takes
+    effect at once. Sourcing the shipped file is how every device script reads it, and it
+    is the only way to resolve the `:=` defaults and the rb.local.conf override."""
+    return conf_values(("RB_PASSWORD",)).get("RB_PASSWORD", "")
+
+
+def writes_available():
+    return confedit is not None
+
+
+def _run_rc(argv, timeout=25):
+    """(rc, output) for a constant argv. Used where the EXIT STATUS is the answer -- an
+    enable that failed must never be reported as an enable."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, str(e)
+
+
+def set_switch(name, value):
+    """One of the live /run/rblive4/vnc.* files the viewer re-reads every turn. Written the
+    way vnc_live.c writes it -- a word and a newline -- and created when it is not there
+    yet, which it will not be on a unit whose viewer has never run."""
+    path = os.path.join(RUN_DIR, "vnc." + name)
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(value + "\n")
+        return True, ""
+    except OSError as e:
+        return False, "could not write %s: %s" % (path, e)
+
+
+def vnc_set(on):
+    """Turn the viewer on or off for real, in TWO halves, and both are load-bearing.
+    `systemctl enable --now` is what makes it run now; the line in rb.local.conf is what
+    makes it come back after a power cut, because the thing that reads that line at boot is
+    install.sh, and this process is not install.sh."""
+    if not writes_available():
+        return False, ("the config editor is not installed beside this page, so nothing "
+                       "was changed")
+    ok, why = confedit.write_local(LOCAL_CONF, "RB_VNC", "1" if on else "0")
+    if not ok:
+        return False, "could not record the choice, so nothing was changed: %s" % why
+    if not on:
+        # Leave the sharing switch off with it: a later enable must not come up already
+        # serving the screen.
+        set_switch("live", "off")
+    rc, out = _run_rc([SYSTEMCTL, "enable" if on else "disable", "--now", VIEWER_UNIT])
+    if rc != 0:
+        return False, ("recorded RB_VNC=%s, but systemctl %s returned %d: %s"
+                       % ("1" if on else "0", "enable" if on else "disable", rc, out))
+    return True, ("the viewer is enabled and starting -- it will be on port %s, and its "
+                  "own page at :%s"
+                  % (conf_values(("RB_VNC_PORT",)).get("RB_VNC_PORT", "?"),
+                     conf_values(("RB_VNC_HTTP_PORT",)).get("RB_VNC_HTTP_PORT", "?"))
+                  if on else "the viewer is stopped and will not start at boot")
+
+
+def share_set(on):
+    """The live sharing switch: what the viewer re-reads each turn. No restart, and it
+    works whether or not the viewer is running -- the file IS the request."""
+    ok, why = set_switch("live", "on" if on else "off")
+    if not ok:
+        return False, why
+    return True, ("sharing on -- the screen is being served" if on else "sharing off")
+
+
+# --- sessions -----------------------------------------------------------------------
+#
+# A session is a random id in an HttpOnly, SameSite=Strict cookie, mapped IN MEMORY to a
+# CSRF value and an expiry. SameSite=Strict is the CSRF defence that does not depend on a
+# token surviving a redirect; the CSRF value is the belt to that, because a form a browser
+# is made to post from another site cannot read this page to learn it.
+
+
+def new_session():
+    for sid in [s for s, v in _SESSIONS.items() if v["exp"] < time.monotonic()]:
+        _SESSIONS.pop(sid, None)
+    sid = secrets.token_hex(16)
+    _SESSIONS[sid] = {"csrf": secrets.token_hex(16),
+                      "exp": time.monotonic() + SESSION_TTL_S, "flash": ""}
+    return sid
+
+
+def get_session(sid):
+    if not sid:
+        return None
+    s = _SESSIONS.get(sid)
+    if s is None:
+        return None
+    if s["exp"] < time.monotonic():
+        _SESSIONS.pop(sid, None)
+        return None
+    return s
+
+
+def drop_session(sid):
+    _SESSIONS.pop(sid, None)
+
+
+def rate_limited(addr):
+    now = time.monotonic()
+    fails = [t for t in _LOGIN_FAILS.get(addr, []) if now - t < LOGIN_WINDOW_S]
+    _LOGIN_FAILS[addr] = fails
+    return len(fails) >= LOGIN_MAX_FAILS
+
+
+def note_fail(addr):
+    _LOGIN_FAILS.setdefault(addr, []).append(time.monotonic())
+
+
 # --- the page ----------------------------------------------------------------------
 CSS = """
 :root { color-scheme: dark; }
@@ -352,6 +502,15 @@ pre { background: #0d0f14; border: 1px solid #232833; border-radius: 4px; paddin
 .state { font-size: 15px; }
 .note { color: #8b94a3; font-size: 12px; margin-top: 4px; }
 .shot { margin-top: 6px; } .shot img { max-width: 100%; border: 1px solid #232833; }
+.flash { margin: 8px 0; padding: 6px 9px; border-radius: 4px; background: #16232e;
+         border: 1px solid #2b4257; color: #cfe3f5; }
+.flash.bad { background: #3a1f22; border-color: #5c2b2f; color: #eda6ac; }
+form { display: inline; }
+button { font: inherit; padding: 3px 9px; margin-right: 6px; border-radius: 4px;
+         border: 1px solid #38414f; background: #1e232c; color: #d8dee9; cursor: pointer; }
+button:hover { background: #262d38; }
+input[type=password] { font: inherit; padding: 3px 7px; border-radius: 4px;
+         border: 1px solid #38414f; background: #0d0f14; color: #d8dee9; }
 footer { margin-top: 28px; color: #6b7480; font-size: 12px; }
 """
 
@@ -372,7 +531,9 @@ def player_state(pid, frames, rate):
     return "ok", "rbp is running and painting"
 
 
-def render(conf, pid, frames, rate, facts, services, switches, depth, req_host=""):
+def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="", auth=None):
+    auth = auth or {"signed_in": False, "csrf": "", "flash": "", "writes": False,
+                    "password_set": False}
     h = []
     a = h.append
     a("<!doctype html><html lang=en><head><meta charset=utf-8>")
@@ -381,8 +542,11 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         a('<meta http-equiv=refresh content="%d">' % REFRESH_S)
     a("<title>%s - rbp status</title><style>%s</style></head><body>" % (esc(hostname()), CSS))
     a("<h1>%s &mdash; rbp status</h1>" % esc(hostname()))
-    a('<div class=sub>read-only &middot; page %d &middot; refreshed every %ds &middot; %s</div>'
+    a('<div class=sub>page %d &middot; refreshed every %ds &middot; %s</div>'
       % (PORT, REFRESH_S, esc(time.strftime("%H:%M:%S"))))
+    if auth["flash"]:
+        a('<div class="flash%s">%s</div>'
+          % (" bad" if auth["flash"].startswith("FAILED") else "", esc(auth["flash"])))
 
     # --- the player, first, because it is the thing that is either working or not ---
     cls, words = player_state(pid, frames, rate)
@@ -442,6 +606,44 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
           % (esc(host_only), esc(pg)))
 
     # --- the unit ---
+    # --- what can be done, which is where the password starts to matter ---
+    a("<h2>actions</h2>")
+    if not auth["writes"]:
+        a('<div class=note>The config editor is not installed beside this page, so nothing '
+          'here will write. Re-run install.sh.</div>')
+    elif not auth["password_set"]:
+        a('<div class="note bad">No password is configured (<code>RB_PASSWORD</code> is '
+          'empty), so writes are REFUSED rather than allowed. Set one in <code>%s</code> '
+          'and restart this page.</div>' % esc(LOCAL_CONF))
+    if not auth["signed_in"]:
+        a('<div class=note>Reading is open on this LAN. Changing anything -- including '
+          'starting the viewer -- needs the password.</div>')
+        a('<form method=post action=/login>'
+          # No placeholder: the shipped default password is the word "password", and a
+          # form that spells it out advertises the credential to anyone who loads the
+          # page. doctor.sh tells the OWNER it is still the placeholder; the page does not
+          # need to tell a passer-by.
+          '<label>password <input type=password name=pw autocomplete=current-password>'
+          '</label> <button>Sign in</button></form>')
+    else:
+        csrf = '<input type=hidden name=csrf value="%s">' % esc(auth["csrf"])
+        a('<div class=note>Signed in. '
+          '<form method=post action=/logout><button>Sign out</button></form></div>')
+        a("<table>")
+        a("<tr><td class=k>the viewer</td><td>"
+          '<form method=post action=/vnc>' + csrf +
+          '<button name=action value=on>Enable the viewer</button>'
+          '<button name=action value=off>Stop and disable it</button></form>'
+          '<div class=note>Enabling is two things: it starts the viewer now, and writes '
+          'RB_VNC=1 so it comes back after a power cut.</div></td></tr>')
+        a("<tr><td class=k>screen sharing</td><td>"
+          '<form method=post action=/share>' + csrf +
+          '<button name=action value=on>Start sharing</button>'
+          '<button name=action value=off>Stop sharing</button></form>'
+          '<div class=note>The live switch the viewer re-reads each turn. No restart, and '
+          'it works whether or not the viewer is running.</div></td></tr>')
+        a("</table>")
+
     a("<h2>unit</h2><table>")
     if "uptime" in facts:
         a("<tr><td class=k>uptime</td><td>%.0f s</td></tr>" % facts["uptime"])
@@ -470,7 +672,8 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a("</table>")
 
     # --- settings, as resolved -- the surface the next slice makes editable ---
-    a("<h2>settings <span class=dim>(read-only: nothing here writes yet)</span></h2><table>")
+    a("<h2>settings <span class=dim>(shown read-only; the form is the next slice)"
+      "</span></h2><table>")
     for k in CONF_KEYS:
         v = conf.get(k, "")
         shown = "(empty)" if v == "" else v
@@ -489,8 +692,10 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a('<div class=note>The depth pair is shown and never editable: it is half of the '
       'player build, and a value that disagrees is rbp SIGSEGV to a black screen.</div>')
 
-    a("<footer>read-only. the write path, the password and the restart button are the next "
-      "slice; see <code>docs/20-config-page.md</code>.</footer>")
+    a("<footer>%s See <code>docs/20-config-page.md</code>.</footer>"
+      % ("reading is open; writes need the password."
+         if auth["writes"] else
+         "read-only: the config editor is not installed beside this page."))
     a("</body></html>")
     return "".join(h)
 
@@ -516,28 +721,170 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    def _redirect(self, where="/", cookie=None):
+        """303 back to the page after a write, rather than a rendered reply -- so that a
+        browser refresh re-reads the page instead of re-posting the action."""
+        self.send_response(303)
+        self.send_header("Location", where)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _msg(self, title, text):
+        """A tiny page for anything that is not the page: a refusal, or a reason one could
+        not be carried out. `text` is ours and may carry markup."""
+        return ("<!doctype html><html><head><meta charset=utf-8><title>%s</title>"
+                "<style>%s</style></head><body><h1>%s</h1><div class=note>%s</div>"
+                "<p><a href=\"/\">back to the page</a></p></body></html>"
+                % (esc(title), CSS, esc(title), text))
+
+    # --- request parsing -------------------------------------------------------------
+
+    def _cookies(self):
+        out = {}
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    def _session(self):
+        return get_session(self._cookies().get(COOKIE))
+
+    def _form(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0 or n > 8192:
+            return {}
+        try:
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+        except OSError:
+            return {}
+        return {k: v[0]
+                for k, v in urllib.parse.parse_qs(raw, keep_blank_values=True).items()}
+
+    def _same_origin(self):
+        """A POST that says it came from somewhere else is refused. `SameSite=Strict` on
+        the cookie is the real defence; this is the second lock, for a browser that sends
+        `Origin` anyway."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            host = urllib.parse.urlsplit(origin).netloc
+        except ValueError:
+            return False
+        return host == (self.headers.get("Host") or "")
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html", "/status"):
             self._send(200, self.page())
         elif path == "/healthz":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
+        elif path in ("/login", "/logout", "/vnc", "/share"):
+            # A state change is never a GET. Refused as a METHOD here, so that no handler
+            # can later be got wrong into acting on one -- which is the bug the viewer's
+            # own page has, where /session, /input and /mode are state-changing GETs.
+            self._send(405, self._msg("that is a POST",
+                                      "Nothing on this page changes on a GET."))
         else:
-            self._send(404, "<!doctype html><p>no such page here. try <a href=/>/</a>\n")
+            self._send(404, self._msg("no such page here",
+                                      'Try <a href="/">/</a> instead.'))
 
     def do_POST(self):
-        # This landing has NO write path. A POST is refused as a method, not by a check
-        # inside a handler that might be got wrong later.
-        self._send(405, "<!doctype html><p>this page does not accept writes yet\n")
+        path = self.path.split("?", 1)[0]
+        if not self._same_origin():
+            self._send(403, self._msg("refused",
+                                      "That request did not come from this page."))
+            return
+        form = self._form()
+        if path == "/login":
+            self._login(form)
+        elif path == "/logout":
+            drop_session(self._cookies().get(COOKIE))
+            self._redirect("/", cookie="%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+                                     % COOKIE)
+        elif path in ("/vnc", "/share"):
+            self._action(path, form)
+        else:
+            self._send(404, self._msg("no such page here",
+                                      'Try <a href="/">/</a> instead.'))
+
+    def _login(self, form):
+        pw = password()
+        addr = self.client_address[0]
+        if not pw:
+            # FAIL CLOSED. An empty password must never mean "no authentication" -- it
+            # means the unit has no credential, so nothing is written.
+            self._send(503, self._msg(
+                "no password is set",
+                "This unit has no <code>RB_PASSWORD</code>, so writes are refused rather "
+                "than allowed. Set one in <code>%s</code> and restart this page."
+                % esc(LOCAL_CONF)))
+            return
+        if rate_limited(addr):
+            self._send(429, self._msg("too many attempts",
+                                      "Wait a minute, then try again."))
+            return
+        given = form.get("pw", "")
+        if not (given and secrets.compare_digest(given.encode(), pw.encode())):
+            note_fail(addr)
+            print("confscreen: rejected a sign-in from %s" % addr, flush=True)
+            self._send(401, self._msg("wrong password", "Nothing was changed."))
+            return
+        sid = new_session()
+        _LOGIN_FAILS.pop(addr, None)      # a good password clears the strike count
+        get_session(sid)["flash"] = "signed in -- the actions below now do what they say"
+        self._redirect("/", cookie="%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict"
+                                 % (COOKIE, sid, SESSION_TTL_S))
+
+    def _action(self, path, form):
+        s = self._session()
+        if s is None:
+            self._send(401, self._msg("sign in first",
+                        "Reading is open on this page; changing anything needs the "
+                        "password."))
+            return
+        if not secrets.compare_digest(form.get("csrf", "").encode(), s["csrf"].encode()):
+            self._send(403, self._msg("stale form",
+                        "That form did not come from this session. Reload the page and try "
+                        "again."))
+            return
+        action = form.get("action", "")
+        if action not in ("on", "off"):
+            self._send(400, self._msg("bad request", "action must be on or off."))
+            return
+        on = action == "on"
+        ok, msg = vnc_set(on) if path == "/vnc" else share_set(on)
+        s["flash"] = ("the viewer: " if path == "/vnc" else "sharing: ") + \
+                     ("" if ok else "FAILED: ") + msg
+        print("confscreen: %s %s -> %s%s" % (path, action, "" if ok else "FAILED: ", msg),
+              flush=True)
+        self._redirect("/")
 
     def page(self):
         conf = conf_values()
+        s = self._session()
+        auth = {"signed_in": s is not None,
+                "csrf": (s or {}).get("csrf", ""),
+                "flash": (s or {}).get("flash", ""),
+                "writes": writes_available(),
+                # From the values the page already resolved, so a poll costs no extra fork.
+                "password_set": bool(conf.get("RB_PASSWORD", ""))}
+        if s:
+            s["flash"] = ""       # a flash is shown once, on the page after the write
         pid = rbp_pid()
         frames, rate = frames_since_last()
         services = {u: unit_state(u) for u in UNITS}
         switches = {n: switch_state(n) for n in ("live", "mode", "input")}
         return render(conf, pid, frames, rate, unit_facts(), services, switches,
-                      player_depth(), self.headers.get("Host", ""))
+                      player_depth(), self.headers.get("Host", ""), auth)
 
 
 def main():
@@ -549,7 +896,9 @@ def main():
         print("confscreen: cannot bind %s:%d: %s" % (BIND, PORT, e), flush=True)
         return 1
     srv.daemon_threads = True
-    print("confscreen: serving %s:%d, read-only, no write path" % (BIND, PORT), flush=True)
+    print("confscreen: serving %s:%d -- reads open, writes need the password%s"
+          % (BIND, PORT, "" if writes_available() else
+             " (no config editor beside this page, so writes are refused)"), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

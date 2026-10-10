@@ -16,6 +16,7 @@ HTTP requests: first poll (no previous sample), then frames appended, then frame
 
 import importlib.util
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -109,6 +111,7 @@ def make_fake(root, frames=40, pid=4242, depth=(0x03, 0x40), live="on"):
                 ": \"${RB_PREWARM:=1}\"\n: \"${RB_POINT_KIND:=auto}\"\n"
                 ": \"${RB_MIDI_MAP:=}\"\n: \"${RB_AUDIO_DEV:=}\"\n"
                 ": \"${RB_FB_LIE_BPP:=32}\"\n: \"${RB_VERBOSE:=0}\"\n"
+                ": \"${RB_PASSWORD:=password}\"\n"
                 "if [ -f \"$RB_DEPLOY_ROOT/rb.local.conf\" ]; then\n"
                 "  . \"$RB_DEPLOY_ROOT/rb.local.conf\"\nfi\n")
     with open(os.path.join(deploy, "rb.local.conf"), "w") as f:
@@ -185,6 +188,7 @@ def make_fake(root, frames=40, pid=4242, depth=(0x03, 0x40), live="on"):
         RB_RBP_LOG=os.path.join(deploy, "log", "rbp.log"),
         RB_HEALTH_LOG=os.path.join(root, "health.log"),
         RB_CHROOT=os.path.join(deploy, "rbx3-run"),
+        RB_LOCAL_CONF=os.path.join(deploy, "rb.local.conf"),
         RB_HOSTNAME_FILE=os.path.join(root, "hostname"),
         RB_CONF_REFRESH_S="0",
         PATH=shim + ":" + os.environ.get("PATH", ""),
@@ -224,6 +228,54 @@ def get(port, path="/"):
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
+
+
+def get_with(port, path, cookie):
+    """(status, body), discarding the headers -- for a GET that carries a session."""
+    status, body, _h = _open(urllib.request.Request(
+        "http://127.0.0.1:%d%s" % (port, path)), cookie)
+    return status, body
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Let a 303 arrive AS a 303. urllib follows redirects by default, which would hide both
+    the status and the Set-Cookie carrying the session -- the two things these checks are
+    about."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open(req, cookie=None):
+    if cookie:
+        req.add_header("Cookie", cookie)
+    try:
+        with _OPENER.open(req, timeout=3) as r:
+            return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
+
+
+def post(port, path, data, cookie=None, origin=None):
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
+                                 data=urllib.parse.urlencode(data).encode(), method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    if origin:
+        req.add_header("Origin", origin)
+    return _open(req, cookie)
+
+
+def cookie_of(headers):
+    sc = headers.get("Set-Cookie", "")
+    return sc.split(";", 1)[0] if sc else None
+
+
+def csrf_of(body):
+    m = re.search(r'name=csrf value="([0-9a-f]+)"', body)
+    return m.group(1) if m else None
 
 
 def test_pure(m):
@@ -304,22 +356,29 @@ def test_page(env, port):
     _s, body = get(port)
     check("drawing NOTHING" in body, "frames stopped => 'running and drawing NOTHING'")
 
-    print("\n== no write path, and a refusal that is not a handler check ==")
-    req = urllib.request.Request("http://127.0.0.1:%d/" % port, data=b"x=1", method="POST")
+    print("\n== a state change is never a GET, and unknown paths are not actions ==")
+    for p in ("/login", "/logout", "/vnc", "/share"):
+        s, b = get(port, p)
+        check(s == 405, "GET %s is 405 (refused by method, not by a handler's check)" % p)
+    req = urllib.request.Request("http://127.0.0.1:%d/nonsense" % port, data=b"x=1",
+                                 method="POST")
     try:
         urllib.request.urlopen(req, timeout=3)
-        check(False, "POST should be refused")
+        check(False, "POST to an unknown path should not be accepted")
     except urllib.error.HTTPError as e:
-        check(e.code == 405, "POST / is 405 (this landing has no write path)")
+        check(e.code == 404, "POST to an unknown path 404s")
     _s, body = get(port, "/nope")
     check("no such page" in body, "an unknown path 404s")
 
-    print("\n== 405 must not have touched anything ==")
+    print("\n== refusals must not have touched anything ==")
     check(not os.path.exists(os.path.join(env["RB_DEPLOY_ROOT"], "rb.local.conf.new")),
           "no temp file was created")
     with open(os.path.join(env["RB_DEPLOY_ROOT"], "rb.local.conf")) as f:
         check(f.read() == "# machine-local\nRB_VNC_FPS=7\n",
-              "the config file is byte-identical after every request")
+              "the config file is byte-identical after every request so far")
+    check(os.path.exists(os.path.join(env["RB_RUN_DIR"], "vnc.live"))
+          and open(os.path.join(env["RB_RUN_DIR"], "vnc.live")).read() == "on\n",
+          "and the switch file the fixture wrote is unchanged")
 
 
 def test_states(root, port):
@@ -363,6 +422,128 @@ def test_bind_failure(env, port):
         s.close()
 
 
+def test_write_path(env, port):
+    """The write path through real HTTP: a session, a CSRF value, and two actions that must
+    each change exactly what they say and NOTHING else. The config file is checked before
+    and after by content, because the whole promise of this page is that it edits the
+    operator's file rather than regenerating it."""
+    print("\n== signing in ==")
+    conf = os.path.join(env["RB_DEPLOY_ROOT"], "rb.local.conf")
+    calls = env["FAKE_LOG"]
+    before = open(conf).read()
+    if os.path.exists(calls):
+        os.unlink(calls)
+
+    s, _b, _h = post(port, "/vnc", {"action": "on"})
+    check(s == 401, "a write with no session is 401")
+    s, _b, _h = post(port, "/login", {"pw": "wrong"})
+    check(s == 401, "a wrong password is 401")
+    check(not os.path.exists(calls), "and nothing ran systemctl")
+    check(open(conf).read() == before, "and the config is untouched")
+
+    s, _b, h = post(port, "/login", {"pw": "password"})
+    check(s == 303, "the right password redirects (303)")
+    cookie = cookie_of(h)
+    check(bool(cookie) and cookie.startswith("rblive4conf="), "and sets a session cookie")
+    setcookie = h.get("Set-Cookie", "")
+    check("HttpOnly" in setcookie and "SameSite=Strict" in setcookie,
+          "which is HttpOnly and SameSite=Strict")
+
+    _s, page = get_with(port, "/", cookie)
+    csrf = csrf_of(page)
+    check(bool(csrf), "the page then renders a CSRF value into its forms")
+    check("Signed in" in page and "Sign out" in page, "and says it is signed in")
+    check("Enable the viewer" in page and "Start sharing" in page, "and offers both actions")
+    check("signed in -- the actions below" in page, "and shows the flash from the login")
+
+    print("\n== the CSRF value is not decoration ==")
+    s, _b, _h = post(port, "/vnc", {"action": "on", "csrf": "0" * 32}, cookie=cookie)
+    check(s == 403, "a form with the WRONG csrf value is 403")
+    s, _b, _h = post(port, "/vnc", {"action": "on"}, cookie=cookie)
+    check(s == 403, "a form with NO csrf value is 403 too")
+    s, _b, _h = post(port, "/vnc", {"action": "wibble", "csrf": csrf}, cookie=cookie)
+    check(s == 400, "an action that is neither on nor off is 400")
+
+    print("\n== enabling the viewer ==")
+    s, _b, _h = post(port, "/vnc", {"action": "on", "csrf": csrf}, cookie=cookie)
+    check(s == 303, "enabling redirects")
+    after = open(conf).read()
+    check("RB_VNC=1" in after, "RB_VNC=1 is in rb.local.conf")
+    check("# machine-local" in after and "RB_VNC_FPS=7" in after,
+          "and the operator's own lines are intact -- the page edited the file, it did not "
+          "regenerate it")
+    logged = open(calls).read() if os.path.exists(calls) else ""
+    check("systemctl enable --now rblive4-vnc" in logged,
+          "and systemd was asked to enable and start the viewer")
+    check("/root/pdj" not in logged and "rbp -a" not in logged,
+          "with no command line naming the player path (the cmdline-kill trap)")
+    _s, page = get_with(port, "/", cookie)
+    check("the viewer is enabled" in page, "and the page reports what it did")
+
+    print("\n== the sharing switch, which needs no restart ==")
+    s, _b, _h = post(port, "/share", {"action": "on", "csrf": csrf}, cookie=cookie)
+    check(s == 303, "starting sharing redirects")
+    live = os.path.join(env["RB_RUN_DIR"], "vnc.live")
+    check(os.path.exists(live) and open(live).read() == "on\n",
+          "and the switch file the viewer re-reads now says on")
+    _s, page = get_with(port, "/", cookie)
+    check("sharing (vnc.live)</td><td>on" in page, "and the page shows sharing on")
+
+    print("\n== disabling it takes the switch with it ==")
+    s, _b, _h = post(port, "/vnc", {"action": "off", "csrf": csrf}, cookie=cookie)
+    check(s == 303, "disabling redirects")
+    after = open(conf).read()
+    check("RB_VNC=0" in after and "RB_VNC=1" not in after, "RB_VNC is now 0")
+    check(open(live).read() == "off\n",
+          "and the sharing switch is off too, so a later enable cannot come up already "
+          "serving")
+    check("systemctl disable --now rblive4-vnc" in open(calls).read(), "and it was disabled")
+
+    print("\n== a POST that says it came from somewhere else ==")
+    s, _b, _h = post(port, "/vnc", {"action": "on", "csrf": csrf}, cookie=cookie,
+                     origin="http://evil.example")
+    check(s == 403, "a cross-origin POST is refused")
+
+    print("\n== and the rate limit ==")
+    codes = [post(port, "/login", {"pw": "nope"})[0] for _ in range(7)]
+    check(codes[0] == 401, "a wrong password is still 401 to begin with")
+    check(429 in codes and codes[-1] == 429,
+          "and repeated guesses are refused with 429 (%s)" % codes)
+
+
+def test_no_password(root, port):
+    """FAIL CLOSED. An empty password must never mean 'no authentication': it means the
+    unit has no credential, and nothing is written."""
+    print("\n== a unit with no password at all ==")
+    env = make_fake(root)
+    conffile = env["RB_CONF_FILE"]
+    text = open(conffile).read().replace(': "${RB_PASSWORD:=password}"\n', "")
+    with open(conffile, "w") as f:
+        f.write(text)
+    # The fixture writes the switch files; this unit must not CREATE any, so start from none.
+    for n in ("live", "mode", "input"):
+        try:
+            os.unlink(os.path.join(env["RB_RUN_DIR"], "vnc." + n))
+        except OSError:
+            pass
+    p = start_daemon(env, port)
+    try:
+        body = wait_up(port)
+        check(body is not None, "the page still answers")
+        if body:
+            check("No password is configured" in body,
+                  "and says writes are refused rather than allowed")
+        s, _b, _h = post(port, "/login", {"pw": ""})
+        check(s == 503, "a sign-in with no password configured is 503")
+        s, _b, _h = post(port, "/login", {"pw": "password"})
+        check(s == 503, "and so is any other password")
+        check(not os.path.exists(os.path.join(env["RB_RUN_DIR"], "vnc.live")),
+              "and no switch file was created")
+    finally:
+        p.terminate()
+        p.wait(timeout=5)
+
+
 def main():
     m = load_module()
 
@@ -375,8 +556,10 @@ def main():
         env = make_fake(root)
         daemon = start_daemon(env, port)
         test_page(env, port)
+        test_write_path(env, port)
 
         test_states(tempfile.mkdtemp(prefix="confscreen-states."), free_port())
+        test_no_password(tempfile.mkdtemp(prefix="confscreen-nopass."), free_port())
         # A port of its own: the daemon above is still holding the one it was given.
         test_bind_failure(env, free_port())
     finally:

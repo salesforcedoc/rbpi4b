@@ -679,6 +679,18 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 		fi
 	fi
 
+	# The page's editor, which install.sh copies beside it. confscreen.py refuses every
+	# write when it is missing -- fail closed, and the page says so -- but that is a page
+	# you only see in a browser, and this is the check that would have caught the deploy
+	# that shipped the page without the editor.
+	if [ "${RB_CONF:-1}" = "1" ] && [ ! -f "$RB_DEPLOY_ROOT/confedit.py" ]; then
+		bad "confedit.py is missing from $RB_DEPLOY_ROOT"
+		note "confscreen.py refuses EVERY write without it, on purpose: it is the only"
+		note "thing that knows how to edit rb.local.conf safely, and a page with a second"
+		note "implementation of that would be a second thing to get wrong."
+		fix "sh $RB_DEPLOY_ROOT/install.sh"
+	fi
+
 	# The two names can be set apart -- RB_VNC_PASSWORD derives from RB_PASSWORD unless it
 	# is set explicitly -- and if they have been, the viewer and the page stop sharing a
 	# credential without anything saying so. Worth a line, because the whole point of the
