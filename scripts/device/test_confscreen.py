@@ -206,7 +206,6 @@ def make_fake(root, frames=40, pid=4242, depth=(0x03, 0x40), live="on"):
         RB_CHROOT=os.path.join(deploy, "rbx3-run"),
         RB_LOCAL_CONF=os.path.join(deploy, "rb.local.conf"),
         RB_HOSTNAME_FILE=os.path.join(root, "hostname"),
-        RB_CONF_REFRESH_S="5",
         PATH=shim + ":" + os.environ.get("PATH", ""),
         FAKE_LOG=os.path.join(root, "calls.log"),
         FAKE_UNITS=units,
@@ -679,6 +678,10 @@ def test_write_path(env, port):
           "each carrying the value it cannot say by itself, initialised to the one in force "
           "(found %r)" % (_found,))
 
+    check("requestSubmit" in page and "addEventListener('change'" in page,
+          "and the slider SETS ITSELF on release -- a range control has no submit of its own, "
+          "and the journal showed the operator pressing the small button three times for one "
+          "value")
     check("e.target.type !== 'range'" in page,
           "and the number follows the thumb when the script is there")
     check("(0 = the encoder&#x27;s own)" in vsec or "0 = the encoder" in vsec,

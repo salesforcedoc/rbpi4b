@@ -110,7 +110,11 @@ DSHW = "DS_HW_Glib3_DFB.c <1106>"
 # How often the page re-reads its DATA, in seconds. 0 leaves the poll out entirely. This is
 # a fetch of /data and a swap of two divs, not a reload -- see POLL_JS for why that
 # distinction earned a script.
-REFRESH_S = int(os.environ.get("RB_CONF_REFRESH_S", "5"))
+# THERE IS NO REFRESH INTERVAL ANY MORE. The page had one -- five seconds, the value
+# RB_CONF_REFRESH_S carried -- and the operator took it off: a section is re-read when you
+# switch to it and not on a timer, which is the only time it can be stale in a way you are
+# looking at. What that also removes is a whole class of fault, because a timed swap re-creates
+# every control in the section it swaps.
 
 # The units worth showing, AND AT THE SAME TIME the whitelist the service button validates
 # against: a unit name arrives from a form and becomes an argument to systemctl, so the only
@@ -819,28 +823,32 @@ h2 { scroll-margin-top: 14px; }
 }
 """
 
-# THE ONLY SCRIPT, and it re-reads the DATA rather than the page. A `<meta http-equiv=refresh>`
-# is one line of HTML and no script at all, and it was the first version of this page -- but it
-# reloads the whole document, which throws away the scroll position and anything half-typed
-# into the sign-in box, every few seconds, to update some numbers. So this fetches `/data` (the
-# live halves of the page, as HTML) and swaps their contents in place.
+# THE ONLY SCRIPT, and it re-reads the DATA rather than the page, ON DEMAND. A
+# `<meta http-equiv=refresh>` is one line of HTML and no script at all, and it was the first
+# version of this page -- but it reloads the whole document, which throws away the scroll
+# position and anything half-typed, to update some numbers. This fetches `/data` (the live
+# halves of the page, as HTML) and swaps the contents in place instead.
+#
+# IT IS NOT ON A TIMER. It ran every five seconds for a while -- RB_CONF_REFRESH_S, which is
+# gone -- and a timed swap re-creates every control in the section it swaps, so a slider being
+# dragged was rebuilt under the operator's hand. A section is now re-read when you SWITCH to
+# it, which is the only moment it can be stale in a way you are looking at, and the swap is
+# skipped entirely while a control in it has focus.
 #
 # It stays inside the rule this page family follows -- no CDN, no framework, no build step --
 # and the page is complete without it: the first load already carries every one of these
-# figures in the HTML, so a browser that blocks the script shows a correct page that simply
-# does not update itself. RB_CONF_REFRESH_S=0 leaves the script out entirely.
+# figures in the HTML, so a browser that blocks the script shows a correct page.
 POLL_JS = """
 <script>
 // THREE SMALL JOBS, and none of them can be done in CSS alone.
 //
 // 1. THE TABS. The nav shows one section at a time. With the script blocked every section is
 //    shown -- that is the page's "complete without it" property, not a broken fallback.
-// 2. THE POLL. It re-reads the DATA, because a meta refresh threw away the scroll position and
-//    anything half-typed into the sign-in box every few seconds -- AND IT MUST NOT PULL A
-//    CONTROL OUT FROM UNDER A HAND EITHER, which is the same fault one level down: the swap
-//    re-creates every control in the section, so a slider being dragged is destroyed and
-//    rebuilt at the server's value. A slider takes long enough to drag that this happened
-//    EVERY time, and it reads as "the control is broken" rather than as a refresh.
+// 2. THE REFRESH, ON DEMAND AND NOT ON A TIMER. A section is re-read when you switch to it,
+//    which is the only moment it can be stale in a way you are looking at; the five-second
+//    poll this replaced re-created every control in the section it swapped, so a slider being
+//    dragged was rebuilt at the server's value and the thumb snapped back. With no timer left,
+//    the guard below is what remains for the on-demand case.
 // 3. THE SLIDER'S NUMBER. A range control cannot say its own value, so the number beside it
 //    follows the thumb -- and it ships initialised to the value IN FORCE, so with the script
 //    blocked the page still shows the current value rather than a blank. THE LISTENER IS
@@ -910,9 +918,18 @@ POLL_JS = """
     if (out) { out.textContent = e.target.value; }
   });
 
+  // AND THE SLIDER SETS ITSELF WHEN YOU LET GO. The button stays for a browser with the script
+  // blocked, but a range control has no submit of its own and reaching for a small button
+  // beside a 130-px track is the awkward half of the interaction -- the journal showed the
+  // operator clicking `set` three times for one value. `change` fires once, on release, not per
+  // pixel of the drag, so this is one write per adjustment and not one per frame.
+  document.addEventListener('change', function (e) {
+    if (!e.target || e.target.type !== 'range' || !e.target.form) return;
+    if (e.target.form.requestSubmit) { e.target.form.requestSubmit(); }
+    else { e.target.form.submit(); }
+  });
+
   applyTab();
-  var ms = %d * 1000;
-  if (ms) { setInterval(tick, ms); }
   var flash = document.querySelector('.flash');
   if (flash) { setTimeout(function () { flash.style.display = 'none'; }, 8000); }
 })();
@@ -1391,10 +1408,13 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
 
         A range control says two things a box cannot: what the range IS, by the shape of the
         track, and roughly where the current value sits in it. What it cannot say is the number,
-        so that is written beside it -- and it ships initialised to the value IN FORCE, which
-        means the page still shows the current value with the script blocked, and with it the
-        number follows the thumb (see POLL_JS, which delegates that listener so the poll's
-        innerHTML swap cannot take it away)."""
+        so that is written beside it -- and it ships initialised to the value IN FORCE, so with
+        the script blocked the page still shows the current value.
+
+        WITH THE SCRIPT the slider is the whole interaction: the number follows the thumb, and
+        releasing it posts the form (see POLL_JS). The `set` button is there for the browser
+        that blocks the script, which is the rule this page family follows -- not because
+        reaching for a small button beside a 130-px track is a good way to set a number."""
         if not auth["writes"]:
             return ""
         return ('<form method=post action=/switch><input type=hidden name=name value="%s">'
@@ -1507,7 +1527,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         # reader of this page is standing at the machine, and the doc is in the tree beside
         # the script that draws it. It had also accumulated a duplicated sentence about the
         # password -- which is the shape a footer takes when it has nothing of its own to say.
-        a(POLL_JS % REFRESH_S)
+        a(POLL_JS)
         a("</body></html>")
     return "".join(h)
 

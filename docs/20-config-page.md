@@ -178,18 +178,25 @@ not offer to change either.
 | `RB_CONF` | `1` | whether `install.sh` enables `rblive4-conf.service` |
 | `RB_CONF_HTTP_PORT` | `5904` | the page's port |
 | `RB_CONF_BIND` | `0.0.0.0` | what it binds |
-| `RB_CONF_REFRESH_S` | `5` | how often the page re-reads its data, seconds; `0` leaves the poll out |
 
-**The refresh re-reads the data, it does not reload the page.** A `<meta http-equiv=refresh>` was the
-first version, and it reset the scroll position and discarded anything half-typed — the sign-in box it
-was built around is gone, but a form in the settings still loses an edit every five seconds under a
-reload, so the reason outlived the case that found it. So the page carries one small inline script that fetches
-`/data` (drawn by the *same* function as the first load, so the page and its updates cannot drift) and
-replaces **only the section being looked at**. That last part is not an optimisation: the first version
-swapped the whole content region, which re-created every section — and the ones that were hidden come
-back *without* `hidden`, so for an instant all eight were on screen, every five seconds. **It looked
-exactly like a page reload**, which is the thing this was built to stop. The other sections keep what
-they had and are refreshed when you switch to them.
+**The refresh re-reads the data, it does not reload the page — and it is no longer on a timer.** A
+`<meta http-equiv=refresh>` was the first version, and it reset the scroll position and discarded
+anything half-typed. So the page carries one small inline script that fetches `/data` (drawn by the
+*same* function as the first load, so the page and its updates cannot drift) and replaces **only the
+section being looked at**.
+
+**It ran every five seconds for a while, under `RB_CONF_REFRESH_S`, and that had to go.** A timed swap
+re-creates every control in the section it swaps, and a section on this page now *holds* controls — the
+startup pairs, the sliders. A slider takes longer to drag than the interval, so it was destroyed and
+rebuilt at the server's value mid-drag and the thumb snapped back: the operator's report was *"I can't
+seem to set the frame rate, it's not enabled."* There is no interval any more. A section is re-read
+when you **switch** to it — the only moment it can be stale in a way you are looking at — and even then
+the swap is skipped while a control inside it has focus.
+
+That last part is not an optimisation: the first version swapped the whole content region, which
+re-created every section — and the ones that were hidden came back *without* `hidden`, so for an
+instant all of them were on screen. **It looked exactly like a page reload**, which is the thing this
+was built to stop. The other sections keep what they had.
 
 The notice at the top is deliberately outside the re-read regions — it is about the page, not about the
 data — and the page is complete without
