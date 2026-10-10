@@ -1,0 +1,27 @@
+[Unit]
+Description=rblive4-webvnc - rbp's screen in a browser (noVNC, bridged to the RFB port)
+Documentation=https://github.com/salesforcedoc/rbpi4b/blob/main/docs/19-vnc.md
+# basic.target only, and deliberately NOT after rblive4-vnc.service. The bridge does not need
+# the viewer UP to be running: it dials the RFB port when a BROWSER connects, so a unit whose
+# viewer starts a second later is already serving the page that will watch it.
+After=basic.target
+# The packages, not this tree, provide the program. A missing one makes the unit SKIP rather
+# than fail forever -- and install.sh withholds the unit entirely in that case, the same rule
+# the viewer's unit follows for its binary.
+ConditionPathExists=/usr/bin/websockify
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/opt/rblive4/webvnc-run.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=5
+# mixed: SIGTERM to the bridge alone, so a stop is immediate and leaves no socket behind.
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rblive4-webvnc
+
+[Install]
+WantedBy=multi-user.target

@@ -166,7 +166,7 @@ fi
 # reader standing at the machine finds the installer that made the tree, not a
 # gap where it used to be. Copying a running shell script is fine -- sh reads it
 # a line at a time and holds its own descriptor.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh bootscreen.py confscreen.py confedit.py install.sh uninstall.sh rb.conf; do
+for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh webvnc-run.sh bootscreen.py confscreen.py confedit.py install.sh uninstall.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"
@@ -519,6 +519,24 @@ else
   warn "rblive4-conf.service is not in $HERE -- there will be no status page"
 fi
 
+# The web client's unit, and the one unit here that needs something this tree does NOT
+# provide: websockify and the noVNC page come from the distribution. So it follows the
+# viewer's rule for its binary -- installed only when the program exists, and REMOVED
+# otherwise, because Restart=always on a missing program is a restart loop, not a service.
+WEB_UNIT=/etc/systemd/system/rblive4-webvnc.service
+if [ -f "$HERE/rblive4-webvnc.service" ]; then
+  if [ -x /usr/bin/websockify ] && [ -f "${RB_VNC_WEB_ROOT:-/usr/share/novnc}/vnc.html" ]; then
+    install -m 644 -o root -g root "$HERE/rblive4-webvnc.service" "$WEB_UNIT"
+    say "installed $WEB_UNIT"
+  else
+    rm -f "$WEB_UNIT"
+    warn "the web client's packages are missing, so rblive4-webvnc.service was NOT installed
+  (and any earlier one was removed). For rbp's screen in a browser:
+      apt-get install novnc websockify
+  then re-run install.sh."
+  fi
+fi
+
 # The rendezvous directory the launcher appends to (rb_bootmsg) and the screen
 # tails. A tmpfiles.d entry makes it exist at sysinit -- BEFORE basic.target, so
 # before either writer -- which is the only way it is a guarantee rather than a
@@ -672,6 +690,30 @@ if [ -f "$CONF_UNIT" ]; then
   else
     systemctl disable rblive4-conf.service >/dev/null 2>&1 || true
     say "rblive4-conf.service installed but DISABLED (RB_CONF=${RB_CONF:-1})"
+  fi
+fi
+
+# The web client, gated on the viewer as well as on its own switch -- and the viewer gate is
+# not decoration: the bridge reaches the RFB port, and that port only exists while the viewer
+# is running AND sharing is on. Enabling a browser client against a viewer that is off would
+# be a page that always fails.
+if [ -f "$WEB_UNIT" ]; then
+  if [ "${RB_VNC:-0}" = "1" ] && [ "${RB_VNC_WEB:-1}" = "1" ]; then
+    if systemctl enable rblive4-webvnc.service >/dev/null 2>&1; then
+      say "rblive4-webvnc.service enabled -- rbp's screen in a browser (RB_VNC_WEB=1)"
+      say "  http://<this host>:${RB_VNC_WEB_PORT:-5903}/vnc.html"
+      say "  the password is the viewer's, and sharing must be ON before it can connect"
+    else
+      warn "could not enable rblive4-webvnc.service; start it by hand with
+  systemctl enable --now rblive4-webvnc"
+    fi
+  else
+    systemctl disable rblive4-webvnc.service >/dev/null 2>&1 || true
+    if [ "${RB_VNC_WEB:-1}" != "1" ]; then
+      say "rblive4-webvnc.service installed but DISABLED (RB_VNC_WEB=${RB_VNC_WEB:-1})"
+    else
+      say "rblive4-webvnc.service installed but DISABLED with the viewer (RB_VNC=${RB_VNC:-0})"
+    fi
   fi
 fi
 

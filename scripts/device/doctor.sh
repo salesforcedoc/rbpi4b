@@ -699,6 +699,26 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 		fix "sh $RB_DEPLOY_ROOT/install.sh"
 	fi
 
+	# The web client. Its program comes from the distribution, not from this tree, so the
+	# two things worth saying are whether the packages are there and whether the bridge is
+	# up -- and that with sharing OFF it can never connect, which is the gate, not a fault.
+	if [ "${RB_VNC_WEB:-1}" = "1" ] && [ "${RB_VNC:-0}" = "1" ]; then
+		if [ ! -x /usr/bin/websockify ] || [ ! -f "${RB_VNC_WEB_ROOT:-/usr/share/novnc}/vnc.html" ]; then
+			warn "RB_VNC_WEB=1 but the web client's packages are missing"
+			note "the noVNC page and websockify come from the distribution:"
+			fix "apt-get install novnc websockify && sh $RB_DEPLOY_ROOT/install.sh"
+		else
+			_wb=$(systemctl is-active rblive4-webvnc.service 2>/dev/null)
+			if [ "$_wb" != "active" ]; then
+				warn "rblive4-webvnc.service is $_wb"
+				fix "systemctl enable --now rblive4-webvnc"
+			else
+				note "web client up on :${RB_VNC_WEB_PORT:-5903} -- the password is the
+  viewer's, and sharing must be ON or a browser connection fails (that is the gate)"
+			fi
+		fi
+	fi
+
 	# The two names can be set apart -- RB_VNC_PASSWORD derives from RB_PASSWORD unless it
 	# is set explicitly -- and if they have been, the viewer and the page stop sharing a
 	# credential without anything saying so. Worth a line, because the whole point of the

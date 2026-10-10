@@ -546,3 +546,51 @@ target tolerantly on the host.
   as the hot-swap, LED and display drills.
 * [scripts/device/README.md](../scripts/device/README.md) — the on-unit build, the
   launcher, and `rb.local.conf`.
+
+## The screen in a browser (noVNC, `:5903`)
+
+`rblive4-webvnc.service` runs `websockify`, which serves **noVNC** and reframes WebSocket bytes to
+the RFB port. Open **`http://<unit>:5903/vnc.html`** — and the password is the one the viewer asks a
+native client for, because the session (including the password) is negotiated **end to end** between
+the browser and `vncserve`. The bridge only moves bytes.
+
+**Two reasons it exists, and the second is the interesting one:**
+
+* it needs no client software on the machine looking at the screen;
+* it is the **first client this unit can use its hardware JPEG encoder with**. JPEG may only be sent
+  to a client that *advertised* a quality level, and Apple's Screen Sharing never does — so every
+  macOS session rides zlib and `/dev/video11` sits idle. noVNC's Tight does advertise one.
+
+**It is the same door, not a new one.** With sharing OFF there is no RFB listener for the bridge to
+reach, and a browser connection simply fails — the same gate a native client has. The packages come
+from the distribution (`apt-get install novnc websockify`); `install.sh` installs the unit only when
+they are present and removes it otherwise, because `Restart=always` on a missing program is a restart
+loop rather than a service.
+
+**Proving it works without a browser — and the CONTROL matters.** A probe that only ever sees the
+bridge cannot tell a broken bridge from its own bad parsing: the first version of this check ate the
+greeting in the same read as the handshake response and reported a timeout that looked exactly like a
+broken bridge. So read the greeting straight off the RFB port as well.
+
+```sh
+python3 - <<'PY'
+import base64, os, socket
+for port in (5901, 5903):          # 5901 is the CONTROL: the greeting straight off RFB
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    if port == 5903:
+        k = base64.b64encode(os.urandom(16)).decode()
+        s.sendall(("GET /websockify HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+                   "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+                   "Sec-WebSocket-Version: 13\r\n\r\n" % k).encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += s.recv(4096)
+        data = buf.split(b"\r\n\r\n", 1)[1]
+        while len(data) < 2:
+            data += s.recv(4096)
+        print(port, data[2:2 + (data[1] & 0x7F)])
+    else:
+        print(port, s.recv(24))
+PY
+# both print b'RFB 003.008\n'   (5901 is RB_VNC_PORT on this unit; the default is 5900)
+```
