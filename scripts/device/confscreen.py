@@ -756,6 +756,11 @@ th { color: #6b7480; font-weight: normal; text-transform: uppercase; font-size: 
    as an on/off pair anywhere else, and it means the control states the current value rather
    than only the value a press would give. */
 .cur { background: #2c3a2c; border-color: #4a6b4a; color: #dceadc; }
+/* A slider, and the number it cannot say by itself. accent-color is doing the real work here:
+   the default track is a light grey that disappears against this page. */
+input[type=range] { width: 130px; vertical-align: middle; accent-color: #6b8f6b; }
+.val { display: inline-block; min-width: 2.6em; text-align: right; color: #eceff4;
+       font-weight: 600; margin-left: 8px; }
 /* A button the page will refuse, drawn as one: the startup pair SHOWS the direction it will not
    take rather than hiding it, so it has to look unavailable rather than merely be inert. */
 button[disabled] { opacity: .4; cursor: not-allowed; }
@@ -826,12 +831,17 @@ h2 { scroll-margin-top: 14px; }
 # does not update itself. RB_CONF_REFRESH_S=0 leaves the script out entirely.
 POLL_JS = """
 <script>
-// TWO SMALL JOBS, and both are here because neither can be done in CSS alone.
+// THREE SMALL JOBS, and none of them can be done in CSS alone.
 //
 // 1. THE TABS. The nav shows one section at a time. With the script blocked every section is
 //    shown -- that is the page's "complete without it" property, not a broken fallback.
 // 2. THE POLL. It re-reads the DATA, because a meta refresh threw away the scroll position and
 //    anything half-typed into the sign-in box every few seconds.
+// 3. THE SLIDER'S NUMBER. A range control cannot say its own value, so the number beside it
+//    follows the thumb -- and it ships initialised to the value IN FORCE, so with the script
+//    blocked the page still shows the current value rather than a blank. THE LISTENER IS
+//    DELEGATED from document on purpose: the poll REPLACES a section's innerHTML, which would
+//    take a listener bound to the slider itself with it.
 //
 // IT SWAPS ONLY THE SECTION YOU ARE LOOKING AT. The first version replaced the whole content
 // region on every tick, which re-created every section -- and the ones you cannot see come back
@@ -880,6 +890,13 @@ POLL_JS = """
   });
   // Any other fragment change -- an in-content link, the back button -- switches too.
   window.addEventListener('hashchange', function () { go((location.hash || '#player').slice(1)); });
+
+  document.addEventListener('input', function (e) {
+    var out;
+    if (!e.target || e.target.type !== 'range' || !e.target.parentNode) return;
+    out = e.target.parentNode.querySelector('.val');
+    if (out) { out.textContent = e.target.value; }
+  });
 
   applyTab();
   var ms = %d * 1000;
@@ -1313,8 +1330,11 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     # pointer injection the nothing it told them was whether their screen was clickable, which
     # on this unit it was: the file was gone and RB_VNC_INPUT is 1.
     def eff(name, default):
+        """The state in force, and whether it came from the default rather than a file.
+        A name that was never fetched reads as None, which is NOT "(absent)" -- so the falsy
+        check matters: anything that is not a real word falls back."""
         raw = switches.get(name)
-        return (raw, False) if raw != "(absent)" else (default, True)
+        return (raw, False) if raw and raw != "(absent)" else (default, True)
 
     live_v, live_d = eff("live", "on" if conf.get("RB_VNC_LIVE", "") == "1" else "off")
     mode_v, mode_d = eff("mode", conf.get("RB_VNC_MODE", "") or "raw")
@@ -1355,20 +1375,23 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     jq_v, jq_d = eff("jpeg_quality", conf.get("RB_VNC_JPEG_QUALITY", "") or "0")
 
     def swfield(name, value, lo, hi, note=""):
-        """A number in a box, a button, and THE RANGE IT TAKES written beside it.
+        """A SLIDER, AND THE NUMBER IT CANNOT SAY BY ITSELF.
 
-        THE RANGE IS THE POINT. `[ 12 ] set` says nothing about whether 60 is allowed, and
-        these two are the switches whose useful values are a band rather than a word -- the
-        pairs above say what they take by showing both options, and a number box has to say it
-        in words. A slider would show the same thing under the mouse, but a box keeps the value
-        exact, works with the script blocked, and does not need a second control to read it
-        back."""
+        A range control says two things a box cannot: what the range IS, by the shape of the
+        track, and roughly where the current value sits in it. What it cannot say is the number,
+        so that is written beside it -- and it ships initialised to the value IN FORCE, which
+        means the page still shows the current value with the script blocked, and with it the
+        number follows the thumb (see POLL_JS, which delegates that listener so the poll's
+        innerHTML swap cannot take it away)."""
         if not auth["writes"]:
             return ""
         return ('<form method=post action=/switch><input type=hidden name=name value="%s">'
-                '<input name=value type=number min="%d" max="%d" value="%s" size=3> '
-                '<button>set</button></form><span class=dim> %d&ndash;%d%s</span>'
-                % (esc(name), lo, hi, esc(value), lo, hi, esc(note)))
+                '<input type=range name=value min="%d" max="%d" value="%s" step="1">'
+                '<span class=val>%s</span>'
+                '<button>set</button>'
+                '<span class=dim> %d&ndash;%d%s</span>'
+                '</form>'
+                % (esc(name), lo, hi, esc(value), esc(value), lo, hi, esc(note)))
 
     def swpair(name, options, current):
         """A pair for a /switch row: one hidden field naming the switch, one button per value."""
@@ -1634,7 +1657,13 @@ class Handler(BaseHTTPRequestHandler):
         is why this is gathered per request rather than cached."""
         return (conf_values(conf_keys()), rbp_pid(), frames_since_last(), unit_facts(),
                 {u: unit_state(u) for u in UNITS},
-                {n: switch_state(n) for n in ("live", "mode", "input")},
+                # EVERY switch the page shows, fetched here. This list and the rows are two
+                # places, and the first version of the three live rows proved what that costs:
+                # a name missing here reads as None, which is not "(absent)", so the row fell
+                # through to its default and rendered with NO state at all -- an empty slider
+                # and no button pressed, while the control still worked.
+                {n: switch_state(n) for n in ("live", "mode", "input", "fps", "jpeg_dev",
+                                              "jpeg_quality")},
                 player_depth(), self.headers.get("Host", ""))
 
     def _auth(self, conf, consume_flash=False):

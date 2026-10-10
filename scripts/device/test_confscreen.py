@@ -657,12 +657,26 @@ def test_write_path(env, port):
     for label in ("frame rate", "JPEG encoder", "JPEG quality"):
         check(label in vsec, "the viewer settings table has a %s row" % label)
     check('name=value value="/dev/video31"' in vsec and 'name=value value="/dev/video11"' in vsec,
-          "the encoder row offers both nodes as a pair, with the one in force pressed")
+          "the encoder row offers both nodes as a pair")
+    _erow = [r for r in vsec.split("<tr>") if "JPEG encoder" in r][0]
+    check(len(re.findall(r"class=cur", _erow)) == 1,
+          "and EXACTLY ONE is drawn as in force -- the bug this row shipped with was none "
+          "pressed at all, because its state was never fetched, and a check that only counted "
+          "the buttons could not see it")
     check("action=/switch" in vsec, "and all three post to /switch")
     check("1&ndash;30" in vsec,
           "the frame rate row names the range it takes -- a box alone said nothing about "
           "whether 60 was allowed")
     check("0&ndash;100" in vsec, "and so does the quality row")
+    check("type=range" in vsec and "type=number" not in vsec.split("frame rate")[1][:400],
+          "the two numbers are SLIDERS now -- the track is what says what the range is")
+    _found = re.findall(r"class=val>([^<]*)</span>", vsec)
+    check(len(_found) == 2 and all(v.isdigit() for v in _found),
+          "each carrying the value it cannot say by itself, initialised to the one in force "
+          "(found %r)" % (_found,))
+
+    check("e.target.type !== 'range'" in page,
+          "and the number follows the thumb when the script is there")
     check("(0 = the encoder&#x27;s own)" in vsec or "0 = the encoder" in vsec,
           "with the one value on the quality that is not a quality explained")
 
