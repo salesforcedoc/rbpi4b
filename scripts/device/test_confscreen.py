@@ -514,6 +514,10 @@ def test_data_fragment(env, port):
     check("<html" not in frag and "<script" not in frag,
           "and is a fragment, not a document: no <html>, no script")
     check("rbp is" in frag, "it carries the player's own state words")
+    _s2, full = get(port, "/")
+    check("here.contains(a)" in full and "document.activeElement" in full,
+          "and the page's own script will NOT swap a section somebody is using -- a slider "
+          "destroyed mid-drag snaps back, which reads as a control that does not work")
     check("frames drawn" in frag and "running for" in frag,
           "the frame counter and how long rbp has been running")
     check("name=pw" not in frag and "name=csrf" not in frag,

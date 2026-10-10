@@ -836,7 +836,11 @@ POLL_JS = """
 // 1. THE TABS. The nav shows one section at a time. With the script blocked every section is
 //    shown -- that is the page's "complete without it" property, not a broken fallback.
 // 2. THE POLL. It re-reads the DATA, because a meta refresh threw away the scroll position and
-//    anything half-typed into the sign-in box every few seconds.
+//    anything half-typed into the sign-in box every few seconds -- AND IT MUST NOT PULL A
+//    CONTROL OUT FROM UNDER A HAND EITHER, which is the same fault one level down: the swap
+//    re-creates every control in the section, so a slider being dragged is destroyed and
+//    rebuilt at the server's value. A slider takes long enough to drag that this happened
+//    EVERY time, and it reads as "the control is broken" rather than as a refresh.
 // 3. THE SLIDER'S NUMBER. A range control cannot say its own value, so the number beside it
 //    follows the thumb -- and it ships initialised to the value IN FORCE, so with the script
 //    blocked the page still shows the current value rather than a blank. THE LISTENER IS
@@ -871,7 +875,15 @@ POLL_JS = """
       box.innerHTML = t;
       var fresh = box.querySelector('#' + current);
       var here = document.getElementById(current);
-      if (fresh && here) { here.innerHTML = fresh.innerHTML; }
+      if (!fresh || !here) return;
+      // NOT WHILE SOMEBODY IS USING IT. Deferring a tick costs nothing -- the refresh happens
+      // as soon as they let go -- while a swap mid-drag loses the value they were choosing and
+      // the one after it too, for as long as the drag lasts.
+      var a = document.activeElement;
+      if (a && here.contains(a) &&
+          (a.tagName === 'INPUT' || a.tagName === 'SELECT' ||
+           a.tagName === 'BUTTON' || a.tagName === 'TEXTAREA')) return;
+      here.innerHTML = fresh.innerHTML;
     }).catch(function () {});
   }
 
