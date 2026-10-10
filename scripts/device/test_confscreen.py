@@ -644,11 +644,30 @@ def test_write_path(env, port):
     check(open(inp).read() == "off\n", "and the switch file says off")
     _s, page = get(port, "/")
     check("action=/input" in page, "the row carries its own on/off")
-    check("input surface" in page and "USB STOP" in page,
-          "and the page says what it does to the glass, USB STOP included")
+    check("input surface" not in page and "USB STOP" not in page,
+          "and the page carries no paragraph about what it does to the glass -- that is on "
+          "vncserve's own :5902 page, next to the same switch")
     s, _b, _h = post(port, "/input", {"value": "yes"})
     check(s == 400, "while a value that is neither on nor off is 400")
     check(open(inp).read() == "off\n", "with the file untouched")
+
+    print("\n== the preview image is the page's own to show ==")
+    pv = os.path.join(env["RB_RUN_DIR"], "conf.preview")
+    _s, page = get(port, "/")
+    check("preview</td>" in page, "the viewer settings table has a preview row")
+    check("<img src=" not in page, "and the image is off until it is asked for")
+    s, _b, _h = post(port, "/preview", {"action": "on"})
+    check(s == 303, "turning it on redirects")
+    check(open(pv).read() == "on\n", "and it is remembered in /run, not in a session")
+    _s, page = get(port, "/")
+    check("preview.mjpg" not in page and "Nothing to show yet" in page,
+          "and with nothing serving it says so rather than leaving a blank space")
+    s, _b, _h = post(port, "/preview", {"action": "wibble"})
+    check(s == 400, "anything that is not on or off is 400")
+    s, _b, _h = post(port, "/preview", {"action": "off"})
+    check(s == 303, "and it can be turned off again")
+    check(open(pv).read() == "off\n" and "Nothing to show yet" not in get(port, "/")[1],
+          "which takes even the note away")
 
     print("\n== a missing switch file shows the DEFAULT, not '(absent)' ==")
     # This is the state this unit was actually in: no vnc.input file, RB_VNC_INPUT=1, and the

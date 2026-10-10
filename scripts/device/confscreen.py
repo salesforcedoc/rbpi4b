@@ -86,6 +86,12 @@ CONF_UNIT = os.environ.get("RB_CONF_UNIT", "rblive4-conf")
 WEBVNC_UNIT = os.environ.get("RB_WEBVNC_UNIT", "rblive4-webvnc")
 RESTART_LOCK = os.environ.get("RB_CONF_RESTART_LOCK",
                               os.path.join(RUN_DIR, "conf-restart.lock"))
+# Whether THIS PAGE embeds the preview image. The page's own preference and not a switch the
+# viewer reads -- which is why it is `conf.preview` and not `vnc.*`: turning it on changes
+# nothing about what is being served, only whether this page subscribes to a stream of it. In
+# /run, so it survives a page restart and is cleared by a reboot like everything else here.
+PREVIEW_FILE = os.environ.get("RB_CONF_PREVIEW_FILE",
+                              os.path.join(RUN_DIR, "conf.preview"))
 # Two restarts inside this many seconds are refused. Measured on `.239`: two overlapping
 # `systemctl restart rblive4` invocations -- mine and the operator's landing together --
 # wedge rbp outright, and one clean restart immediately after paints normally.
@@ -521,6 +527,26 @@ def mode_set(value):
     if not ok:
         return False, why
     return True, "encoding now %s -- the viewer picks it up on its next turn" % value
+
+
+def preview_on():
+    """Whether this page embeds the preview image. Off unless the file says otherwise: the
+    stream costs the viewer a frame per tick while it is open, and a page that is cheap to leave
+    open is the point of this one."""
+    return _text(PREVIEW_FILE).strip() == "on"
+
+
+def preview_set(on):
+    """Turn the preview image on or off for this page. One file in /run, the same place and the
+    same four-byte shape the viewer's own switches use."""
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        with open(PREVIEW_FILE, "w") as f:
+            f.write("on\n" if on else "off\n")
+        return True, ("the preview image is on -- this page is watching the viewer's stream"
+                      if on else "the preview image is off")
+    except OSError as e:
+        return False, "could not write %s: %s" % (PREVIEW_FILE, e)
 
 
 def input_set(on):
@@ -1296,6 +1322,12 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
       % cell(mode_v, mode_d, pair("/mode", "value", ("raw", "hwjpeg"), mode_v)))
     a("<tr><td class=k>pointer injection (vnc.input)</td><td class=v>%s</td></tr>"
       % cell(inp_v, inp_d, pair("/input", "value", ("on", "off"), inp_v)))
+    # THE PAGE'S OWN PREFERENCE, in the same shape as the switches above it -- a pair with the
+    # value in force as pressed -- because a reader should not have to know which of these rows
+    # writes a file the viewer reads and which one only writes a file this page reads.
+    prev = "on" if preview_on() else "off"
+    a("<tr><td class=k>preview</td><td class=v>%s</td></tr>"
+      % cell(prev, False, pair("/preview", "action", ("on", "off"), prev)))
     rfb = conf.get("RB_VNC_PORT", "")
     pg = conf.get("RB_VNC_HTTP_PORT", "")
     a("<tr><td class=k>RFB port %s</td><td class=v>%s</td></tr>"
@@ -1308,21 +1340,26 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
           '<code>RB_VNC_*</code> value the viewer was started with, so it is what is really in '
           'force -- and what comes back after a power cut, because <code>/run</code> is '
           'cleared.</div>')
-    a('<div class=note><b>Pointer injection makes the picture an input surface</b>: with it '
-      'on, a click in any VNC client &mdash; macOS Screen Sharing and noVNC alike &mdash; '
-      'lands on the real glass, and the seventh column of the top menu is <b>USB STOP</b> (a '
-      'press stops the media; a three-second hold raises the eject). Nothing on this page '
-      'does that &mdash; it is a press for a person to make.</div>')
-    if switches.get("live") == "on" and port_open(pg):
-        # The preview belongs to the viewer (it owns the capture) and stays there; this
-        # page only points at it. The host comes from the REQUEST, not from this unit's
-        # own hostname: the browser is on the other end of the LAN and may not be able to
-        # resolve `rpidev01` at all, whereas it demonstrably resolved whatever it typed
-        # to get here. In the next slice the viewer's page moves to loopback and this
-        # becomes a proxy through this same port, so no cross-port URL remains.
-        host_only = req_host.rsplit(":", 1)[0] if req_host else hostname()
-        a('<div class=shot><img src="//%s:%s/preview.mjpg" alt="screen preview"></div>'
-          % (esc(host_only), esc(pg)))
+    # The paragraph that used to sit here -- pointer injection makes the picture an input
+    # surface, and the top menu's seventh column is USB STOP -- is gone at the operator's ask.
+    # The fact is not lost: vncserve's own :5902 page says it in full next to the same switch,
+    # and docs/20-config-page.md records it. This page states the state.
+    # AND THE IMAGE IS THE ROW'S TO SHOW. Two things can stop it besides the switch: the stream
+    # is the VIEWER's, so it exists only while the viewer is running and sharing is on -- and
+    # saying which of those is missing is worth more than a blank space where a picture was.
+    if preview_on():
+        if live_v == "on" and port_open(pg):
+            # The preview belongs to the viewer (it owns the capture) and stays there; this page
+            # only points at it. The host comes from the REQUEST, not from this unit's own
+            # hostname: the browser is on the other end of the LAN and may not be able to resolve
+            # `rpidev01` at all, whereas it demonstrably resolved whatever it typed to get here.
+            host_only = req_host.rsplit(":", 1)[0] if req_host else hostname()
+            a('<div class=shot><img src="//%s:%s/preview.mjpg" alt="screen preview"></div>'
+              % (esc(host_only), esc(pg)))
+        else:
+            a('<div class=note>Nothing to show yet: the preview is the viewer\'s own stream, so '
+              'it needs the viewer running and sharing ON. It is not encoded for a page nobody '
+              'is watching.</div>')
 
     a("</section>")
     a("</div>")                      # end of the first live half
@@ -1458,7 +1495,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.data())
         elif path == "/healthz":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
-        elif path in ("/share", "/mode", "/input", "/restart", "/service", "/boot", "/set"):
+        elif path in ("/share", "/mode", "/input", "/preview", "/restart", "/service", "/boot",
+                      "/set"):
             # A state change is never a GET. Refused as a METHOD here, so that no handler
             # can later be got wrong into acting on one -- which is the bug the viewer's
             # own page has, where /session, /input and /mode are state-changing GETs.
@@ -1481,6 +1519,8 @@ class Handler(BaseHTTPRequestHandler):
             self._mode(form)
         elif path == "/input":
             self._input(form)
+        elif path == "/preview":
+            self._preview(form)
         elif path == "/restart":
             self._restart(form)
         elif path == "/service":
@@ -1545,6 +1585,19 @@ class Handler(BaseHTTPRequestHandler):
         ok, msg = input_set(value == "on")
         set_flash(("pointer: " if ok else "FAILED: ") + msg)
         print("confscreen: input %s -> %s%s" % (value, "" if ok else "FAILED: ", msg),
+              flush=True)
+        self._redirect("/#viewer")
+
+    def _preview(self, form):
+        """Whether THIS PAGE shows the preview image. It is the page's own preference, so it is
+        the one control here that changes nothing about the unit."""
+        action = form.get("action", "")
+        if action not in ("on", "off"):
+            self._send(400, self._msg("bad request", "The preview is either on or off."))
+            return
+        ok, msg = preview_set(action == "on")
+        set_flash(("preview: " if ok else "FAILED: ") + msg)
+        print("confscreen: preview %s -> %s%s" % (action, "" if ok else "FAILED: ", msg),
               flush=True)
         self._redirect("/#viewer")
 
