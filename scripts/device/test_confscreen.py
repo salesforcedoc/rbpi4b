@@ -284,16 +284,6 @@ def post(port, path, data, cookie=None, origin=None):
     return _open(req, cookie)
 
 
-def cookie_of(headers):
-    sc = headers.get("Set-Cookie", "")
-    return sc.split(";", 1)[0] if sc else None
-
-
-def csrf_of(body):
-    m = re.search(r'name=csrf value="([0-9a-f]+)"', body)
-    return m.group(1) if m else None
-
-
 def test_pure(m):
     """The parsers, without a socket in the way."""
     print("\n== pure readers ==")
@@ -361,12 +351,22 @@ def test_page(env, port):
     rbp = body.split("section id=rbpsettings")[1].split("</section>")[0]
     check("RB_VNC_FPS" in vnc and "RB_PREWARM" in rbp and "RB_VNC_FPS" not in rbp,
           "each key is listed in its own group")
-    check("action=/set" not in vnc and "action=/set" not in rbp,
-          "and an UNSIGNED visitor is offered no form -- the page never shows a control it "
-          "would only refuse")
-    check("sign in under" in vnc, "it says to sign in instead")
+    check("action=/set" in vnc and "action=/set" in rbp,
+          "and the forms are simply there -- there is no visitor state for the page to "
+          "withhold a control over")
+    check("sign in" not in vnc.lower() and "sign in" not in rbp.lower(),
+          "and nothing anywhere says to sign in, because there is nothing to sign in to")
     lie_row = [r for r in rbp.split("<tr>") if "RB_FB_LIE_BPP" in r][0]
-    check("read-only:" in lie_row, "and the depth pair's lie says why it is read-only")
+    check("read-only" in lie_row and "class=tip" in lie_row,
+          "the depth pair's lie is read-only, with its reason on the (i)")
+    check("<div class=note>The depth pair" not in rbp,
+          "and the depth-pair paragraphs are gone from the visible page too")
+    check("Shown and never editable" in rbp and "class=tip" in rbp,
+          "while their text is still in the DOM, inside a tip")
+    check("class=info" in rbp and "class=tip" in rbp,
+          "descriptions sit behind an (i) instead of eating the label column")
+    check('pair with the patched player' in rbp,
+          "and the text is still in the DOM -- a hidden tip is not a lost description")
 
     print("\n== the refresh re-reads the DATA, it does not reload the page ==")
     check("http-equiv=refresh" not in body, "there is no meta refresh anywhere")
@@ -386,8 +386,8 @@ def test_page(env, port):
     # screen's sign-in hint), and counting those would be counting the wrong thing.
     nav = body.split("<nav id=nav>")[1].split("</nav>")[0]
     anchors = re.findall(r'href="#([a-z0-9]+)"', nav)
-    check(anchors == ["player", "services", "launcher", "viewer", "actions", "unit",
-                      "vncsettings", "rbpsettings"],
+    check(anchors == ["player", "services", "launcher", "viewer", "vncsettings",
+                      "rbpsettings", "unit"],
           "the nav lists every section, in page order (%s)" % ", ".join(anchors))
     missing = [a for a in anchors if ("section id=%s" % a) not in body]
     check(not missing,
@@ -421,9 +421,12 @@ def test_page(env, port):
     check("drawing NOTHING" in body, "frames stopped => 'running and drawing NOTHING'")
 
     print("\n== a state change is never a GET, and unknown paths are not actions ==")
-    for p in ("/login", "/logout", "/vnc", "/share"):
+    for p in ("/share", "/mode", "/restart", "/service", "/set"):
         s, b = get(port, p)
         check(s == 405, "GET %s is 405 (refused by method, not by a handler's check)" % p)
+    for p in ("/login", "/logout", "/vnc"):
+        s, b = get(port, p)
+        check(s == 404, "GET %s is 404 -- a retired endpoint is gone, not hidden" % p)
     req = urllib.request.Request("http://127.0.0.1:%d/nonsense" % port, data=b"x=1",
                                  method="POST")
     try:
@@ -498,9 +501,12 @@ def test_data_fragment(env, port):
     check("rbp is" in frag, "it carries the player's own state words")
     check("frames drawn" in frag and "running for" in frag,
           "the frame counter and how long rbp has been running")
-    check("action=/login" not in frag and "Sign in" not in frag,
-          "but NOT the sign-in form -- re-fetching that is what ate a half-typed password")
-    check("action=/vnc" not in frag, "and not the buttons either")
+    check("name=pw" not in frag and "name=csrf" not in frag,
+          "and none of the write chrome: re-fetching a half-typed field is exactly what the "
+          "poll exists to avoid")
+    check("action=/share" in frag and "action=/mode" in frag,
+          "and the viewer's switch buttons DO ride along: they are content, in the viewer "
+          "section, with nothing half-typed to lose")
     check('id=data1' in frag and 'id=data2' in frag,
           "both live halves, under the ids the script swaps")
     check("id=nav" not in frag and "<nav" not in frag,
@@ -522,114 +528,152 @@ def test_data_fragment(env, port):
 
 
 def test_write_path(env, port):
-    """The write path through real HTTP: a session, a CSRF value, and two actions that must
-    each change exactly what they say and NOTHING else. The config file is checked before
-    and after by content, because the whole promise of this page is that it edits the
-    operator's file rather than regenerating it."""
-    print("\n== signing in ==")
+    """The write path through real HTTP: two actions that must each change exactly what they
+    say and NOTHING else. The config file is checked before and after by content, because the
+    whole promise of this page is that it edits the operator's file rather than regenerating it.
+
+    THERE IS NO SIGN-IN TO TEST ANY MORE. No password, no session, no CSRF token -- so what used
+    to be three suites of sign-in checks collapses into "a write needs nothing but the form".
+    Two things still have to hold and are checked here: a POST that says it came from somewhere
+    else is refused, and the page does not pretend to be locked."""
+    print("\n== no sign-in: a write needs nothing but the form ==")
     conf = os.path.join(env["RB_DEPLOY_ROOT"], "rb.local.conf")
     calls = env["FAKE_LOG"]
     before = open(conf).read()
     if os.path.exists(calls):
         os.unlink(calls)
 
-    s, _b, _h = post(port, "/vnc", {"action": "on"})
-    check(s == 401, "a write with no session is 401")
-    s, _b, _h = post(port, "/login", {"pw": "wrong"})
-    check(s == 401, "a wrong password is 401")
-    check(not os.path.exists(calls), "and nothing ran systemctl")
-    check(open(conf).read() == before, "and the config is untouched")
+    live = os.path.join(env["RB_RUN_DIR"], "vnc.live")
+    live_before = open(live).read() if os.path.exists(live) else None
+    s, _b, _h = post(port, "/share", {"action": "wibble"})
+    check(s == 400, "an action that is neither on nor off is 400")
+    check((open(live).read() if os.path.exists(live) else None) == live_before,
+          "and a rejected request changed nothing")
+    check(open(conf).read() == before, "nor touched the config")
 
-    s, _b, h = post(port, "/login", {"pw": "password"})
-    check(s == 303, "the right password redirects (303)")
-    cookie = cookie_of(h)
-    check(bool(cookie) and cookie.startswith("rblive4conf="), "and sets a session cookie")
-    setcookie = h.get("Set-Cookie", "")
-    check("HttpOnly" in setcookie and "SameSite=Strict" in setcookie,
-          "which is HttpOnly and SameSite=Strict")
+    _s, page = get(port, "/")
+    check("name=csrf" not in page and "name=pw" not in page,
+          "the page renders no CSRF field and no password field anywhere -- there is no "
+          "session to hold one and no sign-in to fill one")
+    check("Sign in" not in page and "Sign out" not in page,
+          "and no sign-in form or sign-out button")
+    check("no password" not in page and "unprotected" not in page,
+          "and the page says nothing about a lock at all -- the notice was taken off")
+    check("section id=actions" not in page and "#actions" not in page,
+          "and the actions section is gone entirely")
 
-    _s, page = get_with(port, "/", cookie)
-    csrf = csrf_of(page)
-    check(bool(csrf), "the page then renders a CSRF value into its forms")
-    check("Signed in" in page and "Sign out" in page, "and says it is signed in")
-    check("Enable the viewer" in page and "Start sharing" in page, "and offers both actions")
-    check("signed in -- the actions below" in page, "and shows the flash from the login")
+    print("\n== the two live switches carry their own buttons ==")
+    vsec = page.split("section id=viewer")[1].split("</section>")[0]
+    check("action=/share" in vsec, "sharing's on/off sits on the sharing row")
+    check("action=/mode" in vsec and "value=hwjpeg" in vsec,
+          "and raw/hwjpeg sits on the encoding row")
+    check("action=/vnc" not in vsec and "Enable the viewer" not in vsec,
+          "with no enable/disable-the-viewer row: that is the services table's job now")
+    check("viewer settings" in vsec, "the section is titled viewer settings")
+    check('href="#viewer">viewer settings<' in page, "as is its nav entry")
 
-    print("\n== signed in, the settings become forms ==")
+    print("\n== the settings are forms, and the read-only ones are not ==")
     sv = page.split("section id=vncsettings")[1].split("</section>")[0]
     sr = page.split("section id=rbpsettings")[1].split("</section>")[0]
-    check("action=/set" in sv and "action=/set" in sr, "every group carries save forms")
+    check("action=/set" in sv and "action=/set" in sr, "both groups carry save forms")
     check('name=key value="RB_VNC_FPS"' in sv,
           "addressed by key, so one handler serves every setting")
-    check("restart the viewer to apply" in sv, "and each field names what applies it")
+    check("picked up when rblive4-vnc next starts" in sv,
+          "and the group names the unit a saved value waits for -- said ONCE, not on every "
+          "row")
+    check('href="#services"' in sv, "pointing at the buttons that do it")
+    check("<code>RB_VNC_FPS</code>" in sv,
+          "the key name rides in the (i) beside the label, so hand-editing the file is still "
+          "possible without printing it on twenty rows")
+    check("RB_VNC_FPS = " not in sv,
+          "and no `KEY = value` line doubling what the control already displays")
+    check("class=info" in sv and "class=tip" in sv,
+          "the descriptions are (i) tooltips, not visible paragraphs")
     lie_row = [r for r in sr.split("<tr>") if "RB_FB_LIE_BPP" in r][0]
     check("action=/set" not in lie_row,
           "the read-only ones are STILL offered no form -- the writer would refuse them")
 
-    print("\n== the CSRF value is not decoration ==")
-    s, _b, _h = post(port, "/vnc", {"action": "on", "csrf": "0" * 32}, cookie=cookie)
-    check(s == 403, "a form with the WRONG csrf value is 403")
-    s, _b, _h = post(port, "/vnc", {"action": "on"}, cookie=cookie)
-    check(s == 403, "a form with NO csrf value is 403 too")
-    s, _b, _h = post(port, "/vnc", {"action": "wibble", "csrf": csrf}, cookie=cookie)
-    check(s == 400, "an action that is neither on nor off is 400")
-
-    print("\n== enabling the viewer ==")
-    s, _b, _h = post(port, "/vnc", {"action": "on", "csrf": csrf}, cookie=cookie)
-    check(s == 303, "enabling redirects")
-    after = open(conf).read()
-    check("RB_VNC=1" in after, "RB_VNC=1 is in rb.local.conf")
-    check("# machine-local" in after and "RB_VNC_FPS=7" in after,
-          "and the operator's own lines are intact -- the page edited the file, it did not "
-          "regenerate it")
-    logged = open(calls).read() if os.path.exists(calls) else ""
-    check("systemctl enable --now rblive4-vnc" in logged,
-          "and systemd was asked to enable and start the viewer")
-    check("/root/pdj" not in logged and "rbp -a" not in logged,
-          "with no command line naming the player path (the cmdline-kill trap)")
-    _s, page = get_with(port, "/", cookie)
-    check("the viewer is enabled" in page, "and the page reports what it did")
-
-    print("\n== the sharing switch, which needs no restart ==")
-    s, _b, _h = post(port, "/share", {"action": "on", "csrf": csrf}, cookie=cookie)
-    check(s == 303, "starting sharing redirects")
+    print("\n== the sharing switch, which is a button and nothing else ==")
     live = os.path.join(env["RB_RUN_DIR"], "vnc.live")
+    s, _b, _h = post(port, "/share", {"action": "on"})
+    check(s == 303, "starting sharing redirects")
     check(os.path.exists(live) and open(live).read() == "on\n",
           "and the switch file the viewer re-reads now says on")
-    _s, page = get_with(port, "/", cookie)
-    check("sharing (vnc.live)</td><td>on" in page, "and the page shows sharing on")
+    _s, page = get(port, "/")
+    check("value=on class=cur>on<" in page,
+          "and the page shows sharing on -- the pair draws the value in force as pressed")
+    s, _b, _h = post(port, "/share", {"action": "off"})
+    check(s == 303, "stopping it redirects")
+    check(open(live).read() == "off\n", "and the file says off")
+    s, _b, _h = post(port, "/share", {"action": "wibble"})
+    check(s == 400, "and anything that is not on or off is 400")
+    check(open(live).read() == "off\n", "with the file untouched")
 
-    print("\n== disabling it takes the switch with it ==")
-    s, _b, _h = post(port, "/vnc", {"action": "off", "csrf": csrf}, cookie=cookie)
-    check(s == 303, "disabling redirects")
-    after = open(conf).read()
-    check("RB_VNC=0" in after and "RB_VNC=1" not in after, "RB_VNC is now 0")
-    check(open(live).read() == "off\n",
-          "and the sharing switch is off too, so a later enable cannot come up already "
-          "serving")
-    check("systemctl disable --now rblive4-vnc" in open(calls).read(), "and it was disabled")
+    print("\n== the encoding switch, same shape ==")
+    mode = os.path.join(env["RB_RUN_DIR"], "vnc.mode")
+    s, _b, _h = post(port, "/mode", {"value": "hwjpeg"})
+    check(s == 303, "choosing hwjpeg redirects")
+    check(open(mode).read() == "hwjpeg\n", "and the mode file the viewer re-reads says so")
+    _s, page = get(port, "/")
+    check("value=hwjpeg class=cur>hwjpeg<" in page, "which the page shows the same way")
+    s, _b, _h = post(port, "/mode", {"value": "raw"})
+    check(s == 303 and open(mode).read() == "raw\n", "and back to raw")
+    s, _b, _h = post(port, "/mode", {"value": "tiff; rm -rf /"})
+    check(s == 400, "while a value that is neither is 400 -- the words are a whitelist")
+    check(open(mode).read() == "raw\n", "and the file is untouched")
 
-    print("\n== a POST that says it came from somewhere else ==")
-    s, _b, _h = post(port, "/vnc", {"action": "on", "csrf": csrf}, cookie=cookie,
-                     origin="http://evil.example")
-    check(s == 403, "a cross-origin POST is refused")
+    print("\n== pointer injection, the one that changes the glass ==")
+    inp = os.path.join(env["RB_RUN_DIR"], "vnc.input")
+    s, _b, _h = post(port, "/input", {"value": "off"})
+    check(s == 303, "turning pointer injection off redirects")
+    check(open(inp).read() == "off\n", "and the switch file says off")
+    _s, page = get(port, "/")
+    check("action=/input" in page, "the row carries its own on/off")
+    check("input surface" in page and "USB STOP" in page,
+          "and the page says what it does to the glass, USB STOP included")
+    s, _b, _h = post(port, "/input", {"value": "yes"})
+    check(s == 400, "while a value that is neither on nor off is 400")
+    check(open(inp).read() == "off\n", "with the file untouched")
 
+    print("\n== a missing switch file shows the DEFAULT, not '(absent)' ==")
+    # This is the state this unit was actually in: no vnc.input file, RB_VNC_INPUT=1, and the
+    # page saying "(absent)" -- which told the reader nothing, least of all that their screen
+    # was clickable.
+    os.unlink(inp)
+    with open(env["RB_LOCAL_CONF"], "a") as f:
+        f.write("RB_VNC_INPUT=1\n")
+    _s, page = get(port, "/")
+    vsec = page.split("section id=viewer")[1].split("</section>")[0]
+    check("(absent)" not in vsec,
+          "no row reads '(absent)' -- it said nothing about what was in force")
+    irow = [r for r in vsec.split("<tr>") if "pointer injection" in r][0]
+    check("value=on class=cur>on<" in irow,
+          "it shows the RB_VNC_INPUT default that is really in effect, as the pressed button")
+    check("(default)" in vsec and "has no switch file" in vsec,
+          "and marks it as the default, with the sentence that explains it")
+    text = open(env["RB_LOCAL_CONF"]).read().replace("RB_VNC_INPUT=1\n", "")
+    with open(env["RB_LOCAL_CONF"], "w") as f:      # read FIRST: open(..,"w") truncates
+        f.write(text)
 
-def test_rate_limit(env, port):
-    """LAST, and it has to be: it leaves this client's logins refused for a minute, so
-    anything after it that needs to sign in gets a 429 -- which is exactly how this suite
-    first reported a missing restart button."""
-    print("\n== and the rate limit ==")
-    codes = [post(port, "/login", {"pw": "nope"})[0] for _ in range(7)]
-    check(codes[0] == 401, "a wrong password is still 401 to begin with")
-    check(429 in codes and codes[-1] == 429,
-          "and repeated guesses are refused with 429 (%s)" % codes)
+    print("\n== the viewer's own service is NOT on this page's switch rows ==")
+    check("action=/vnc" not in page, "there is no enable/disable-the-viewer form left")
+    s, _b, _h = post(port, "/vnc", {"action": "on"})
+    check(s == 404, "and the endpoint is gone rather than hidden")
+
+    print("\n== and the one lock that is left ==")
+    s, _b, _h = post(port, "/share", {"action": "on"}, origin="http://evil.example")
+    check(s == 403, "a POST that says it came from another site is refused")
 
 
 def test_no_password(root, port):
-    """FAIL CLOSED. An empty password must never mean 'no authentication': it means the
-    unit has no credential, and nothing is written."""
-    print("\n== a unit with no password at all ==")
+    """A unit with no RB_PASSWORD at all.
+
+    This used to be the fail-closed suite: an empty password must not mean "no authentication",
+    so every write was refused. There is no authentication to fail closed on any more -- the
+    page has none at all -- and RB_PASSWORD is now only the VNC client's password, so an empty
+    one is a fact about the VIEWER and nothing to do with this page. Which is exactly what is
+    checked: the page keeps working, and the settings row says the password is not set."""
+    print("\n== a unit with no RB_PASSWORD at all ==")
     env = make_fake(root)
     conffile = env["RB_CONF_FILE"]
     text = open(conffile).read().replace(': "${RB_PASSWORD:=password}"\n', "")
@@ -646,23 +690,28 @@ def test_no_password(root, port):
         body = wait_up(port)
         check(body is not None, "the page still answers")
         if body:
-            check("No password is configured" in body,
-                  "and says writes are refused rather than allowed")
-        s, _b, _h = post(port, "/login", {"pw": ""})
-        check(s == 503, "a sign-in with no password configured is 503")
-        s, _b, _h = post(port, "/login", {"pw": "password"})
-        check(s == 503, "and so is any other password")
+            check("No password is configured" not in body,
+                  "and does NOT refuse writes over it -- that was the sign-in era")
+            check("(not set)" in body,
+                  "while the password row reports the VNC password is not set")
+        s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "5"})
+        check(s in (200, 303), "a setting can still be changed")
+        check("RB_VNC_FPS=5" in open(env["RB_LOCAL_CONF"]).read(), "and it was written")
         check(not os.path.exists(os.path.join(env["RB_RUN_DIR"], "vnc.live")),
-              "and no switch file was created")
+              "and none of it created a switch file")
     finally:
         p.terminate()
         p.wait(timeout=5)
 
 
 def test_no_auth(root, port):
-    """`RB_CONF_AUTH=0`: writes with no password -- and SAID LOUDLY, on the page and in
-    doctor.sh, rather than left as a lock nobody notices is missing."""
-    print("\n== a unit that asks for no password ==")
+    """Writes with no password -- which is now the only way this page works, and said loudly on
+    the page rather than left as a lock nobody notices is missing.
+
+    The fixture also drops a LEFTOVER `RB_CONF_AUTH=0` into rb.local.conf, deliberately: units
+    in the field carry that line, and a key the page no longer knows about has to be inert
+    rather than fatal or visible."""
+    print("\n== a unit whose conf still carries the retired RB_CONF_AUTH ==")
     env = make_fake(root)
     with open(env["RB_LOCAL_CONF"], "a") as f:
         f.write("RB_CONF_AUTH=0\n")
@@ -671,19 +720,21 @@ def test_no_auth(root, port):
         body = wait_up(port)
         check(body is not None, "the page answers")
         if body:
-            check("unprotected" in body, "and says the writes are unprotected")
-            check("Nothing to sign in to" in body, "and offers nothing to sign in to")
-            check("action=/login" not in body, "no login form at all")
-            check("Enable the viewer" in body, "with the buttons rendered")
-        s, _b, _h = post(port, "/vnc", {"action": "on"})
+            check("RB_CONF_AUTH" not in body,
+                  "and the retired key is nowhere on it")
+            check("name=pw" not in body and "name=csrf" not in body,
+                  "with no sign-in machinery on it")
+            check("action=/share" in body and "action=/mode" in body,
+                  "with the viewer's switch buttons rendered")
+            check("RB_CONF_AUTH" not in body,
+                  "and the retired key is not shown as a setting")
+        s, _b, _h = post(port, "/share", {"action": "on"})
         check(s == 303, "a write with no session and no CSRF value succeeds")
-        conf = open(env["RB_LOCAL_CONF"]).read()
-        check("RB_VNC=1" in conf, "and it wrote the setting")
-        log = open(env["FAKE_LOG"]).read() if os.path.exists(env["FAKE_LOG"]) else ""
-        check("systemctl enable --now rblive4-vnc" in log, "and it enabled the viewer")
+        live = os.path.join(env["RB_RUN_DIR"], "vnc.live")
+        check(open(live).read() == "on\n", "and it wrote the switch the viewer reads")
         # The origin check STAYS ON: it costs the operator nothing and it stops another
         # website driving this unit through their browser.
-        s, _b, _h = post(port, "/vnc", {"action": "off"}, origin="http://evil.example")
+        s, _b, _h = post(port, "/share", {"action": "off"}, origin="http://evil.example")
         check(s == 403, "but a cross-origin POST is still refused")
     finally:
         p.terminate()
@@ -693,26 +744,18 @@ def test_no_auth(root, port):
 def test_restart(env, port):
     """The restart is TWO STEPS and it is serialised -- because two overlapping restarts wedge
     rbp on this unit, measured, and that is why this button was not built with the others."""
-    print("\n== the restart button lives on the services screen ==")
+    print("\n== the restart button lives in the services table ==")
     calls = env["FAKE_LOG"]
     if os.path.exists(calls):
         os.unlink(calls)
 
-    s, _b, _h = post(port, "/restart", {"step": "go"})
-    check(s == 401, "restarting with no session is 401")
-
-    s, _b, h = post(port, "/login", {"pw": "password"})
-    cookie = cookie_of(h)
-    _s, page = get_with(port, "/", cookie)
+    _s, page = get(port, "/")
     services = page.split("section id=services")[1].split("</section>")[0]
-    check("Restart the player" in services, "the button is in the services section")
-    csrf = csrf_of(services)
-    check(bool(csrf), "with a CSRF value in its form")
+    check("action=/restart" in services and "name=step value=ask" in services,
+          "the player's restart button is in its row in the services section")
 
     print("\n== it asks first ==")
-    s, body, _h = post(port, "/restart", {"step": "go", "csrf": "0" * 32}, cookie=cookie)
-    check(s == 403, "a wrong CSRF value is refused before anything runs")
-    s, body, _h = post(port, "/restart", {"step": "ask", "csrf": csrf}, cookie=cookie)
+    s, body, _h = post(port, "/restart", {"step": "ask"})
     check(s == 200, "the button answers with a question, not an action")
     check("restart the player?" in body, "which says what it will do")
     check("fifteen seconds" in body, "including that the screen goes dark")
@@ -720,7 +763,7 @@ def test_restart(env, port):
     check("restart rblive4" not in log, "and nothing has been restarted yet")
 
     print("\n== and only then restarts ==")
-    s, _b, _h = post(port, "/restart", {"step": "go", "csrf": csrf}, cookie=cookie)
+    s, _b, _h = post(port, "/restart", {"step": "go"})
     check(s == 303, "confirming restarts and redirects")
     log = open(calls).read() if os.path.exists(calls) else ""
     check("systemctl start rblive4-boot" in log and "restart rblive4" in log
@@ -731,13 +774,138 @@ def test_restart(env, port):
           "with no command line naming the player path (the cmdline-kill trap)")
 
     print("\n== and a second one too soon is refused ==")
-    s, _b, _h = post(port, "/restart", {"step": "go", "csrf": csrf}, cookie=cookie)
+    s, _b, _h = post(port, "/restart", {"step": "go"})
     check(s == 303, "it redirects rather than acting")
-    _s, page = get_with(port, "/", cookie)
+    _s, page = get(port, "/")
     check("restart happened" in page and "wait" in page,
           "and the page says why: a restart just happened")
     check(open(calls).read().count("restart rblive4") == 1,
           "and systemd was NOT asked a second time")
+
+
+def test_services(env, port):
+    """A start/restart button on every service row -- and the two rules that make it safe:
+    the unit is a WHITELIST LOOKUP, and the player is not in the generic branch.
+
+    The unit name is the only value on this page that reaches systemctl as a variable, so it
+    is the only place where a form field could become an argument. These checks exist to pin
+    that down rather than to describe the markup."""
+    print("\n== a start/restart button on every service row ==")
+    calls = env["FAKE_LOG"]
+    if os.path.exists(calls):
+        os.unlink(calls)
+    units_dir = env["FAKE_UNITS"]
+    # One running and one stopped, so the two labels can be told apart.
+    for u, state in (("rblive4-vnc", "active"), ("healthwatch", "active"),
+                     ("rblive4-boot", "inactive"), ("rblive4-conf", "inactive")):
+        with open(os.path.join(units_dir, u + ".active"), "w") as f:
+            f.write(state)
+
+    _s, page = get(port, "/")
+    services = page.split("section id=services")[1].split("</section>")[0]
+    for u in ("rblive4-boot", "healthwatch", "rblive4-conf", "rblive4-vnc"):
+        check(('name=unit value="%s"' % u) in services,
+              "a row button posts the unit name: %s" % u)
+    prow = [r for r in services.split("<tr>") if ">rblive4</td>" in r][0]
+    check("action=/service" not in prow,
+          "and the PLAYER has no /service form at all -- it keeps its own guarded path")
+    check("action=/restart" in prow, "its row posts to the two-step confirm instead")
+
+    print("\n== the unit name is a whitelist, not a string off the wire ==")
+    s, _b, _h = post(port, "/service", {"unit": "sshd"})
+    check(s == 400, "a unit that is not on this page is 400, not a polite redirect")
+    log = open(calls).read() if os.path.exists(calls) else ""
+    check("sshd" not in log,
+          "and nothing ran systemctl for it -- an arbitrary unit name never reaches argv")
+    for evil in ("../../etc/passwd; reboot", "rblive4; reboot", "rblive4-vnc ", ""):
+        s, _b, _h = post(port, "/service", {"unit": evil})
+        check(s == 400, "refused: %r" % evil)
+    log = open(calls).read() if os.path.exists(calls) else ""
+    check("passwd" not in log and "reboot" not in log,
+          "and none of them reached a process")
+
+    print("\n== a running unit is restarted, a stopped one is started ==")
+    s, _b, _h = post(port, "/service", {"unit": "rblive4-vnc"})
+    check(s == 303, "the running viewer redirects")
+    s, _b, _h = post(port, "/service", {"unit": "rblive4-boot"})
+    check(s == 303, "the stopped boot screen redirects")
+    log = open(calls).read()
+    check("systemctl restart rblive4-vnc" in log, "the running one was RESTARTED")
+    check("systemctl start rblive4-boot" in log, "the stopped one was STARTED")
+    check("/root/pdj" not in log and "rbp -a" not in log,
+          "and no command line names the player path (the cmdline-kill trap)")
+    _s, page = get(port, "/")
+    check("rblive4-boot start requested" in page,
+          "and the page flashes which service it acted on and which verb it chose")
+
+    print("\n== the startup column carries the enable/disable ==")
+    for u, st in (("rblive4-vnc", "disabled"), ("healthwatch", "enabled"),
+                  ("rblive4", "enabled"), ("rblive4-conf", "enabled")):
+        with open(os.path.join(units_dir, u + ".enabled"), "w") as f:
+            f.write(st)
+    _s, page = get(port, "/")
+    services = page.split("section id=services")[1].split("</section>")[0]
+    check("startup</th>" in services and "actions</th>" in services,
+          "the two control columns are headed startup and actions")
+    check("action=/boot" in services, "its cell carries the control")
+    vrow = [r for r in services.split("<tr>") if ">rblive4-vnc</td>" in r][0]
+    hrow = [r for r in services.split("<tr>") if ">healthwatch</td>" in r][0]
+    check('value=on' in vrow and 'value=off' in vrow
+          and '>enabled</button>' in vrow and '>disabled</button>' in vrow,
+          "the cell shows BOTH states as buttons, not just the one a press would give")
+    check('value=off class=cur>disabled<' in vrow,
+          "and the state the unit is IN is drawn as pressed (the viewer is disabled)")
+    check('value=on class=cur>enabled<' in hrow and 'value=off class=cur' not in hrow,
+          "and an enabled unit has ENABLED pressed instead -- one pressed, one not")
+
+    print("\n== two units can be enabled but never disabled ==")
+    for u in ("rblive4", "rblive4-conf"):
+        row = [r for r in services.split("<tr>") if (">%s</td>" % u) in r][0]
+        check("action=/boot" in row, "the %s row shows the pair like every other" % u)
+        offbtn = [b for b in row.split("<button") if "value=off" in b][0]
+        onbtn = [b for b in row.split("<button") if "value=on" in b][0]
+        check("disabled" in offbtn,
+              "with its DISABLED button itself disabled -- the direction the page refuses")
+        check("disabled" not in onbtn, "while its ENABLED button is live")
+        check("class=info" in row and "class=tip" in row,
+              "and the reason still rides on an (i)")
+    s, _b, _h = post(port, "/boot", {"unit": "rblive4", "action": "off"})
+    check(s == 400, "a request to disable the player is refused even so")
+    check("disable rblive4" not in (open(calls).read() if os.path.exists(calls) else ""),
+          "and systemd was never asked")
+    s, _b, _h = post(port, "/boot", {"unit": "rblive4", "action": "on"})
+    check(s == 303, "but ENABLING one of them is allowed -- that direction cannot lock "
+                    "anyone out")
+
+    print("\n== enable is not start ==")
+    if os.path.exists(calls):
+        os.unlink(calls)
+    conf = os.path.join(env["RB_DEPLOY_ROOT"], "rb.local.conf")
+    s, _b, _h = post(port, "/boot", {"unit": "rblive4-vnc", "action": "on"})
+    check(s == 303, "enabling the viewer redirects")
+    log = open(calls).read() if os.path.exists(calls) else ""
+    check("systemctl enable rblive4-vnc" in log, "and systemd was asked to enable it")
+    check("RB_VNC=1" in open(conf).read(),
+          "and RB_VNC was recorded too -- install.sh re-applies this, so a bare enable would "
+          "be undone by the next install")
+    check("--now" not in log and "restart rblive4" not in log,
+          "WITHOUT starting or stopping anything: enable writes the symlink and stops there")
+    s, _b, _h = post(port, "/boot", {"unit": "rblive4-vnc", "action": "wibble"})
+    check(s == 400, "an action that is neither is 400")
+    s, _b, _h = post(port, "/boot", {"unit": "sshd", "action": "on"})
+    check(s == 400, "and a unit that is not on the page is 400")
+
+    print("\n== this page's own unit is answered, never waited for ==")
+    with open(os.path.join(units_dir, "rblive4-conf.active"), "w") as f:
+        f.write("active")
+    s, _b, _h = post(port, "/service", {"unit": "rblive4-conf"})
+    check(s == 303, "restarting this page's own service still answers the request")
+    for _ in range(60):                 # it is fired detached, so give it a moment
+        if "restart rblive4-conf" in open(calls).read():
+            break
+        time.sleep(0.05)
+    check("restart rblive4-conf" in open(calls).read(),
+          "and it did ask systemd -- just without waiting to be killed by it")
 
 
 def test_set(env, port):
@@ -748,37 +916,26 @@ def test_set(env, port):
     if os.path.exists(env["FAKE_LOG"]):
         os.unlink(env["FAKE_LOG"])       # the log has the other suites' calls in it
     before = open(conf).read()
-    s, _b, h = post(port, "/login", {"pw": "password"})
-    cookie = cookie_of(h)
-    _s, page = get_with(port, "/", cookie)
-    csrf = csrf_of(page.split("section id=vncsettings")[1].split("</section>")[0])
-    check(bool(csrf), "the save form carries a CSRF value")
+    _s, page = get(port, "/")
+    check("action=/set" in page, "the save form is on the page with no sign-in at all")
 
-    s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "9"})
-    check(s == 401, "saving with no session is 401")
-    s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "9", "csrf": "0" * 32},
-                     cookie=cookie)
-    check(s == 403, "a wrong CSRF value is 403")
-    s, _b, _h = post(port, "/set", {"key": "RB_FB_LIE_BPP", "value": "16", "csrf": csrf},
-                     cookie=cookie)
+    s, _b, _h = post(port, "/set", {"key": "RB_FB_LIE_BPP", "value": "16"})
     check(s == 303, "a read-only key is refused (with a message, see below)")
-    _s, page = get_with(port, "/", cookie)
+    _s, page = get(port, "/")
     check("pair" in page and "FAILED" in page, "and the page says why")
     check(open(conf).read() == before, "the file is untouched by all of that")
 
     print("\n== values the schema refuses ==")
     for bad in ("999", "4; rm -rf /", "$(reboot)", "`id`"):
-        post(port, "/set", {"key": "RB_VNC_FPS", "value": bad, "csrf": csrf}, cookie=cookie)
+        post(port, "/set", {"key": "RB_VNC_FPS", "value": bad})
     check(open(conf).read() == before,
           "an out-of-range value and three injections leave the file BYTE-IDENTICAL")
-    s, _b, _h = post(port, "/set", {"key": "RB_PASSWORD", "value": "", "csrf": csrf},
-                     cookie=cookie)
+    s, _b, _h = post(port, "/set", {"key": "RB_PASSWORD", "value": ""})
     check(s == 303, "a blank password field is accepted as 'leave it alone'")
     check(open(conf).read() == before, "and changes nothing")
 
     print("\n== saving for real ==")
-    s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "9", "csrf": csrf},
-                     cookie=cookie)
+    s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "9"})
     check(s == 303, "a valid save redirects")
     after = open(conf).read()
     # Relative to what the file was, not to a pristine one: the earlier suites have already
@@ -786,7 +943,7 @@ def test_set(env, port):
     check(after == before.replace("RB_VNC_FPS=7", "RB_VNC_FPS=9"),
           "and the file is EXACTLY as it was with one value changed")
     check(os.path.exists(conf + ".prev"), "a one-generation backup was kept")
-    _s, page = get_with(port, "/", cookie)
+    _s, page = get(port, "/")
     check("saved RB_VNC_FPS=9" in page, "the page says what it saved")
     check("restart the viewer to apply" in page, "and what applies it")
     check("saved, not applied yet" in page, "and marks the group as not yet applied")
@@ -799,27 +956,31 @@ def test_set(env, port):
     print("\n== the marker is discharged by the unit starting again ==")
     with open(os.path.join(env["FAKE_UNITS"], "rblive4-vnc.since"), "w") as f:
         f.write("9000000\n")            # ActiveEnterTimestampMonotonic moved: it restarted
-    _s, page = get_with(port, "/", cookie)
+    _s, page = get(port, "/")
     check("saved, not applied yet" not in page,
           "and the page stops saying so once the viewer has restarted")
 
 
 def test_default_open(root, port):
-    """The SHIPPED default: no password for configuration. A configuration screen you have to
-    sign in to is one you stop using, so the lock is opt-in -- `RB_CONF_AUTH=1`."""
-    print("\n== the shipped default: nothing to sign in to ==")
-    env = make_fake(root)
-    text = open(env["RB_CONF_FILE"]).read().replace(': "${RB_CONF_AUTH:=1}"',
-                                                   ': "${RB_CONF_AUTH:=0}"')
-    with open(env["RB_CONF_FILE"], "w") as f:
-        f.write(text)
+    """The SHIPPED default, which is now the ONLY behaviour: no password for configuration. A
+    configuration screen you have to sign in to is one you stop using -- and the operator
+    retired the opt-in rather than leaving it off.
+
+    Note what is NOT here: a conf carrying the retired `RB_CONF_AUTH=1`. It is set to 1 in the
+    fixture on purpose, because a unit that was locked in the field will still have it, and the
+    page must ignore it rather than start demanding a password it has no way to take."""
+    print("\n== the shipped default: no password, and no opt-in to one ==")
+    env = make_fake(root)          # the fixture leaves RB_CONF_AUTH=1 in the conf, on purpose
     p = start_daemon(env, port)
     try:
         body = wait_up(port)
-        check(body is not None, "the page answers with no opt-in")
+        check(body is not None, "the page answers")
         if body:
-            check("action=/login" not in body, "and asks for nothing")
-            check("Nothing to sign in to" in body, "saying there is nothing to sign in to")
+            check("name=pw" not in body, "and asks for nothing")
+            check("This page has" not in body,
+                  "and carries no notice about itself")
+            check("RB_CONF_AUTH" not in body,
+                  "even though the conf still says RB_CONF_AUTH=1 -- the key is retired")
         s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "6"})
         check(s in (200, 303), "a setting can be changed with no session at all")
         check("RB_VNC_FPS=6" in open(env["RB_LOCAL_CONF"]).read(), "and it was written")
@@ -829,9 +990,13 @@ def test_default_open(root, port):
 
 
 def test_unreadable_conf(root, port):
-    """THE CASE THE OPERATOR ACTUALLY HIT. A conf that cannot be read does not yield a MISSING
-    RB_CONF_AUTH, it yields an EMPTY one -- so `!= "0"` would demand a password the page has
-    no way to check, which is precisely how a sign-in form appeared out of a failing card."""
+    """THE CASE THE OPERATOR ACTUALLY HIT, kept because the lesson outlived the code.
+
+    A conf that cannot be read does not yield a MISSING value, it yields an EMPTY one -- and
+    the sign-in this page used to have tested for an explicit `=1` precisely because the first
+    version tested `!= "0"` and turned that empty value into a sign-in form, making a card
+    failure look like a policy. The sign-in is gone; what is still worth pinning is that a conf
+    the page cannot read leaves it answering and honest rather than inventing a control."""
     print("\n== a conf the page cannot read ==")
     env = make_fake(root)
     with open(env["RB_CONF_FILE"], "w") as f:
@@ -841,10 +1006,11 @@ def test_unreadable_conf(root, port):
         body = wait_up(port)
         check(body is not None, "the page still answers when the conf cannot be read")
         if body:
-            check("action=/login" not in body,
+            check("name=pw" not in body,
                   "and does NOT invent a sign-in form out of the failure")
-            check("RB_VNC = (empty)" in body,
-                  "while the values it cannot read are visibly empty")
+            check("class=v>(empty)</td>" in body,
+                  "while the values it cannot read are visibly empty -- not blank, and not "
+                  "invented")
     finally:
         p.terminate()
         p.wait(timeout=5)
@@ -866,7 +1032,7 @@ def main():
         test_write_path(env, port)
         test_set(env, port)
         test_restart(env, port)
-        test_rate_limit(env, port)      # last: it refuses this client's logins for a minute
+        test_services(env, port)
 
         test_states(tempfile.mkdtemp(prefix="confscreen-states."), free_port())
         test_no_password(tempfile.mkdtemp(prefix="confscreen-nopass."), free_port())

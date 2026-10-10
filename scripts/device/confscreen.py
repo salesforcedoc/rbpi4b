@@ -73,13 +73,13 @@ BIND = os.environ.get("RB_CONF_BIND", "0.0.0.0")
 
 # --- the write path's own places ---------------------------------------------------
 LOCAL_CONF = os.environ.get("RB_LOCAL_CONF", os.path.join(DEPLOY_ROOT, "rb.local.conf"))
-SESSION_TTL_S = int(os.environ.get("RB_CONF_SESSION_S", str(8 * 3600)))
-LOGIN_MAX_FAILS = int(os.environ.get("RB_CONF_LOGIN_MAX", "5"))
-LOGIN_WINDOW_S = int(os.environ.get("RB_CONF_LOGIN_WINDOW_S", "60"))
-COOKIE = "rblive4conf"
 VIEWER_UNIT = os.environ.get("RB_VNC_UNIT", "rblive4-vnc")
 PLAYER_UNIT = os.environ.get("RB_PLAYER_UNIT", "rblive4")
 BOOT_UNIT = os.environ.get("RB_BOOT_UNIT", "rblive4-boot")
+# This page's own unit. Named here because two places have to treat it specially: it must
+# never be waited for (see service_action) and the services table must not offer to stop the
+# thing serving the page.
+CONF_UNIT = os.environ.get("RB_CONF_UNIT", "rblive4-conf")
 RESTART_LOCK = os.environ.get("RB_CONF_RESTART_LOCK",
                               os.path.join(RUN_DIR, "conf-restart.lock"))
 # Two restarts inside this many seconds are refused. Measured on `.239`: two overlapping
@@ -87,11 +87,11 @@ RESTART_LOCK = os.environ.get("RB_CONF_RESTART_LOCK",
 # wedge rbp outright, and one clean restart immediately after paints normally.
 RESTART_COOLDOWN_S = int(os.environ.get("RB_CONF_RESTART_COOLDOWN_S", "20"))
 
-# Sessions live in MEMORY ONLY. This process is the only thing that needs them, and a page
-# restart should not leave a browser holding a credential the unit has forgotten.
-# {sid: {"csrf": ..., "exp": ..., "flash": ...}}
-_SESSIONS = {}
-_LOGIN_FAILS = {}          # client address -> monotonic times of recent failures
+# THE ONE LINE THIS PAGE SHOWS AFTER A WRITE. It used to live in a sign-in session; with no
+# sign-in there is one page and one operator, so one slot is the honest shape. It is set by a
+# write and taken by the next full render -- the poll must not consume it, or a message raised
+# between two ticks would be eaten by a refresh nobody was looking at.
+_FLASH = {"text": ""}
 
 # The frame counter. This string is the whole frame-rate instrument on this unit; it is
 # written once per frame with no message, so a line count IS a frame count.
@@ -102,9 +102,38 @@ DSHW = "DS_HW_Glib3_DFB.c <1106>"
 # distinction earned a script.
 REFRESH_S = int(os.environ.get("RB_CONF_REFRESH_S", "5"))
 
-# The units worth showing. Names are literals, so nothing here is ever interpolated into
-# a command -- every systemctl call below passes a constant argv.
-UNITS = ("rblive4", "rblive4-boot", "rblive4-vnc", "healthwatch", "rblive4-conf")
+# The units worth showing, AND AT THE SAME TIME the whitelist the service button validates
+# against: a unit name arrives from a form and becomes an argument to systemctl, so the only
+# names that may reach an argv array are these. Built from the constants above rather than
+# retyped, so a unit cannot be listed here under a spelling the rest of the file does not use.
+UNITS = (PLAYER_UNIT, BOOT_UNIT, VIEWER_UNIT, "healthwatch", CONF_UNIT)
+
+# THE INSTALL-TIME MIRROR OF A BOOT CHOICE. install.sh decides whether to install some units
+# enabled or disabled from an RB_* line, so a bare `systemctl enable` is a choice the next
+# install would quietly undo. Where such a line exists the button writes it too: the two
+# mechanisms are kept in step rather than left to disagree in silence, which is a trap that
+# would only spring weeks later, on an install.
+BOOT_SETTING = {VIEWER_UNIT: "RB_VNC", BOOT_UNIT: "RB_BOOTSCREEN"}
+
+# THE UNITS THE PAGE WILL NOT DISABLE, WITH THE REASON. They still show the pair -- both
+# states, the one in force drawn as pressed -- but their `disabled` button is itself disabled:
+# the direction the page will not take is GREYED rather than absent, and the reason rides on
+# the (i) beside it, which is how this page shows anything it will not do.
+#
+# ONLY THE DISABLE DIRECTION IS REFUSED, and the asymmetry is the point: ENABLING is always
+# allowed, so a unit that somehow came up disabled can be recovered from this page. Refusing
+# both directions would leave the page able only ever to take a unit away.
+#   the PLAYER -- RB_AUTOSTART is read-only for exactly this reason: disabling the appliance's
+#     own player at boot, from a browser, could leave a unit that never starts rbp;
+#   THIS PAGE -- disabling the page at boot takes away the page you would use to turn it back
+#     on. That is not a warning, it is the end of the thread.
+NEVER_DISABLE = {
+    PLAYER_UNIT: "The player is the appliance. Disabling it at boot from a browser could "
+                 "leave a unit that never starts rbp -- the rule RB_AUTOSTART is read-only "
+                 "for. It is set in rb.local.conf.",
+    CONF_UNIT: "Disabling this page at boot would take away the page you would use to turn "
+               "it back on. Set it from a shell if you really mean it.",
+}
 
 # The settings the page reports today and will edit in the next slice. Read-only here.
 # The settings, in the two groups the operator asked for. The split is by what they are
@@ -113,7 +142,7 @@ UNITS = ("rblive4", "rblive4-boot", "rblive4-vnc", "healthwatch", "rblive4-conf"
 VNC_KEYS = ("RB_VNC", "RB_VNC_PORT", "RB_VNC_HTTP_PORT", "RB_VNC_FPS", "RB_VNC_MODE",
             "RB_VNC_LIVE", "RB_VNC_INPUT", "RB_PASSWORD")
 RBP_KEYS = ("RB_PREWARM", "RB_POINT_KIND", "RB_MIDI_MAP", "RB_AUDIO_DEV", "RB_BOOTSCREEN",
-            "RB_FB_LIE_BPP", "RB_VERBOSE", "RB_CONF_AUTH", "RB_CONF_HTTP_PORT")
+            "RB_FB_LIE_BPP", "RB_VERBOSE", "RB_CONF_HTTP_PORT")
 CONF_KEYS = VNC_KEYS + RBP_KEYS
 
 
@@ -403,29 +432,26 @@ def hostname():
 # kills by cmdline match, so a command that mentions it can kill its own caller.
 
 
-def password():
-    """The credential, read LIVE from the conf so that changing it on this page takes
-    effect at once. Sourcing the shipped file is how every device script reads it, and it
-    is the only way to resolve the `:=` defaults and the rb.local.conf override."""
-    return conf_values(("RB_PASSWORD",)).get("RB_PASSWORD", "")
-
-
 def writes_available():
     return confedit is not None
 
 
-def conf_auth_on(conf):
-    """Is the password required for writes? Only an explicit `RB_CONF_AUTH=1` turns it ON.
-
-    That predicate is doing real work. A conf that cannot be READ does not yield a missing
-    key, it yields an EMPTY one -- so `.get(k, "0")` returns "" and a test of `!= "0"` would
-    still demand a password the page has no way to check. Which is exactly what the operator
-    saw: a failing card, an unreadable conf, and a sign-in form invented out of the failure."""
-    return str(conf.get("RB_CONF_AUTH", "")).strip() == "1"
+def set_flash(text):
+    """Record the message the next full page render shows, once."""
+    _FLASH["text"] = text
 
 
-def auth_required():
-    return conf_auth_on(conf_values(("RB_CONF_AUTH",)))
+def take_flash():
+    """Take that message and clear it -- the full render's half of the pair."""
+    text = _FLASH["text"]
+    _FLASH["text"] = ""
+    return text
+
+
+def peek_flash():
+    """Read it WITHOUT clearing it -- the poll's half. A refresh racing a write must not eat a
+    message the operator has not seen yet."""
+    return _FLASH["text"]
 
 
 def _run_rc(argv, timeout=25):
@@ -452,32 +478,6 @@ def set_switch(name, value):
         return False, "could not write %s: %s" % (path, e)
 
 
-def vnc_set(on):
-    """Turn the viewer on or off for real, in TWO halves, and both are load-bearing.
-    `systemctl enable --now` is what makes it run now; the line in rb.local.conf is what
-    makes it come back after a power cut, because the thing that reads that line at boot is
-    install.sh, and this process is not install.sh."""
-    if not writes_available():
-        return False, ("the config editor is not installed beside this page, so nothing "
-                       "was changed")
-    ok, why = confedit.write_local(LOCAL_CONF, "RB_VNC", "1" if on else "0")
-    if not ok:
-        return False, "could not record the choice, so nothing was changed: %s" % why
-    if not on:
-        # Leave the sharing switch off with it: a later enable must not come up already
-        # serving the screen.
-        set_switch("live", "off")
-    rc, out = _run_rc([SYSTEMCTL, "enable" if on else "disable", "--now", VIEWER_UNIT])
-    if rc != 0:
-        return False, ("recorded RB_VNC=%s, but systemctl %s returned %d: %s"
-                       % ("1" if on else "0", "enable" if on else "disable", rc, out))
-    return True, ("the viewer is enabled and starting -- it will be on port %s, and its "
-                  "own page at :%s"
-                  % (conf_values(("RB_VNC_PORT",)).get("RB_VNC_PORT", "?"),
-                     conf_values(("RB_VNC_HTTP_PORT",)).get("RB_VNC_HTTP_PORT", "?"))
-                  if on else "the viewer is stopped and will not start at boot")
-
-
 def share_set(on):
     """The live sharing switch: what the viewer re-reads each turn. No restart, and it
     works whether or not the viewer is running -- the file IS the request."""
@@ -485,6 +485,34 @@ def share_set(on):
     if not ok:
         return False, why
     return True, ("sharing on -- the screen is being served" if on else "sharing off")
+
+
+def mode_set(value):
+    """The live encoding switch: `raw` or `hwjpeg`, the choice the viewer re-reads each turn.
+
+    THE VALUES ARE A WHITELIST, for the same reason the unit names in UNITS are: this is
+    written straight into a file the viewer acts on, and a switch is not the place to find out
+    that something unexpected arrived. The page only ever renders these two words."""
+    if value not in ("raw", "hwjpeg"):
+        return False, "the encoding is either raw or hwjpeg"
+    ok, why = set_switch("mode", value)
+    if not ok:
+        return False, why
+    return True, "encoding now %s -- the viewer picks it up on its next turn" % value
+
+
+def input_set(on):
+    """The live pointer-injection switch: whether a click in a VNC client's picture becomes a
+    real press on the glass.
+
+    IT IS THE ONE SWITCH HERE THAT CAN CHANGE THE GLASS RATHER THAN THE PICTURE. On, every
+    client's mouse is the operator's finger; off, the picture is watch-only again. The page
+    says so under the row rather than leaving it to be discovered."""
+    ok, why = set_switch("input", "on" if on else "off")
+    if not ok:
+        return False, why
+    return True, ("pointer injection on -- a click in the picture now presses the glass"
+                  if on else "pointer injection off -- the picture is watch-only again")
 
 
 def restart_player():
@@ -541,48 +569,95 @@ def restart_player():
         os.close(fd)          # closing the fd releases the flock
 
 
-# --- sessions -----------------------------------------------------------------------
+def service_action(unit):
+    """Start or restart ONE unit off the page's own list, and say which it did.
+
+    THE UNIT IS A WHITELIST LOOKUP AND NEVER A STRING OFF THE WIRE. It arrives in a form
+    body and it becomes an argument to systemctl, so the membership test below IS the
+    security boundary: no name that is not a literal in UNITS can reach an argv array.
+    A missing `unit` is just a name that is not in the tuple, so it is refused the same way.
+
+    THE PLAYER KEEPS ITS OWN PATH, and that is not tidiness. `restart_player()` holds the
+    lock, enforces the cooldown, and starts the boot screen first; routing the player row
+    through the generic branch below would drop all three, and two overlapping restarts of
+    rblive4 are measured to wedge rbp on this unit. So the player never takes that branch.
+
+    THIS PAGE'S OWN UNIT IS FIRED AND NOT WAITED FOR. `systemctl restart rblive4-conf` kills
+    the process answering this request, so waiting on it would mean the browser never gets a
+    reply and the operator sees a failed button that in fact worked. Spawned detached, with
+    the redirect already on its way out.
+
+    NO SHELL, ANYWHERE: every branch passes a constant argv. The only variable is the unit,
+    and the membership test above bounds it."""
+    if unit not in UNITS:
+        return False, "no service by that name on this page"
+    if unit == PLAYER_UNIT:
+        return restart_player()
+    # `restart` is the honest verb for both cases -- systemd starts a stopped unit on a
+    # restart -- but the label the operator reads follows the state, so say what it did.
+    verb = "restart" if unit_state(unit)[0] == "active" else "start"
+    if unit == CONF_UNIT:
+        try:
+            subprocess.Popen([SYSTEMCTL, verb, unit], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            return False, "could not run systemctl: %s" % e
+        return True, ("this page's own service is restarting -- it blinks for a few seconds"
+                      if verb == "restart" else
+                      "this page's own service is starting")
+    rc, out = _run_rc([SYSTEMCTL, verb, unit], timeout=30)
+    if rc != 0:
+        return False, "systemctl %s %s returned %d: %s" % (verb, unit, rc, out)
+    return True, "%s %s requested" % (unit, verb)
+
+
+def boot_set(unit, on):
+    """Enable or disable ONE unit's START AT BOOT, and say which it did.
+
+    THIS IS THE `setting` COLUMN'S QUESTION, and it is not /service's. `systemctl is-enabled`
+    asks whether a symlink will start the unit at boot; it says nothing about whether the unit
+    is running. A unit can be running and not set to return -- which is precisely the state
+    rblive4-vnc was in, and why this control exists.
+
+    IT STARTS AND STOPS NOTHING. `enable` only writes the symlink; the unit keeps doing
+    whatever it was doing. That separation is deliberate: the two questions are answered by
+    two different buttons, so neither can surprise you about the other.
+
+    The unit name is a whitelist lookup exactly as /service's is, no shell is involved, and
+    NEVER_DISABLE is checked here as well as in the handler -- both read the same dict, so they
+    cannot disagree about which units may not be disabled."""
+    if unit not in UNITS:
+        return False, "no service by that name on this page"
+    if unit in NEVER_DISABLE and not on:
+        return False, NEVER_DISABLE[unit]
+    # RECORD IT FIRST, THEN DO IT -- the order `vnc_set` used, and for its reason: a change
+    # that cannot be written down should not be made, or the two mechanisms part company and
+    # the parting is invisible until an install.
+    key = BOOT_SETTING.get(unit)
+    if key and writes_available():
+        ok, why = confedit.write_local(LOCAL_CONF, key, "1" if on else "0")
+        if not ok:
+            return False, ("could not record %s, so nothing was changed: %s" % (key, why))
+    verb = "enable" if on else "disable"
+    rc, out = _run_rc([SYSTEMCTL, verb, unit], timeout=30)
+    if rc != 0:
+        return False, "systemctl %s %s returned %d: %s" % (verb, unit, rc, out)
+    return True, ("%s will start at boot" % unit if on
+                  else "%s will NOT start at boot" % unit)
+
+
+# --- there are no sessions ------------------------------------------------------------------
 #
-# A session is a random id in an HttpOnly, SameSite=Strict cookie, mapped IN MEMORY to a
-# CSRF value and an expiry. SameSite=Strict is the CSRF defence that does not depend on a
-# token surviving a redirect; the CSRF value is the belt to that, because a form a browser
-# is made to post from another site cannot read this page to learn it.
-
-
-def new_session():
-    for sid in [s for s, v in _SESSIONS.items() if v["exp"] < time.monotonic()]:
-        _SESSIONS.pop(sid, None)
-    sid = secrets.token_hex(16)
-    _SESSIONS[sid] = {"csrf": secrets.token_hex(16),
-                      "exp": time.monotonic() + SESSION_TTL_S, "flash": ""}
-    return sid
-
-
-def get_session(sid):
-    if not sid:
-        return None
-    s = _SESSIONS.get(sid)
-    if s is None:
-        return None
-    if s["exp"] < time.monotonic():
-        _SESSIONS.pop(sid, None)
-        return None
-    return s
-
-
-def drop_session(sid):
-    _SESSIONS.pop(sid, None)
-
-
-def rate_limited(addr):
-    now = time.monotonic()
-    fails = [t for t in _LOGIN_FAILS.get(addr, []) if now - t < LOGIN_WINDOW_S]
-    _LOGIN_FAILS[addr] = fails
-    return len(fails) >= LOGIN_MAX_FAILS
-
-
-def note_fail(addr):
-    _LOGIN_FAILS.setdefault(addr, []).append(time.monotonic())
+# THERE IS NO SIGN-IN ON THIS PAGE, by the operator's decision, so there is nothing to hold a
+# session for: no cookie, no CSRF token, no expiry, no login rate limit. What protected the
+# writes that remains is `_same_origin()` in the handler -- an Origin/Referer check, which is
+# what this page ran on anyway once RB_CONF_AUTH defaulted off. That is a real limit and the
+# page says it out loud at the top rather than implying a lock it does not have.
+#
+# The consequence worth naming: with no CSRF token, a write is refused only if the browser
+# sends an Origin that is not this page's. A script that can set its own Origin is not stopped
+# by that. The page is a LAN instrument on a single-operator appliance; this is the posture the
+# operator chose, twice, and it is written down here so the next reader does not assume more.
 
 
 # --- the page ----------------------------------------------------------------------
@@ -596,14 +671,47 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .12em; color: #
 .sub { color: #8b94a3; font-size: 12px; margin-bottom: 12px; }
 table { border-collapse: collapse; width: 100%; max-width: 900px; }
 th, td { text-align: left; padding: 3px 14px 3px 0; vertical-align: top; }
-th { color: #8b94a3; font-weight: normal; }
+/* A HEADER ROW MUST NOT LOOK LIKE A DATA ROW. It did: `th` was dim, normal-weight body text,
+   and the columns under it hold the very same words -- a row of headings reading "unit active
+   enabled" is indistinguishable from a service called "unit" that is active and enabled. So a
+   header now takes the treatment the section headings already use: small, upper case, spaced. */
+th { color: #6b7480; font-weight: normal; text-transform: uppercase; font-size: 11px;
+     letter-spacing: .08em; }
 .k { color: #8b94a3; width: 260px; }
+/* The services table's action column: one small button per row, kept on one line so a
+   long unit name or a wide button cannot push the column about. */
+.act { white-space: nowrap; }
+/* A two-button pair shows BOTH states and draws the one in force as pressed -- the same idea
+   as an on/off pair anywhere else, and it means the control states the current value rather
+   than only the value a press would give. */
+.cur { background: #2c3a2c; border-color: #4a6b4a; color: #dceadc; }
+/* A button the page will refuse, drawn as one: the startup pair SHOWS the direction it will not
+   take rather than hiding it, so it has to look unavailable rather than merely be inert. */
+button[disabled] { opacity: .4; cursor: not-allowed; }
+/* The settings tables: label, then the control, then a short hint. The control column never
+   wraps, so the column stays a column; the hint is dim and small because it is a note ABOUT
+   the setting rather than part of it. */
+.v { white-space: nowrap; }
+.h { color: #6b7480; font-size: 12px; padding-left: 12px; }
 .ok { color: #a3be8c; } .bad { color: #bf616a; } .warn { color: #ebcb8b; }
 .dim { color: #6b7480; }
 pre { background: #0d0f14; border: 1px solid #232833; border-radius: 4px; padding: 8px 10px;
       overflow-x: auto; color: #c8d0da; margin: 4px 0 0; max-width: 900px; }
 .state { font-size: 15px; }
 .note { color: #8b94a3; font-size: 12px; margin-top: 4px; }
+/* The (i) that carries a setting's description. Hidden until hover or focus, in CSS alone --
+   no script, nothing external, and it is in the DOM either way, so the text still exists for
+   a screen reader, for a copy-paste, and for a browser with the CSS stripped. */
+.info { display: inline-block; width: 15px; height: 15px; line-height: 15px; text-align: center;
+        border-radius: 50%; border: 1px solid #4a5568; color: #8b94a3; font-size: 10px;
+        cursor: help; position: relative; margin-left: 7px; vertical-align: 2px; font-style: normal; }
+.info:hover, .info:focus { color: #eceff4; border-color: #8b94a3; outline: none; }
+.info .tip { display: none; position: absolute; z-index: 9; left: -18px; top: 19px;
+             width: 330px; max-width: 62vw; padding: 7px 10px; border-radius: 4px;
+             background: #1b2733; border: 1px solid #33465c; color: #cfe3f5;
+             font-size: 12px; line-height: 1.45; text-align: left; white-space: normal;
+             box-shadow: 0 3px 10px rgba(0, 0, 0, .45); }
+.info:hover .tip, .info:focus .tip { display: block; }
 .shot { margin-top: 6px; } .shot img { max-width: 100%; border: 1px solid #232833; }
 .flash { margin: 8px 0; padding: 6px 9px; border-radius: 4px; background: #16232e;
          border: 1px solid #2b4257; color: #cfe3f5; }
@@ -751,13 +859,24 @@ def unit_for(restart):
 
 
 def apply_note(restart):
-    """What applies a value, in the operator's words."""
+    """What applies a value, in the operator's words.
+
+    THE `service:` CASE NAMES THE SECTION THE BUTTON IS ACTUALLY IN, and that is not
+    book-keeping: the viewer's enable/disable button moved out of the actions section into
+    viewer settings, and this sentence went on saying "under actions" -- a hint pointing at a
+    section that no longer holds the button is worse than no hint, because it sends the reader
+    somewhere confidently wrong. Every other `service:` row names a unit the services table
+    starts and restarts, which is what applies it."""
     if restart == "player":
         return "restart the player to apply -- the button is under services"
     if restart == "viewer":
         return "restart the viewer to apply"
     if isinstance(restart, str) and restart.startswith("service:"):
-        return "changed with the buttons under actions"
+        # EVERY `service:` ROW NOW HAS A REAL CONTROL, and it is the same one for all of them:
+        # the enable/disable in the services table's startup column, which writes both the
+        # systemd symlink and this line (see BOOT_SETTING). The sentence can name it exactly.
+        unit = restart.split(":", 1)[1]
+        return "changed by the enable/disable on the %s row under services" % unit
     return ""
 
 
@@ -813,12 +932,15 @@ def topic_pending(topic):
 # --- the settings form ---------------------------------------------------------------
 
 
-def _set_form(key, e, current, auth):
+def _set_form(key, e, current):
     """One row's form, by the schema's TYPE -- so a value cannot be entered in a shape the
-    validator will refuse without the operator being told why."""
-    csrf = '<input type=hidden name=csrf value="%s">' % esc(auth["csrf"])
+    validator will refuse without the operator being told why.
+
+    No hidden CSRF field, because there is no session to hold one: the write is held back by
+    the same-origin check in the handler and by nothing else. See the note where the sessions
+    section used to be."""
     hid = '<input type=hidden name=key value="%s">' % esc(key)
-    open_form = '<form method=post action=/set>' + hid + csrf
+    open_form = '<form method=post action=/set>' + hid
     t = e["type"]
     if t in ("enum", "bool"):
         choices = e["choices"] if t == "enum" else ["0", "1"]
@@ -842,12 +964,37 @@ def _set_form(key, e, current, auth):
             % esc(current))
 
 
+def _info(text, key=""):
+    """The (i) beside a label, carrying that setting's description on hover -- and the name it
+    has in the file, because the reader about to hand-edit `rb.local.conf` is exactly the
+    reader who hovers here, and printing the key on every row was half of the noise this table
+    used to have.
+
+    `tabindex=0` so it also appears on keyboard focus -- which is the only reason to bother:
+    without it the description would be reachable by mouse alone."""
+    parts = [esc(text)] if text else []
+    if key:
+        parts.append("<code>%s</code>" % esc(key))
+    if not parts:
+        return ""
+    return ('<span class=info tabindex=0>i<span class=tip>%s</span></span>'
+            % "<br>".join(parts))
+
+
 def render_settings(a, conf, topic, auth):
     """One group of settings, EDITABLE.
 
     Every field is built from confedit's schema, which is the same object the writer validates
     against -- so the form cannot offer something `confedit.write_local()` would refuse, and a
-    setting appears here by being added to the schema and nowhere else."""
+    setting appears here by being added to the schema and nowhere else.
+
+    THREE COLUMNS, AND ONLY THREE. It used to be label / a dim `KEY = value` line / the control
+    / a note, which put the value on screen twice and printed the SAME sentence about
+    restarting on all twenty rows -- so the one line that mattered was buried in twenty copies
+    of one that did not. What is left is the label, the control, and a short hint only where
+    there is something to say. Nothing was dropped: the key name moved into the (i), the value
+    moved into the control that already shows it, and the restart sentence is said once, for
+    the group, naming the units the schema says these settings belong to."""
     owed = topic_pending(topic)
     if owed:
         a('<div class="note bad">saved, not applied yet: restart %s</div>'
@@ -856,90 +1003,43 @@ def render_settings(a, conf, topic, auth):
         a('<div class=note>The config editor is not installed beside this page, so nothing '
           'here can be changed. Re-run install.sh.</div>')
         return
+    # ONE restart sentence for the group. Named from the schema rather than written by hand,
+    # so it cannot go stale when a setting changes which unit it belongs to -- and built only
+    # from rows this form can actually SAVE, because a `service:` row is changed by a button
+    # under actions and naming its unit here would promise this table something it cannot do.
+    units = sorted(u for u in {unit_for(e.get("restart", "")) for e in confedit.SCHEMA
+                               if confedit.topic_of(e["key"]) == topic
+                               and not e.get("readonly")
+                               and not (isinstance(e.get("restart"), str)
+                                        and e["restart"].startswith("service:"))} if u)
+    if units:
+        a('<div class=note>Saved values are picked up when %s next starts &mdash; the '
+          'buttons are on <a href="#services">services</a>.</div>' % esc(" or ".join(units)))
     a("<table>")
     for e in confedit.SCHEMA:
         k = e["key"]
         if confedit.topic_of(k) != topic:
             continue
         cur = confedit.reads_as(e) or (conf.get(k, "") or "(empty)")
-        a("<tr><td class=k>%s<div class=note>%s</div></td><td>"
-          % (esc(e.get("label", k)), esc(e.get("help") or e.get("why", ""))))
-        a('<div class=dim>%s = %s</div>' % (esc(k), esc(cur)))
+        a("<tr><td class=k>%s%s</td>"
+          % (esc(e.get("label", k)), _info(e.get("help") or e.get("why", ""), k)))
         if e.get("readonly"):
-            a('<div class=note>read-only: %s</div>' % esc(e.get("why", "")))
+            a('<td class=v>%s</td><td class=h>read-only</td>' % esc(cur))
         elif not auth["writes"]:
-            a('<div class=note>the config editor is not installed, so this cannot be '
-              'changed here</div>')
-        elif not auth["signed_in"]:
-            # The page never offers a control it will refuse -- the same rule the buttons
-            # under actions follow.
-            a('<div class=note>sign in under <a href="#actions">actions</a> to change '
-              'this</div>')
+            a('<td class=v>%s</td><td class=h>not editable here: no config editor</td>'
+              % esc(cur))
         elif isinstance(e.get("restart"), str) and e["restart"].startswith("service:"):
-            a('<div class=note>%s</div>' % esc(apply_note(e["restart"])))
+            # No control: this one is set by a button elsewhere on the page, and a second way
+            # to change it would be a second thing to keep honest. The hint names the section
+            # that button is really in.
+            a('<td class=v>%s</td><td class=h>%s</td>'
+              % (esc(cur), esc(apply_note(e["restart"]))))
         else:
-            a(_set_form(k, e, conf.get(k, ""), auth))
-            note = apply_note(e.get("restart", ""))
-            if note:
-                a('<div class=note>%s</div>' % esc(note))
-        a("</td></tr>")
+            hint = ("(set)" if conf.get(k) else "(not set)") if e.get("secret") else ""
+            a('<td class=v>%s</td><td class=h>%s</td>'
+              % (_set_form(k, e, conf.get(k, "")), esc(hint)))
+        a("</tr>")
     a("</table>")
-
-
-def render_actions(a, auth):
-    """The interactive half: sign in, and the two buttons. Kept OUT of the live region on
-    purpose -- re-fetching this would throw away anything half-typed into the sign-in box,
-    which is the whole reason the page polls the data instead of reloading itself. Nothing
-    here changes on its own: signing in navigates, and the buttons navigate."""
-    a('<section id=actions>')
-    a("<h2>actions</h2>")
-    if not auth["writes"]:
-        a('<div class=note>The config editor is not installed beside this page, so nothing '
-          'here will write. Re-run install.sh.</div>')
-    elif not auth.get("required", True):
-        # Turned off on purpose by the operator, and said loudly rather than left implicit:
-        # a page that silently has no lock is one nobody re-checks.
-        a('<div class="note bad">Writes on this unit are <b>unprotected</b> '
-          '(<code>RB_CONF_AUTH=0</code>): anyone who can reach this page can change a '
-          'setting, enable or stop the viewer, and start sharing the screen. No password '
-          'is asked for, and the VNC client password is separate.</div>')
-    elif not auth["password_set"]:
-        a('<div class="note bad">No password is configured (<code>RB_PASSWORD</code> is '
-          'empty), so writes are REFUSED rather than allowed. Set one in <code>%s</code> '
-          'and restart this page.</div>' % esc(LOCAL_CONF))
-    if not auth["signed_in"]:
-        a('<div class=note>Reading is open on this LAN. Changing anything -- including '
-          'starting the viewer -- needs the password.</div>')
-        a('<form method=post action=/login>'
-          # No placeholder: the shipped default password is the word "password", and a
-          # form that spells it out advertises the credential to anyone who loads the
-          # page. doctor.sh tells the OWNER it is still the placeholder; the page does not
-          # need to tell a passer-by.
-          '<label>password <input type=password name=pw autocomplete=current-password>'
-          '</label> <button>Sign in</button></form>')
-    else:
-        csrf = '<input type=hidden name=csrf value="%s">' % esc(auth["csrf"])
-        if auth.get("required", True):
-            a('<div class=note>Signed in. '
-              '<form method=post action=/logout><button>Sign out</button></form></div>')
-        else:
-            a('<div class=note>Nothing to sign in to: this unit does not ask for a '
-              'password.</div>')
-        a("<table>")
-        a("<tr><td class=k>the viewer</td><td>"
-          '<form method=post action=/vnc>' + csrf +
-          '<button name=action value=on>Enable the viewer</button>'
-          '<button name=action value=off>Stop and disable it</button></form>'
-          '<div class=note>Enabling is two things: it starts the viewer now, and writes '
-          'RB_VNC=1 so it comes back after a power cut.</div></td></tr>')
-        a("<tr><td class=k>screen sharing</td><td>"
-          '<form method=post action=/share>' + csrf +
-          '<button name=action value=on>Start sharing</button>'
-          '<button name=action value=off>Stop sharing</button></form>'
-          '<div class=note>The live switch the viewer re-reads each turn. No restart, and '
-          'it works whether or not the viewer is running.</div></td></tr>')
-        a("</table>")
-    a("</section>")
 
 
 def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="", auth=None,
@@ -950,8 +1050,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     first load, or the page and its updates drift apart, and the drift shows up as a figure
     that changes when you reload and not otherwise. What separates them is only the shell:
     the head, the flash, the actions and the footer, none of which the poll touches."""
-    auth = auth or {"signed_in": False, "csrf": "", "flash": "", "writes": False,
-                    "password_set": False}
+    auth = auth or {"flash": "", "writes": False}
     h = []
     a = h.append
     if not data_only:
@@ -960,21 +1059,25 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         a("<title>%s - rbp status</title><style>%s</style></head><body>"
           % (esc(hostname()), CSS))
         a("<h1>%s &mdash; rbp status</h1>" % esc(hostname()))
-        a('<div class=sub>page %d &middot; %s &middot; the data re-reads every %ds</div>'
-          % (PORT, esc(time.strftime("%H:%M:%S")), REFRESH_S))
+        # No "the data re-reads every Ns" any more: it described the machinery rather than the
+        # page, and the poll is invisible when it works -- which is the whole design. The clock
+        # stays, because a stale page and a live one look identical without it.
+        a('<div class=sub>page %d &middot; %s</div>'
+          % (PORT, esc(time.strftime("%H:%M:%S"))))
         if auth["flash"]:
             a('<div class="flash%s">%s</div>'
               % (" bad" if auth["flash"].startswith("FAILED") else "",
                  esc(auth["flash"])))
-        # The sections, as items down the left. In PAGE order, which is the order they are
-        # read in -- the actions sit between the viewer and the unit because the buttons
-        # belong next to what they act on.
+        # The sections, as items down the left, in the order they are read. There is no
+        # notice above them: the page had one for a while -- a paragraph about having no
+        # password -- and the operator took it off, which is the right shape for it. A page
+        # that says nothing about a lock it does not have is not hiding anything; doctor.sh
+        # reports it for anyone who wants it in words.
         a('<div id=layout><nav id=nav><b>%s</b>' % esc(hostname()))
         for anchor, label in (("player", "player"), ("services", "services"),
-                              ("launcher", "launcher"), ("viewer", "viewer"),
-                              ("actions", "actions"), ("unit", "unit"),
+                              ("launcher", "launcher"), ("viewer", "viewer settings"),
                               ("vncsettings", "vnc settings"),
-                              ("rbpsettings", "rbp settings")):
+                              ("rbpsettings", "rbp settings"), ("unit", "unit")):
             a('<a href="#%s">%s</a>' % (anchor, esc(label)))
         a("</nav><main id=main>")
 
@@ -992,34 +1095,89 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         a("<tr><td class=k>frames drawn (DS_HW lines)</td><td>%d</td></tr>" % frames)
     if rate is not None:
         a("<tr><td class=k>frame rate</td><td>%.1f/s</td></tr>" % rate)
-    a("<tr><td class=k>log</td><td>%s (last line)</td></tr>" % esc(RBP_LOG))
+    # THE LOG IS NAMED, NOT QUOTED. The six-line tail was here because rbp's own log is the
+    # only place some states are legible at all -- but a tail is a guess about which lines
+    # matter, and the reader who wants it can open the file. The path says where; the frame
+    # counter above says whether it is worth opening.
+    a("<tr><td class=k>log</td><td>%s</td></tr>" % esc(RBP_LOG))
     a("</table>")
-    lt = tail(RBP_LOG, 6)
-    if lt:
-        a("<pre>%s</pre>" % esc("\n".join(lt)))
     a("</section>")
 
     # --- services ---
     a('<section id=services>')
-    a("<h2>services</h2><table><tr><th>unit</th><th>active</th><th>enabled</th></tr>")
+    # THE HEADINGS NAME WHAT THE READER IS ASKING, not the systemd verb behind it. "Status" is
+    # `systemctl is-active` -- is it running NOW -- and "startup" is `systemctl is-enabled` --
+    # will it come back at boot. The two differ, and that difference is the whole reason
+    # the columns are separate: a unit can be running and not set to return (rblive4-vnc was,
+    # after the button that used to set this was retired).
+    a("<h2>services</h2><table><tr><th>unit</th><th>Status</th><th>startup</th>"
+      "<th>actions</th></tr>")
+    # ONE BUTTON PER ROW, and the player's row is the one that differs. Its button opens the
+    # two-step confirm at /restart instead of firing /service directly, because that is the
+    # control that blanks the screen for a quarter of a minute and pressing it by accident
+    # should cost one more click; every other unit starts or restarts in one.
+    can = auth["writes"]
     for u in UNITS:
         act, en = services.get(u, ("unknown", "unknown"))
         c = "ok" if act == "active" else ("dim" if act in ("inactive", "unknown") else "bad")
-        a("<tr><td>%s</td><td class=%s>%s</td><td class=dim>%s</td></tr>"
-          % (esc(u), c, esc(act), esc(en)))
+        if not can:
+            btn = ""
+        elif u == PLAYER_UNIT:
+            btn = ('<form method=post action=/restart>'
+                   '<button name=step value=ask>restart</button></form>')
+        else:
+            btn = ('<form method=post action=/service>'
+                   '<input type=hidden name=unit value="%s">'
+                   '<button>%s</button></form>'
+                   % (esc(u), "restart" if act == "active" else "start"))
+        # THE STARTUP COLUMN IS WHERE YOU CHANGE STARTUP. It reports `is-enabled`, so the
+        # control that flips it belongs on that word rather than in another table or another
+        # section. One button, labelled with what it will DO -- enable while it is disabled,
+        # disable while it is enabled -- so the row cannot be misread. The two units whose boot
+        # start is not the operator's to flip carry the page's usual (i) with the reason.
+        if not can:
+            # No editor, so nothing here can be written: state the value and stop.
+            boot_cell = esc(en)
+        else:
+            # BOTH STATES AS BUTTONS, with the one in force drawn as pressed -- so the control
+            # says what IS, not only what a press would do. On a NEVER_DISABLE unit the
+            # `disabled` button carries `disabled`: greyed and unpressable, with the reason on
+            # the (i) beside it.
+            fixed = u in NEVER_DISABLE
+            boot_cell = ('<form method=post action=/boot>'
+                         '<input type=hidden name=unit value="%s">'
+                         '<button name=action value=on%s>enabled</button>'
+                         '<button name=action value=off%s disabled>disabled</button></form>'
+                         % (esc(u),
+                            " class=cur" if en == "enabled" else "",
+                            " class=cur" if en != "enabled" else "")) if fixed else \
+                        ('<form method=post action=/boot>'
+                         '<input type=hidden name=unit value="%s">'
+                         '<button name=action value=on%s>enabled</button>'
+                         '<button name=action value=off%s>disabled</button></form>'
+                         % (esc(u),
+                            " class=cur" if en == "enabled" else "",
+                            " class=cur" if en != "enabled" else ""))
+            if fixed:
+                boot_cell += _info(NEVER_DISABLE[u])
+        a("<tr><td>%s</td><td class=%s>%s</td><td class=v>%s</td>"
+          "<td class=act>%s</td></tr>"
+          % (esc(u), c, esc(act), boot_cell, btn))
     a("</table>")
-    # The restart lives HERE because this is where you look when the player is wrong: the
-    # row above says whether rblive4 is up, and the button that fixes it is under it.
-    if auth["writes"] and auth["signed_in"]:
-        a('<div class=note>Restarting stops the player and starts it again. The screen goes '
-          'dark for about fifteen seconds, and the boot screen draws its stages while it '
-          'comes back. A set in progress stops.</div>')
-        a('<form method=post action=/restart>'
-          '<input type=hidden name=csrf value="%s">'
-          '<button name=step value=ask>Restart the player&hellip;</button></form>'
-          % esc(auth["csrf"]))
+    if can:
+        a('<div class=note><b>restart</b> stops the unit and starts it again -- on a unit '
+          'that is not running it is a plain start, and the button says which it will be. '
+          'The player is the destructive one: the screen goes dark for about fifteen seconds '
+          'while the boot screen draws its stages, and a set in progress stops, which is why '
+          'its button asks first and the others do not. Saving a setting never restarts '
+          'anything; these buttons are the only thing here that does.</div>')
+        a('<div class=note>The two buttons on a <b>startup</b> row are the two states, and the '
+          'one the unit is in is drawn as pressed. They answer the other question from '
+          '<b>restart</b>: whether it comes back after a power cut. Neither changes anything '
+          'now -- a unit can be running and not set to return, which is what the two columns '
+          'are for.</div>')
     elif auth["writes"]:
-        a('<div class=note>Restarting the player needs the password -- sign in under '
+        a('<div class=note>Starting a service needs the password -- sign in under '
           '<a href="#actions">actions</a>.</div>')
     a("</section>")
 
@@ -1033,20 +1191,74 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a("<pre>%s</pre>" % esc("\n".join(blog) if blog else "(no %s)" % BOOT_LOG))
     a("</section>")
 
-    # --- the viewer, and its switches ---
+    # --- the viewer: its switches, with a control on the two that are live, and its ports ---
     a('<section id=viewer>')
-    a("<h2>viewer</h2><table>")
-    a("<tr><td class=k>sharing (vnc.live)</td><td>%s</td></tr>" % esc(switches.get("live")))
-    a("<tr><td class=k>encoding (vnc.mode)</td><td>%s</td></tr>" % esc(switches.get("mode")))
-    a("<tr><td class=k>pointer injection (vnc.input)</td><td>%s</td></tr>"
-      % esc(switches.get("input")))
+    a("<h2>viewer settings</h2><table>")
+    # THE TWO LIVE SWITCHES CARRY THEIR OWN BUTTONS, on the row that reports them, so the state
+    # and the thing that changes it are one line rather than two tables a paragraph apart. They
+    # can, because they are ordinary files the viewer re-reads on its next turn: no restart, and
+    # they work whether or not it is running.
+    #
+    # THE VIEWER'S OWN SERVICE IS DELIBERATELY NOT HERE. It used to have a row of its own --
+    # "the viewer", with enable/disable -- which started the service AND wrote RB_VNC for the
+    # next boot. Starting and restarting it is the services table's job now, and a second way to
+    # do it would be a second thing to keep honest; RB_VNC itself is a read-only row next door,
+    # with why.
+    # A SWITCH FILE IS A SEED, NOT THE ONLY INPUT. With no file the viewer uses the RB_VNC_*
+    # default that vnc-run.sh handed it at startup, so a row shows the EFFECTIVE state and
+    # marks the ones that came from that default. "(absent)" told the reader nothing -- and for
+    # pointer injection the nothing it told them was whether their screen was clickable, which
+    # on this unit it was: the file was gone and RB_VNC_INPUT is 1.
+    def eff(name, default):
+        raw = switches.get(name)
+        return (raw, False) if raw != "(absent)" else (default, True)
+
+    live_v, live_d = eff("live", "on" if conf.get("RB_VNC_LIVE", "") == "1" else "off")
+    mode_v, mode_d = eff("mode", conf.get("RB_VNC_MODE", "") or "raw")
+    inp_v, inp_d = eff("input", "on" if conf.get("RB_VNC_INPUT", "") == "1" else "off")
+
+    def pair(action, name, values, current):
+        """One form, one button per value, with the value IN FORCE drawn as pressed.
+
+        THERE IS NO SEPARATE STATE COLUMN, because the pair states the value itself -- the same
+        shape the services table's startup cell uses. A row is then a thing and its control,
+        rather than a thing, its value, and its control, with the value said twice."""
+        if not auth["writes"]:
+            return ""
+        return ('<form method=post action=%s>%s</form>'
+                % (action,
+                   "".join('<button name=%s value=%s%s>%s</button>'
+                           % (name, v, " class=cur" if v == current else "", v)
+                           for v in values)))
+
+    def cell(word, d, control):
+        """The control, or the word when there is no control to have -- plus the (default) mark,
+        which has to travel with the value wherever the value is shown."""
+        return (control or esc(word)) + (" <span class=dim>(default)</span>" if d else "")
+
+    a("<tr><td class=k>sharing (vnc.live)</td><td class=v>%s</td></tr>"
+      % cell(live_v, live_d, pair("/share", "action", ("on", "off"), live_v)))
+    a("<tr><td class=k>encoding (vnc.mode)</td><td class=v>%s</td></tr>"
+      % cell(mode_v, mode_d, pair("/mode", "value", ("raw", "hwjpeg"), mode_v)))
+    a("<tr><td class=k>pointer injection (vnc.input)</td><td class=v>%s</td></tr>"
+      % cell(inp_v, inp_d, pair("/input", "value", ("on", "off"), inp_v)))
     rfb = conf.get("RB_VNC_PORT", "")
     pg = conf.get("RB_VNC_HTTP_PORT", "")
-    a("<tr><td class=k>RFB port %s</td><td>%s</td></tr>"
+    a("<tr><td class=k>RFB port %s</td><td class=v>%s</td></tr>"
       % (esc(rfb), "listening" if port_open(rfb) else "not listening"))
-    a("<tr><td class=k>viewer page port %s</td><td>%s</td></tr>"
+    a("<tr><td class=k>viewer page port %s</td><td class=v>%s</td></tr>"
       % (esc(pg), "listening" if port_open(pg) else "not listening"))
     a("</table>")
+    if live_d or mode_d or inp_d:
+        a('<div class=note>A state marked <b>(default)</b> has no switch file: that is the '
+          '<code>RB_VNC_*</code> value the viewer was started with, so it is what is really in '
+          'force -- and what comes back after a power cut, because <code>/run</code> is '
+          'cleared.</div>')
+    a('<div class=note><b>Pointer injection makes the picture an input surface</b>: with it '
+      'on, a click in any VNC client &mdash; macOS Screen Sharing and noVNC alike &mdash; '
+      'lands on the real glass, and the seventh column of the top menu is <b>USB STOP</b> (a '
+      'press stops the media; a three-second hold raises the eject). Nothing on this page '
+      'does that &mdash; it is a press for a person to make.</div>')
     if switches.get("live") == "on" and port_open(pg):
         # The preview belongs to the viewer (it owns the capture) and stays there; this
         # page only points at it. The host comes from the REQUEST, not from this unit's
@@ -1061,11 +1273,41 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a("</section>")
     a("</div>")                      # end of the first live half
 
-    if not data_only:
-        render_actions(a, auth)
-
     a('<div id=data2>')
 
+
+    # --- the settings, in the two groups the operator asked for: what the VIEWER is, and
+    # what the player and the unit are. Both are shown read-only; the form is the next slice.
+    a('<section id=vncsettings>')
+    a("<h2>vnc settings</h2>")
+    render_settings(a, conf, "vnc", auth)
+    a("</section>")
+
+    a('<section id=rbpsettings>')
+    a("<h2>rbp settings</h2>")
+    render_settings(a, conf, "rbp", auth)
+    # The depth pair is the one reading that spans two sources -- the lie in the conf and the
+    # word inside the deployed player -- so it is not a row in either schema group. Shown,
+    # never editable: a pair that disagrees is rbp SIGSEGV to a black screen.
+    a("<table>")
+    lie = conf.get("RB_FB_LIE_BPP", "")
+    a("<tr><td class=k>player's layer format word%s</td><td>%s</td></tr>"
+      % (_info("Read from the two immediates the depth patch rewrites in the deployed player."),
+         esc("not readable" if depth is None else "%s bpp" % depth)))
+    if depth is not None and lie:
+        agree = str(depth) == str(lie)
+        # The DANGER stays visible when it is true ("NO - rbp will not start"); only the
+        # explanation of what the pair is goes behind the (i).
+        a("<tr><td class=k>depth pair agrees?%s</td><td class=%s>%s</td></tr>"
+          % (_info("Shown and never editable: the pair is half of the player build, and a "
+                   "value that disagrees is rbp SIGSEGV to a black screen."),
+             "ok" if agree else "bad",
+             "yes" if agree else "NO &mdash; rbp will not start until these match"))
+    a("</table>")
+    a("</section>")
+    # LAST, and deliberately: the three SETTINGS tabs now sit together -- viewer
+    # settings, vnc settings, rbp settings -- rather than having the unit's readings
+    # wedged between two of them.
     # --- the unit ---
     a('<section id=unit>')
     a("<h2>unit</h2><table>")
@@ -1096,41 +1338,17 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a("</table>")
     a("</section>")
 
-    # --- the settings, in the two groups the operator asked for: what the VIEWER is, and
-    # what the player and the unit are. Both are shown read-only; the form is the next slice.
-    a('<section id=vncsettings>')
-    a("<h2>vnc settings</h2>")
-    render_settings(a, conf, "vnc", auth)
-    a("</section>")
-
-    a('<section id=rbpsettings>')
-    a("<h2>rbp settings</h2>")
-    render_settings(a, conf, "rbp", auth)
-    # The depth pair is the one reading that spans two sources -- the lie in the conf and the
-    # word inside the deployed player -- so it is not a row in either group. Shown, never
-    # editable: a pair that disagrees is rbp SIGSEGV to a black screen.
-    a("<table>")
-    lie = conf.get("RB_FB_LIE_BPP", "")
-    a("<tr><td class=k>player's layer format word<div class=note>read from the two "
-      "immediates the depth patch rewrites in the deployed player</div></td><td>%s</td></tr>"
-      % esc(("not readable" if depth is None else "%s bpp" % depth)))
-    if depth is not None and lie:
-        agree = str(depth) == str(lie)
-        a("<tr><td class=k>depth pair agrees?</td><td class=%s>%s</td></tr>"
-          % ("ok" if agree else "bad",
-             "yes" if agree else "NO &mdash; rbp will not start until these match"))
-    a("</table>")
-    a('<div class=note>The depth pair is shown and never editable: it is half of the '
-      'player build, and a value that disagrees is rbp SIGSEGV to a black screen.</div>')
-    a("</section>")
     a("</div>")                      # end of the second live half
 
     if not data_only:
         a("</main></div>")           # close #main and #layout
-        a("<footer>%s See <code>docs/20-config-page.md</code>.</footer>"
-          % ("reading is open; writes need the password."
-             if auth["writes"] else
-             "read-only: the config editor is not installed beside this page."))
+        # THE FOOTER SAYS ONE THING: where the page is written up. It used to carry a
+        # sentence about the password as well, and there is no version of that sentence worth
+        # having here -- the header already states the posture on EVERY visit, in one place,
+        # including the read-only case when the editor is missing. A second copy at the bottom
+        # is at best a duplicate and at worst the contradiction it had become: the footer still
+        # promised "writes need the password" for a while after the sign-in was retired.
+        a("<footer>See <code>docs/20-config-page.md</code>.</footer>")
         a(POLL_JS % REFRESH_S)
         a("</body></html>")
     return "".join(h)
@@ -1179,17 +1397,6 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- request parsing -------------------------------------------------------------
 
-    def _cookies(self):
-        out = {}
-        for part in (self.headers.get("Cookie") or "").split(";"):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                out[k.strip()] = v.strip()
-        return out
-
-    def _session(self):
-        return get_session(self._cookies().get(COOKIE))
-
     def _form(self):
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -1205,9 +1412,14 @@ class Handler(BaseHTTPRequestHandler):
                 for k, v in urllib.parse.parse_qs(raw, keep_blank_values=True).items()}
 
     def _same_origin(self):
-        """A POST that says it came from somewhere else is refused. `SameSite=Strict` on
-        the cookie is the real defence; this is the second lock, for a browser that sends
-        `Origin` anyway."""
+        """A POST that says it came from somewhere else is refused.
+
+        THIS IS THE ONLY LOCK ON THE WRITES NOW, and it is worth being exact about what it is:
+        a browser sends `Origin` on a cross-site POST and this compares it to `Host`, so a
+        page the operator merely *visits* cannot drive this one. It is not a secret and it does
+        not stop a client that sets its own headers -- there is no token, because there is no
+        session to keep one in. The page states that plainly at the top instead of implying a
+        lock it does not have."""
         origin = self.headers.get("Origin")
         if not origin:
             return True
@@ -1227,7 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.data())
         elif path == "/healthz":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
-        elif path in ("/login", "/logout", "/vnc", "/share", "/restart", "/set"):
+        elif path in ("/share", "/mode", "/input", "/restart", "/service", "/boot", "/set"):
             # A state change is never a GET. Refused as a METHOD here, so that no handler
             # can later be got wrong into acting on one -- which is the bug the viewer's
             # own page has, where /session, /input and /mode are state-changing GETs.
@@ -1244,84 +1456,49 @@ class Handler(BaseHTTPRequestHandler):
                                       "That request did not come from this page."))
             return
         form = self._form()
-        if path == "/login":
-            self._login(form)
-        elif path == "/logout":
-            drop_session(self._cookies().get(COOKIE))
-            self._redirect("/", cookie="%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
-                                     % COOKIE)
-        elif path in ("/vnc", "/share"):
-            self._action(path, form)
+        if path == "/share":
+            self._share(form)
+        elif path == "/mode":
+            self._mode(form)
+        elif path == "/input":
+            self._input(form)
         elif path == "/restart":
             self._restart(form)
+        elif path == "/service":
+            self._service(form)
+        elif path == "/boot":
+            self._boot(form)
         elif path == "/set":
             self._set(form)
         else:
             self._send(404, self._msg("no such page here",
                                       'Try <a href="/">/</a> instead.'))
 
-    def _login(self, form):
-        if not auth_required():
-            # Nothing to sign in to. Say so rather than 401, which would look like a wrong
-            # password and send the operator hunting for one.
-            self._redirect("/")
-            return
-        pw = password()
-        addr = self.client_address[0]
-        if not pw:
-            # FAIL CLOSED. An empty password must never mean "no authentication" -- it
-            # means the unit has no credential, so nothing is written.
-            self._send(503, self._msg(
-                "no password is set",
-                "This unit has no <code>RB_PASSWORD</code>, so writes are refused rather "
-                "than allowed. Set one in <code>%s</code> and restart this page."
-                % esc(LOCAL_CONF)))
-            return
-        if rate_limited(addr):
-            self._send(429, self._msg("too many attempts",
-                                      "Wait a minute, then try again."))
-            return
-        given = form.get("pw", "")
-        if not (given and secrets.compare_digest(given.encode(), pw.encode())):
-            note_fail(addr)
-            print("confscreen: rejected a sign-in from %s" % addr, flush=True)
-            self._send(401, self._msg("wrong password", "Nothing was changed."))
-            return
-        sid = new_session()
-        _LOGIN_FAILS.pop(addr, None)      # a good password clears the strike count
-        get_session(sid)["flash"] = "signed in -- the actions below now do what they say"
-        self._redirect("/", cookie="%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict"
-                                 % (COOKIE, sid, SESSION_TTL_S))
-
-    def _action(self, path, form):
-        if auth_required():
-            s = self._session()
-            if s is None:
-                self._send(401, self._msg("sign in first",
-                            "Reading is open on this page; changing anything needs the "
-                            "password."))
-                return
-            if not secrets.compare_digest(form.get("csrf", "").encode(),
-                                          s["csrf"].encode()):
-                self._send(403, self._msg("stale form",
-                            "That form did not come from this session. Reload the page and "
-                            "try again."))
-                return
-        s = self._session()
+    def _share(self, form):
+        """The live sharing switch. One click, no confirm and no restart -- the file IS the
+        request, and the viewer re-reads it on its next turn."""
         action = form.get("action", "")
         if action not in ("on", "off"):
             self._send(400, self._msg("bad request", "action must be on or off."))
             return
-        on = action == "on"
-        ok, msg = vnc_set(on) if path == "/vnc" else share_set(on)
-        # There may be no session at all: with RB_CONF_AUTH=0 there is nothing to sign in
-        # to, so the flash has nowhere to live and the redirect simply shows the new state.
-        if s is not None:
-            s["flash"] = ("the viewer: " if path == "/vnc" else "sharing: ") + \
-                         ("" if ok else "FAILED: ") + msg
-        print("confscreen: %s %s -> %s%s" % (path, action, "" if ok else "FAILED: ", msg),
+        ok, msg = share_set(action == "on")
+        set_flash(("sharing: " if ok else "FAILED: ") + msg)
+        print("confscreen: share %s -> %s%s" % (action, "" if ok else "FAILED: ", msg),
               flush=True)
-        self._redirect("/")
+        self._redirect("/#viewer")
+
+    def _mode(self, form):
+        """The live encoding switch, same shape as sharing: one click, no restart."""
+        value = form.get("value", "")
+        if value not in ("raw", "hwjpeg"):
+            self._send(400, self._msg("bad request",
+                                      "The encoding is either raw or hwjpeg."))
+            return
+        ok, msg = mode_set(value)
+        set_flash(("encoding: " if ok else "FAILED: ") + msg)
+        print("confscreen: mode %s -> %s%s" % (value, "" if ok else "FAILED: ", msg),
+              flush=True)
+        self._redirect("/#viewer")
 
     def _context(self):
         """Everything the page and its fragment both need, gathered once. The frame RATE is
@@ -1333,56 +1510,94 @@ class Handler(BaseHTTPRequestHandler):
                 player_depth(), self.headers.get("Host", ""))
 
     def _auth(self, conf, consume_flash=False):
-        """The auth state for one render. `consume_flash` is what makes a flash show once:
-        the page takes it and clears it, while the poll -- which must not consume anything --
-        only reads it."""
-        s = self._session()
-        required = conf_auth_on(conf)
-        out = {"signed_in": (not required) or s is not None,
-               "required": required,
-               "csrf": (s or {}).get("csrf", ""),
-               "flash": (s or {}).get("flash", ""),
-               "writes": writes_available(),
-               # From the values already gathered, so a poll costs no extra fork.
-               "password_set": bool(conf.get("RB_PASSWORD", ""))}
-        if s and consume_flash:
-            s["flash"] = ""
-        return out
+        """The write state for one render: whether the writer is installed, and the one message
+        the last write left. `consume_flash` is what makes that message show once -- the page
+        takes it, the poll only reads it, so a refresh cannot eat a message nobody has seen."""
+        return {"writes": writes_available(),
+                "flash": take_flash() if consume_flash else peek_flash()}
+
+    def _input(self, form):
+        """The pointer-injection switch. One click, no confirm -- the viewer re-reads the file
+        on its next turn, and turning it off can only ever make the page safer."""
+        value = form.get("value", "")
+        if value not in ("on", "off"):
+            self._send(400, self._msg("bad request", "Pointer injection is on or off."))
+            return
+        ok, msg = input_set(value == "on")
+        set_flash(("pointer: " if ok else "FAILED: ") + msg)
+        print("confscreen: input %s -> %s%s" % (value, "" if ok else "FAILED: ", msg),
+              flush=True)
+        self._redirect("/#viewer")
 
     def _restart(self, form):
         """TWO STEPS, and the confirm is a real page rather than a script dialog: this is the
         one control on this page that acts on something the operator can SEE, and it blanks
         the screen for a quarter of a minute. Pressing it by accident should cost one more
         click, and the confirm has to work with the script blocked, like everything else
-        here."""
-        s = self._session()
-        if auth_required():
-            if s is None:
-                self._send(401, self._msg("sign in first",
-                            "Restarting the player needs the password."))
-                return
-            if not secrets.compare_digest(form.get("csrf", "").encode(), s["csrf"].encode()):
-                self._send(403, self._msg("stale form",
-                            "That form did not come from this session. Reload the page."))
-                return
+        here. The player's row in the services table posts here, which is why this is a button
+        in a row rather than a control of its own."""
         if form.get("step", "ask") != "go":
-            csrf = ('<input type=hidden name=csrf value="%s">'
-                    % esc((s or {}).get("csrf", "")))
             self._send(200, self._msg(
                 "restart the player?",
                 "This stops rbp and starts it again. The screen goes dark for about fifteen "
                 "seconds, the boot screen draws its stages while it comes back, and a set in "
                 "progress stops."
-                "<p><form method=post action=/restart>" + csrf +
+                "<p><form method=post action=/restart>"
                 "<button name=step value=go>Yes, restart it</button></form> "
                 '<a href="/#services">no, leave it alone</a></p>'))
             return
         ok, msg = restart_player()
-        if s is not None:
-            s["flash"] = ("restart FAILED: " if not ok else "restart: ") + msg
+        set_flash(("restart FAILED: " if not ok else "restart: ") + msg)
         print("confscreen: restart -> %s%s" % ("" if ok else "FAILED: ", msg), flush=True)
-        # Land on the services tab, where the button was: the rows show the player coming
-        # back, and with auth off there is no session to flash a message into.
+        # Land on the services tab, where the button was, so the rows that show the player
+        # coming back are the rows the operator is looking at.
+        self._redirect("/#services")
+
+    def _service(self, form):
+        """Start or restart one unit from the services table. One click, no confirm -- but
+        the player never reaches here (its row posts to /restart), so the one control that
+        blanks the screen keeps its second click.
+
+        AN UNKNOWN UNIT IS 400 AND NOT A FLASH. The page only ever renders names out of
+        UNITS, so a name that is not one of them did not come from this page -- and answering
+        it with a redirect and a polite message would make a tampered request look like a
+        working one. The membership test is repeated here (both read the same tuple, so they
+        cannot disagree) because this is the reply, while service_action's own check is what
+        actually stands between a form field and argv."""
+        unit = form.get("unit", "")
+        if unit not in UNITS:
+            self._send(400, self._msg("bad request",
+                        "No service by that name is on this page."))
+            return
+        ok, msg = service_action(unit)
+        set_flash(("service: " if ok else "FAILED: ") + msg)
+        # NOT the unit name in the log's first field: it is the operator's own string and it
+        # has already been rejected if it is not one of ours, but a log line is read by
+        # people and `service_action` has the only copy of the verdict that matters.
+        print("confscreen: service -> %s%s" % ("" if ok else "FAILED: ", msg), flush=True)
+        self._redirect("/#services")
+
+    def _boot(self, form):
+        """Enable or disable one unit's start at boot. It does not start or stop anything --
+        /service does that, and keeping the two apart is the point of having two buttons."""
+        action = form.get("action", "")
+        if action not in ("on", "off"):
+            self._send(400, self._msg("bad request", "That is either enable or disable."))
+            return
+        unit = form.get("unit", "")
+        if unit not in UNITS:
+            self._send(400, self._msg("bad request",
+                        "No service by that name is on this page."))
+            return
+        if unit in NEVER_DISABLE and action == "off":
+            # Their `disabled` button is rendered disabled, so a request to press it did not
+            # come from this page -- and the reason is the reply rather than a bare refusal.
+            self._send(400, self._msg("not from here", esc(NEVER_DISABLE[unit])))
+            return
+        ok, msg = boot_set(unit, action == "on")
+        set_flash(("boot: " if ok else "FAILED: ") + msg)
+        print("confscreen: boot %s -> %s%s" % (action, "" if ok else "FAILED: ", msg),
+              flush=True)
         self._redirect("/#services")
 
     def _set(self, form):
@@ -1393,16 +1608,6 @@ class Handler(BaseHTTPRequestHandler):
         A SAVE NEVER RESTARTS ANYTHING. A save that blanked the screen would be a trap, so
         what it does instead is record which unit owes a restart; the settings section says so
         until that unit starts again."""
-        s = self._session()
-        if auth_required():
-            if s is None:
-                self._send(401, self._msg("sign in first",
-                            "Changing a setting needs the password."))
-                return
-            if not secrets.compare_digest(form.get("csrf", "").encode(), s["csrf"].encode()):
-                self._send(403, self._msg("stale form",
-                            "That form did not come from this session. Reload the page."))
-                return
         key = form.get("key", "")
         value = form.get("value", "")
         e = confedit.BY_KEY.get(key) if confedit else None
@@ -1428,15 +1633,8 @@ class Handler(BaseHTTPRequestHandler):
                 ok, text = False, "%s not saved: %s" % (key, why)
 
         print("confscreen: set %s -> %s%s" % (key, "" if ok else "FAILED: ", text), flush=True)
-        if s is not None:
-            s["flash"] = ("" if ok else "FAILED: ") + text
-            self._redirect(tab)
-        else:
-            # No session to flash into (`RB_CONF_AUTH=0`), and a silent failure is the worst
-            # outcome -- so say it here rather than redirect to a page that looks fine.
-            self._send(200 if ok else 400,
-                       self._msg("saved" if ok else "not saved",
-                                 esc(text) + '<p><a href="%s">back</a></p>' % esc(tab)))
+        set_flash(("" if ok else "FAILED: ") + text)
+        self._redirect(tab)
 
     def page(self):
         conf, pid, (frames, rate), facts, services, switches, depth, host = self._context()

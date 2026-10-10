@@ -679,13 +679,12 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 		fi
 	fi
 
-	# The page's writes are open unless a unit asks otherwise, so the thing worth saying is
-	# when they are NOT open -- and that the VNC password is a separate matter.
-	if [ "${RB_CONF_AUTH:-0}" != "0" ]; then
-		note "RB_CONF_AUTH=${RB_CONF_AUTH} -- the configuration page asks for the password"
-		note "before it changes anything. The shipped default is 0 (open), so this unit has"
-		note "been opted in to the lock deliberately."
-	fi
+	# The configuration page has no sign-in at all any more -- the operator retired it -- so
+	# the thing worth saying is not "you left the lock off" but "there is no lock, and this is
+	# how far it reaches". The VNC client password is a separate matter and unaffected.
+	note "the configuration page has no password (RB_CONF_AUTH is gone): anyone who can reach"
+	note "it can change a setting, enable or stop the viewer, start sharing, and start or"
+	note "restart a service. The VNC client password is separate and still asked for."
 
 	# The page's editor, which install.sh copies beside it. confscreen.py refuses every
 	# write when it is missing -- fail closed, and the page says so -- but that is a page

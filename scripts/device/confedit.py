@@ -84,9 +84,10 @@ SCHEMA = [
          help="Umbrella flag for the per-module verbose flags. Writes megabytes to /tmp, "
               "which is a 1.9 GB tmpfs."),
     dict(key="RB_VNC", group="basic", type=B, restart="service:rblive4-vnc", risk="low",
-         label="Enable the VNC viewer",
-         help="Installs and enables the viewer service, so the screen can be watched from "
-              "the desk. This is what the page can turn on when nothing else is running."),
+         label="Start the VNC viewer at boot",
+         help="Whether the viewer service comes back after a power cut. Set by the "
+              "enable/disable on its row under services -- this is the install-time mirror of "
+              "that choice, which install.sh re-applies."),
     dict(key="RB_BOOTSCREEN", group="basic", type=B, restart="service:rblive4-boot", risk="low",
          label="Boot progress screen",
          help="Draws the launcher's stages on the framebuffer from first light until rbp "
@@ -104,11 +105,11 @@ SCHEMA = [
          help="raw or hwjpeg. The live choice is the switch file, which the page sets."),
     dict(key="RB_PASSWORD", group="basic", type=S, secret=True,
          pattern=r"^[A-Za-z0-9._@%+=:-]{1,63}$", restart="viewer", risk="medium",
-         label="Page and VNC password",
-         help="One credential for both: what this page asks before writing a setting or "
-              "restarting the player, and what the viewer asks a VNC client for. macOS "
-              "Screen Sharing requires one. No spaces or quotes, and it is visible in the "
-              "process list."),
+         label="VNC client password",
+         help="What the viewer asks a VNC client for. macOS Screen Sharing requires one. It "
+              "has nothing to do with this page -- that password was retired -- so an empty "
+              "value stops no setting being changed here. No spaces or quotes, and it is "
+              "visible in the process list."),
 
     # --- advanced: the measured-per-unit values ---
     dict(key="RB_POINT_SWAP_XY", group="advanced", type=B, restart="player", risk="low",

@@ -21,33 +21,39 @@ write path lands, the viewer's page moves to loopback-only and this page owns th
 
 ## What it does
 
-**The password for this page is off by default.** `RB_CONF_AUTH` ships as `0`: reading *and changing*
-are open on the LAN, because a configuration screen you have to sign in to is one you stop using. Set
-`RB_CONF_AUTH=1` and every write becomes a POST that needs a session — `/login` against `RB_PASSWORD`
-(read live from the conf), a 128-bit id held in memory behind an `HttpOnly; SameSite=Strict` cookie, a
-per-session CSRF value in every form, a cross-origin POST refused, a GET on a write endpoint answered
-**405 by method**, logins rate-limited, and an EMPTY password **failing closed** with 503. The page says
-at the top of its actions when its writes are open, rather than looking locked, and `doctor.sh` notes
-when a unit has opted in.
+**This page has no password, and there is nothing to opt into.** It had a sign-in — a session cookie, a
+per-session CSRF value in every form, a 128-bit id held in memory, logins rate-limited, an empty
+`RB_PASSWORD` failing closed with 503 — and the operator retired the lot. A configuration screen you
+have to sign in to is one you stop using, and on a single-operator appliance the lock cost more than it
+bought. So there is no `/login`, no `/logout`, no session, no CSRF token, and no `RB_CONF_AUTH`; the
+whole mechanism is gone rather than switched off, which is why a conf still carrying `RB_CONF_AUTH=1`
+from the field is inert and `doctor.sh` no longer reports a lock either way.
 
-**The VNC client password is a different thing and is unaffected either way**: it is `RB_PASSWORD`, which
-`RB_VNC_PASSWORD` derives from, and macOS's Screen Sharing will not connect without one.
+**What is left guarding the writes is a same-origin check**, and it is worth being exact about it: a
+browser sends `Origin` on a cross-site POST, and the handler refuses one whose host is not its own, so a
+page the operator merely *visits* cannot drive this one. It is not a secret and it does not stop a client
+that sets its own headers.
 
-**And the fallback direction matters.** A conf that cannot be READ — a card failing, say — yields an
-*empty* `RB_CONF_AUTH`, not a missing one. The test for it is only an explicit `=1`, so a page that
-cannot check a password does not demand one; the first version tested `!= "0"`, which turned an empty
-value into a sign-in form and made a storage failure look like a policy. That is what the operator saw,
-and `test_confscreen.py` now pins both the shipped default and the unreadable-conf case.
+**And the page does not say any of that.** It carried a paragraph about having no password, at the top of
+every visit, and the operator had it taken off — which is the right shape: it was a notice about the page
+rather than about the unit, it sat above the sections on every tab, and a page saying nothing about a lock
+it does not have is not hiding one. `doctor.sh` still reports the posture in words for anyone who wants it
+there, and this document is the long version. The footer took the same treatment for the same reason: it
+had a second copy of the sentence, and a second copy is how it went on promising *"writes need the
+password"* for a while after there was no password to need.
+
+**The VNC client password is a different thing**, and still real: `RB_PASSWORD`, from which
+`RB_VNC_PASSWORD` derives, and macOS's Screen Sharing will not connect without one. It has nothing to do
+with this page now — an empty one does not stop a setting being changed.
 
 It shows one section at a time, navigated from the left:
 
 | section | what it is, and where it comes from |
 |---|---|
 | **player** | the pid (found by walking `/proc/*/cmdline` for the loader plus an argv ending `/rbp`, skipping `edb_streamd`), how long it has been **running** (field 22 of `/proc/<pid>/stat` ÷ `SC_CLK_TCK`), the frame count, and the frame **rate** |
-| **services** | `is-active` and `is-enabled` for `rblive4`, `rblive4-boot`, `rblive4-vnc`, `healthwatch`, `rblive4-conf` — and **the restart button**, because this is where you look when the player is wrong |
+| **services** | one row per unit, in four columns: the unit, its **Status** (`is-active`), its **startup** (`is-enabled`) as a two-button pair with the state in force drawn as pressed, and its **actions** (start/restart) — because this is where you look when something is wrong |
 | **launcher** | the tail of `/run/rblive4/boot.log` and the last `boot.stage` — the same stage stream the boot screen paints |
-| **viewer** | the three live switch files (`vnc.live`, `vnc.mode`, `vnc.input`), whether the RFB and viewer-page ports answer, and the preview (pointed at the viewer, which owns the capture) |
-| **actions** | sign in or out, **enable/disable the viewer**, and **start/stop sharing** |
+| **viewer settings** | the three live switch files (`vnc.live`, `vnc.mode`, `vnc.input`), whether the RFB and viewer-page ports answer, the preview (pointed at the viewer, which owns the capture), and **the viewer's own buttons** — enable/disable it, and start/stop sharing |
 | **unit** | uptime, load, memory, SoC temperature, `get_throttled` decoded into words, free space, the last health line |
 | **vnc settings** | the viewer's own knobs, **editable** |
 | **rbp settings** | the player's and the unit's, likewise editable, plus the depth pair and whether it agrees |
@@ -60,6 +66,20 @@ cannot offer something the writer would refuse**, and a setting appears on the p
 the schema and nowhere else. The keys that are *pairs* or need a shim rebuild (`RB_FB_LIE_BPP`,
 `RB_DFB_PRESENT`, the audio-mirror trio, `RB_AUTOSTART`, the paths) are schema entries marked read-only
 and rendered with their reason — shown, explained, and impossible to submit.
+
+**A row is a label, a control, and a hint — and nothing else.** Each row used to carry a dim
+`RB_KEY = value` line under its label, which printed the value a second time and the key on all twenty
+rows, and it repeated the same *"restart the viewer to apply"* sentence on every one of them — so the
+single line worth reading was buried in twenty copies of one that was not. Now the **key name lives in
+the (i)**, which is where a reader about to hand-edit `rb.local.conf` is already looking; the **value is
+only in the control that already shows it**; and the restart sentence is **said once per group**,
+naming the units the schema says that group's *savable* settings belong to (a `service:` row is changed
+by a button elsewhere on the page, so its unit is not named and no promise is made that this table cannot
+keep). The hint column is left for the few rows with something short to say — *read-only*, *not editable
+here: no config editor*, *changed with the buttons under viewer settings*, or *\(set\)* for the password, which
+must never be printed but whose being set is worth knowing. A `service:` hint names the section the
+button is really in, which is why it says *viewer settings* for the viewer and *under services* for
+anything else: a hint that points confidently at the wrong section is worse than no hint.
 
 **A save changes one line and restarts nothing.** `confedit` validates the value by type, refuses
 anything with a shell metacharacter in it, locks the file, checks the result with `sh -n`, keeps a
@@ -87,6 +107,48 @@ two overlapping `systemctl restart rblive4` invocations **wedge rbp on this unit
 reason this button was not built with the others; a second press is refused with the reason shown on
 the page, at the button. Nothing it runs names the player path, because `start-rb.sh`'s `cleanup()`
 kills by cmdline match.
+
+### Every service row has its own start/restart button
+
+**`status` and `startup` are different questions, and the page keeps them apart.** Status is
+`is-active` — running *now*. Startup is `is-enabled` — will systemd start it at boot, i.e. is there a
+symlink. A unit can be running and not set to return, and that is a normal state rather than an error.
+The startup cell is a pair of buttons, both states always shown with the one in force drawn as pressed,
+so the control states the value rather than only the value a press would give; the pressed one is
+`.cur`. Enabling and disabling start and stop nothing — they write the symlink and stop there, which
+is why `actions` is a separate column.
+
+**Two units can be enabled but never disabled**, and their `disabled` button is *itself disabled* —
+greyed and unpressable — with the reason on the page's usual (i) beside it. `rblive4`, because it is
+the appliance: disabling it at boot from a browser could leave a unit that never starts rbp, which is
+the rule `RB_AUTOSTART` is read-only for. And `rblive4-conf`, because disabling the page at boot takes
+away the page you would use to turn it back on. Only the *disable* direction is refused, deliberately:
+enabling is always permitted, so a unit that somehow came up disabled is recoverable from here.
+`test_confscreen.py` pins the greying, the refusal, and that enabling still works.
+
+
+One button per row, and the label follows the state: **restart** when the unit is running, **start** when
+it is not. `systemctl restart` starts a stopped unit anyway, so one verb would do — but the button says
+which it will be rather than making the operator know that.
+
+**The unit name is the only value on this page that reaches `systemctl` as a variable**, so it is the
+only place a form field could become an argument. It never does: the name is looked up in `UNITS`, a
+tuple of literals, and anything else is refused with a 400 *before* a process is spawned. The tuple is
+therefore the security boundary, not a list of things to display — `../../etc/passwd; reboot` and
+`rblive4; reboot` are both just names that are not in it. There is no shell on any path; every branch
+passes a constant argv.
+
+**The player is not in the generic branch.** Its row posts to the two-step confirm above instead, and
+`service_action()` routes `rblive4` through `restart_player()` — so it keeps the lock, the cooldown, and
+the boot-screen-first step. Folding it into the generic path would have dropped all three.
+
+**This page's own unit is fired and not waited for.** `systemctl restart rblive4-conf` kills the process
+answering the request, so waiting on it would mean the browser never gets a reply and the operator sees a
+failed button that in fact worked. It is spawned detached, and the redirect is already on its way out.
+
+A restart of the viewer does **not** stop screen sharing: `vnc_live_get()` only reads the switch file,
+and only a page's own sharing button writes it. Sharing *does* default to off after a power cycle,
+because the switch lives in `/run` — `RB_VNC_LIVE` is the setting for units that should come up serving.
 
 ### The frame counter is the number that matters
 
@@ -121,8 +183,9 @@ not offer to change either.
 | `RB_CONF_REFRESH_S` | `5` | how often the page re-reads its data, seconds; `0` leaves the poll out |
 
 **The refresh re-reads the data, it does not reload the page.** A `<meta http-equiv=refresh>` was the
-first version, and it resets the scroll position and discards anything half-typed into the sign-in box
-every few seconds — to update some numbers. So the page carries one small inline script that fetches
+first version, and it reset the scroll position and discarded anything half-typed — the sign-in box it
+was built around is gone, but a form in the settings still loses an edit every five seconds under a
+reload, so the reason outlived the case that found it. So the page carries one small inline script that fetches
 `/data` (drawn by the *same* function as the first load, so the page and its updates cannot drift) and
 replaces **only the section being looked at**. That last part is not an optimisation: the first version
 swapped the whole content region, which re-created every section — and the ones that were hidden come
@@ -130,18 +193,20 @@ back *without* `hidden`, so for an instant all eight were on screen, every five 
 exactly like a page reload**, which is the thing this was built to stop. The other sections keep what
 they had and are refreshed when you switch to them.
 
-The interactive part — the sign-in box and the buttons — is deliberately outside the re-read regions,
-which is the point: re-fetching them is what ate a half-typed password. And the page is complete without
+The notice at the top is deliberately outside the re-read regions — it is about the page, not about the
+data — and the page is complete without
 the script: the first load has every figure in the HTML, so a browser that blocks it shows a correct page
 that simply does not update itself. Still no CDN, no framework, no build step.
 
-**The credential is `RB_PASSWORD`, and it is one password for two surfaces** — the page's
-writes, and the viewer's VNC clients. It defaults to `password` so the feature works out of
-the box, which is a deliberate temporary choice: it is the first thing anyone would guess, and
-it now stands between the LAN and editing this unit's configuration and restarting the player.
-`RB_VNC_PASSWORD` is the same credential under its old name and **derives** from `RB_PASSWORD`
-unless set explicitly, so existing `rb.local.conf` files keep working; `doctor.sh` warns while
-the value is still the placeholder, and warns separately if the two names have been set apart.
+**`RB_PASSWORD` is the viewer's credential and nothing else now** — what a VNC client is asked
+for, and what `RB_VNC_PASSWORD` derives from. It does not gate this page: that is the sign-in the
+operator retired, and a unit whose `RB_PASSWORD` is still the shipped `password` is a unit whose
+*VNC clients* are using a guessable password, which is a viewer problem with a viewer fix. It
+defaults to `password` so the feature works out of the box — a deliberate temporary choice —
+and `RB_VNC_PASSWORD` remains the same credential under its old name, deriving from
+`RB_PASSWORD` unless set explicitly, so existing `rb.local.conf` files keep working. `doctor.sh`
+warns while the value is still the placeholder, and warns separately if the two names have been
+set apart.
 
 `RB_CONF` and the port are the only two an install consults; the rest the service reads
 itself at startup, and **every path and command it uses can be overridden by an environment
