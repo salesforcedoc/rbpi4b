@@ -701,7 +701,7 @@ if [ -f "$WEB_UNIT" ]; then
   if [ "${RB_VNC:-0}" = "1" ] && [ "${RB_VNC_WEB:-1}" = "1" ]; then
     if systemctl enable rblive4-webvnc.service >/dev/null 2>&1; then
       say "rblive4-webvnc.service enabled -- rbp's screen in a browser (RB_VNC_WEB=1)"
-      say "  http://<this host>:${RB_VNC_WEB_PORT:-5903}/vnc.html"
+      say "  http://<this host>:${RB_VNC_WEB_PORT:-5903}/"
       say "  the password is the viewer's, and sharing must be ON before it can connect"
     else
       warn "could not enable rblive4-webvnc.service; start it by hand with

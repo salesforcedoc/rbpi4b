@@ -58,6 +58,32 @@ if [ ! -f "$ROOT/vnc.html" ]; then
     exit 1
 fi
 
+# THE BARE URL IS THE POINT. websockify's --web serves `index.html` for `/`, and a DIRECTORY
+# LISTING when there is none -- which is what `/` was: a page of file names where the client
+# should be, on the one URL an operator types by hand. The package ships `vnc_auto.html ->
+# vnc.html` and no index.html, so the link is made here rather than by install.sh, and against
+# whatever RB_VNC_WEB_ROOT names rather than against /usr/share/novnc: a custom root gets the
+# same treatment, and a root that already has its own index.html keeps it (`-e` and `-h`
+# together, because `-e` is false for a DANGLING symlink and we would then fail to create it
+# and report a failure on every start).
+if [ ! -e "$ROOT/index.html" ] && [ ! -h "$ROOT/index.html" ]; then
+    if ln -s vnc.html "$ROOT/index.html" 2>/dev/null; then
+        echo "webvnc-run: linked $ROOT/index.html -> vnc.html, so http://<unit>:$PORT/ is the client" >&2
+    else
+        echo "webvnc-run: cannot link $ROOT/index.html; the client is at http://<unit>:$PORT/vnc.html" >&2
+    fi
+fi
+
+# THE PAGES THIS UNIT EDITS. novnc_patch.py carries the three operator asks (the dot cursor
+# always on, no Ctrl-Alt-Del button, no "Running without HTTPS" warning) and the anchors they
+# were written against; it is idempotent, backs each file up once, and NEVER takes the client
+# down -- an unpatched page is a worse page, not a dead one. It is applied here rather than at
+# install time so that an apt upgrade of novnc, which replaces these files, is patched again on
+# the next start instead of quietly reverting.
+if [ -f "$HERE/novnc_patch.py" ]; then
+    python3 "$HERE/novnc_patch.py" "$ROOT" || true
+fi
+
 # Binds the LAN, not loopback: the browser is on the other end of it. That is the same
 # exposure the RFB port already has, and no more -- the password is the viewer's.
 echo "webvnc-run: noVNC on :$PORT from $ROOT, bridging to 127.0.0.1:$VNC" >&2

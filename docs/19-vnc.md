@@ -554,9 +554,27 @@ target tolerantly on the host.
 ## The screen in a browser (noVNC, `:5903`)
 
 `rblive4-webvnc.service` runs `websockify`, which serves **noVNC** and reframes WebSocket bytes to
-the RFB port. Open **`http://<unit>:5903/vnc.html`** — and the password is the one the viewer asks a
+the RFB port. Open **`http://<unit>:5903/`** — `vnc.html` is the client and `webvnc-run.sh` links it
+as `index.html` at startup, because websockify serves a directory *listing* for `/` when there is no
+index.html. Either URL works; the bare one is the one to type. The password is the one the viewer asks a
 native client for, because the session (including the password) is negotiated **end to end** between
 the browser and `vncserve`. The bridge only moves bytes.
+
+**Three edits are made to the installed pages**, by `novnc_patch.py`, on every start:
+
+| page | what | why |
+|---|---|---|
+| `vnc_lite.html` | `showDotCursor: true` | that page draws **no cursor at all** when the server has not drawn one, and rbp never does — so the operator's pointer was invisible and the picture looked dead |
+| `vnc_lite.html` | the `Send CtrlAltDel` button, its CSS, its handler and its function | nothing on this unit answers Ctrl-Alt-Del; rbp is a DJ player, not a desktop, and the button covered the picture |
+| `app/ui.js` | the *"Running without HTTPS is not recommended…"* status line | this unit serves plain HTTP on the LAN **by design**, so the warning is not a finding — it is the permanent state of a working install, printed in red on every page load |
+
+It is a patcher rather than a vendored copy of the page, for the reason `tools/build-directfb`
+gives for its own tree: a copy in this repo would look like ours, rot against an `apt upgrade`,
+and lose whatever the package fixed. The edits are anchored on text that only changes if noVNC
+changes, each file is backed up once as `<name>.rbpi4b-orig`, an edit whose anchor does not match
+is refused and named in the journal **without writing anything**, and the patcher always exits 0 —
+an unpatched page is a worse page, never a dead client. Each file gains a stamp so a re-run is one
+quiet line per file, and so a replaced (upgraded) file is patched again rather than skipped.
 
 **Two reasons it exists, and the second is the interesting one:**
 
