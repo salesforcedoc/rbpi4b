@@ -389,8 +389,7 @@ def test_page(env, port):
     # screen's sign-in hint), and counting those would be counting the wrong thing.
     nav = body.split("<nav id=nav>")[1].split("</nav>")[0]
     anchors = re.findall(r'href="#([a-z0-9]+)"', nav)
-    check(anchors == ["player", "services", "launcher", "viewer", "vncsettings",
-                      "rbpsettings"],
+    check(anchors == ["player", "services", "viewer", "vncsettings", "rbpsettings"],
           "the nav lists every section, in page order (%s)" % ", ".join(anchors))
     missing = [a for a in anchors if ("section id=%s" % a) not in body]
     check(not missing,
@@ -399,8 +398,11 @@ def test_page(env, port):
     pl = body.split("section id=player")[1].split("</section>")[0]
     check("device info" in pl and "SoC temperature" in pl and "get_throttled" in pl,
           "and the device's own readings are inside the player tab, under `device info`")
-    check("section id=unit" not in body and "#unit" not in body,
-          "with no unit section or tab left anywhere")
+    check("boot info" in pl and "boot-screen stage" in pl and "launching rbp" in pl,
+          "as is the last start's account, under `boot info`")
+    for gone in ("unit", "launcher"):
+        check(("section id=%s" % gone) not in body and ("#%s" % gone) not in body,
+              "with no %s section or tab left anywhere" % gone)
     check("<footer>" not in body, "and no footer -- the page names no doc to go and read")
     check("<nav id=nav>" in body, "the nav is a real element")
     check("classList" in body, "and the script marks which one you are looking at")

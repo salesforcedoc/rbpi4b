@@ -1097,7 +1097,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         # reports it for anyone who wants it in words.
         a('<div id=layout><nav id=nav><b>%s</b>' % esc(hostname()))
         for anchor, label in (("player", "player"), ("services", "services"),
-                              ("launcher", "launcher"), ("viewer", "viewer settings"),
+                              ("viewer", "viewer settings"),
                               ("vncsettings", "vnc settings"),
                               ("rbpsettings", "rbp settings")):
             a('<a href="#%s">%s</a>' % (anchor, esc(label)))
@@ -1150,6 +1150,16 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     if hl:
         a("<tr><td class=k>health (last)</td><td>%s</td></tr>" % esc(hl[-1]))
     a("</table>")
+
+    # --- and the account of the last start, in the same tab ---
+    # --- the launcher's own account of the last start ---
+    stage = _text(BOOT_STAGE).strip()
+    blog = tail(BOOT_LOG, 14)
+    a("<h2>boot info</h2>")
+    if stage:
+        a('<div class=note>last boot-screen stage: %s</div>' % esc(stage))
+    a("<pre>%s</pre>" % esc("\n".join(blog) if blog else "(no %s)" % BOOT_LOG))
+    a("</section>")
 
     a("</section>")
 
@@ -1231,15 +1241,6 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
           '<a href="#actions">actions</a>.</div>')
     a("</section>")
 
-    # --- the launcher's own account of the last start ---
-    stage = _text(BOOT_STAGE).strip()
-    blog = tail(BOOT_LOG, 14)
-    a('<section id=launcher>')
-    a("<h2>launcher</h2>")
-    if stage:
-        a('<div class=note>last boot-screen stage: %s</div>' % esc(stage))
-    a("<pre>%s</pre>" % esc("\n".join(blog) if blog else "(no %s)" % BOOT_LOG))
-    a("</section>")
 
     # --- the viewer: its switches, with a control on the two that are live, and its ports ---
     a('<section id=viewer>')
