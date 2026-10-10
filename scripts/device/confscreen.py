@@ -976,24 +976,23 @@ def unit_for(restart):
 
 
 def apply_note(restart):
-    """What applies a value, in the operator's words.
+    """What applies a value, for the one place left that says it: the line under a save.
 
-    THE `service:` CASE NAMES THE SECTION THE BUTTON IS ACTUALLY IN, and that is not
-    book-keeping: the viewer's enable/disable button moved out of the actions section into
-    viewer settings, and this sentence went on saying "under actions" -- a hint pointing at a
-    section that no longer holds the button is worse than no hint, because it sends the reader
-    somewhere confidently wrong. Every other `service:` row names a unit the services table
-    starts and restarts, which is what applies it."""
+    THE `service:` CASE IS GONE (operator, 2026-10-10). It read "changed by the enable/disable on
+    the <unit> row under services" and it appeared under every `service:` row of both settings
+    tables -- the same sentence three times, telling a reader how to change the row they are
+    already looking at, while the enable/-disable it named is the control in the services
+    table's startup column, which is where anyone looking for it goes next anyway. Both of its
+    readers were the same branch, so the settings tables and the save confirmation lost it
+    together and a `service:` row's hint cell is now empty.
+
+    What is left is the two cases a save genuinely has to say out loud, and both are said in the
+    confirmation line rather than in a hint column -- which is why no row's hint now repeats what
+    the `owed` line already says about restarts."""
     if restart == "player":
         return "restart the player to apply -- the button is under services"
     if restart == "viewer":
         return "restart the viewer to apply"
-    if isinstance(restart, str) and restart.startswith("service:"):
-        # EVERY `service:` ROW NOW HAS A REAL CONTROL, and it is the same one for all of them:
-        # the enable/disable in the services table's startup column, which writes both the
-        # systemd symlink and this line (see BOOT_SETTING). The sentence can name it exactly.
-        unit = restart.split(":", 1)[1]
-        return "changed by the enable/disable on the %s row under services" % unit
     return ""
 
 
@@ -1098,6 +1097,62 @@ def _info(text, key=""):
             % "<br>".join(parts))
 
 
+# --- the external mixer question ---------------------------------------------
+# RB_MIXER_MODE=external hands the mixing to a device with channel strips of its own, so the
+# mode only APPLIES while one of those is plugged in -- audioshim refuses it otherwise, loudly.
+# This page therefore must not offer a setting that cannot apply, and it asks the same
+# question of the same table: `controllers_cli mixer` links the shim's own controllers.c and
+# walks the same sysfs (scripts/shims/usb_devices.h). A second list of models here would be a
+# second answer to one question, which is the drift that table exists to remove.
+#
+# Cached because this page is polled, and a subprocess per poll is a subprocess forever. The
+# TTL is short enough that a mixer plugged in shows up while the operator is still looking.
+MIXER_TTL_S = 5.0
+CONTROLLERS_CLI = os.environ.get("CONF_CONTROLLERS_CLI", "/opt/rblive4/controllers_cli")
+_mixer_cache = [0.0, None]
+
+
+def external_mixer():
+    """'id name' of the external digital mixer on the USB bus, or None.
+
+    CONF_MIXER_PRESENT OVERRIDES THE ANSWER, and both of its uses are real: it is how the
+    tests make a mixer present without a bus, and how an operator turns the setting on for a
+    mixer this build's table does not know yet (which is also the moment to add the row to
+    controllers.c and rebuild). Empty means none, as for every other RB_* here.
+
+    A CLI that cannot run, or a bus it cannot read, is None -- fail closed. The cost of being
+    wrong that way is a section that is missing from the page; the cost of the other way is a
+    page offering a mode that does nothing."""
+    override = os.environ.get("CONF_MIXER_PRESENT")
+    if override is not None:
+        return override or None
+    now = time.time()
+    if now - _mixer_cache[0] < MIXER_TTL_S:
+        return _mixer_cache[1]
+    found = None
+    try:
+        p = subprocess.run([CONTROLLERS_CLI, "mixer"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=5)
+        out = p.stdout.decode("utf-8", "replace").strip()
+        if p.returncode == 0 and out and out != "none":
+            found = out
+    except Exception:
+        found = None
+    _mixer_cache[0], _mixer_cache[1] = now, found
+    return found
+
+
+def section_for(topic):
+    """The <section> a topic's rows are rendered in.
+
+    NOT topic + "settings": the mixer's rows live inside rbp settings, so that rule would send
+    a save to a fragment that does not exist -- and the page's own tab code falls back to the
+    player tab when it is handed an unknown one, so the operator would save the mixer mode and
+    land somewhere else entirely. The topic and the section are two different things and this
+    is the only place that says so."""
+    return {"vnc": "vncsettings", "mixer": "rbpsettings"}.get(topic, topic + "settings")
+
+
 def render_settings(a, conf, topic, auth):
     """One group of settings, EDITABLE.
 
@@ -1109,9 +1164,14 @@ def render_settings(a, conf, topic, auth):
     / a note, which put the value on screen twice and printed the SAME sentence about
     restarting on all twenty rows -- so the one line that mattered was buried in twenty copies
     of one that did not. What is left is the label, the control, and a short hint only where
-    there is something to say. Nothing was dropped: the key name moved into the (i), the value
-    moved into the control that already shows it, and the restart sentence is said once, for
-    the group, naming the units the schema says these settings belong to."""
+    there is something to say. Nothing was dropped: the key name moved into the (i) and the
+    value moved into the control that already shows it.
+
+    THE STATIC RESTART SENTENCE IS GONE ENTIRELY (operator, 2026-10-10). It said the same thing
+    under every group whether or not anything had been saved, and the `owed` line above says
+    the thing a reader actually needs -- that a save is waiting on a restart, and which unit --
+    and says it only when that is true. So the promise "a restart is needed" now has exactly one
+    carrier on this page, and this docstring is where that was decided."""
     owed = topic_pending(topic)
     if owed:
         a('<div class="note bad">saved, not applied yet: restart %s</div>'
@@ -1120,18 +1180,6 @@ def render_settings(a, conf, topic, auth):
         a('<div class=note>The config editor is not installed beside this page, so nothing '
           'here can be changed. Re-run install.sh.</div>')
         return
-    # ONE restart sentence for the group. Named from the schema rather than written by hand,
-    # so it cannot go stale when a setting changes which unit it belongs to -- and built only
-    # from rows this form can actually SAVE, because a `service:` row is changed by a button
-    # under actions and naming its unit here would promise this table something it cannot do.
-    units = sorted(u for u in {unit_for(e.get("restart", "")) for e in confedit.SCHEMA
-                               if confedit.topic_of(e["key"]) == topic
-                               and not e.get("readonly")
-                               and not (isinstance(e.get("restart"), str)
-                                        and e["restart"].startswith("service:"))} if u)
-    if units:
-        a('<div class=note>Saved values are picked up when %s next starts &mdash; the '
-          'buttons are on <a href="#services">services</a>.</div>' % esc(" or ".join(units)))
     a("<table>")
     for e in confedit.SCHEMA:
         k = e["key"]
@@ -1517,6 +1565,27 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
              "ok" if agree else "bad",
              "yes" if agree else "NO &mdash; rbp will not start until these match"))
     a("</table>")
+
+    # --- the mixer, under rbp settings but with a heading of its own -------------
+    # It is a GROUP WITHOUT A TAB (confedit.topic_of), so this is where it lives. The heading
+    # is not decoration: this section holds the one setting on this page that changes what the
+    # unit DOES -- who mixes -- rather than how it is configured.
+    #
+    # AND IT IS OFFERED ONLY WHILE AN EXTERNAL DIGITAL MIXER IS PLUGGED IN, because that is
+    # the only thing the mode is for. Two shapes, and the second one matters more than the
+    # first: with a mixer here the section is shown (and names the device, so the operator can
+    # see WHY it appeared); with none, and the setting saved as `external` anyway, the mode is
+    # INERT and one line says so -- hiding it silently would leave a setting that does nothing
+    # with nothing on the page to say it does nothing.
+    mixer = external_mixer()
+    if mixer:
+        a("<h2>mixer</h2>")
+        render_settings(a, conf, "mixer", auth)
+    elif conf.get("RB_MIXER_MODE") == "external":
+        a("<h2>mixer</h2>")
+        a('<div class="note bad">mixer routing is set to external, but no external digital '
+          'mixer is on the USB bus, so rbp is doing the mixing: the setting does nothing '
+          'until one is plugged in.</div>')
     a("</section>")
 
     a("</div>")                      # end of the second live half
@@ -1837,7 +1906,7 @@ class Handler(BaseHTTPRequestHandler):
         key = form.get("key", "")
         value = form.get("value", "")
         e = confedit.BY_KEY.get(key) if confedit else None
-        tab = "/#" + ((confedit.topic_of(key) + "settings") if e else "rbpsettings")
+        tab = "/#" + (section_for(confedit.topic_of(key)) if e else "rbpsettings")
 
         if confedit is None:
             ok, text = False, "the config editor is not installed beside this page"

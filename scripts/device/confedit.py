@@ -79,6 +79,12 @@ SCHEMA = [
          restart="player", risk="low", label="Audio device",
          help="ALSA device for the master output, e.g. hw:CARD=DDJFLX4,DEV=0. Empty derives "
               "it from the controller."),
+    dict(key="RB_MIXER_MODE", group="basic", type=E, choices=["internal", "external"],
+         restart="player", risk="low", label="Mixer routing",
+         help="internal: rbp's own faders, EQ and FX mix the decks and the master pair carries "
+              "the result -- what shipped. external: each deck goes out RAW, pre-trim, on its "
+              "own pair (3/4 and 5/6 by default) and rbp's mix and its whole strip are out of "
+              "the path, so the hardware mixes. Wants a card of 6 or more channels."),
     dict(key="RB_VERBOSE", group="basic", type=B, restart="player", risk="low",
          label="Verbose shim logging",
          help="Umbrella flag for the per-module verbose flags. Writes megabytes to /tmp, "
@@ -202,14 +208,22 @@ BY_KEY = {e["key"]: e for e in SCHEMA}
 
 
 def topic_of(key):
-    """Which of the page's two settings groups a key belongs to.
+    """Which of the page's settings groups a key belongs to.
 
     Rule-based rather than a field on every entry, because the rule IS the grouping: the
-    viewer's settings are all `RB_VNC_*`, plus the credential it shares with this page, and
+    viewer's settings are all `RB_VNC_*`, plus the credential it shares with this page; the
+    mixer's are the ones that decide the mixer ROUTING -- who is doing the mixing; and
     everything else is the player's or the unit's. If that stops being true the rule below is
-    the one place to change, and test_confedit pins the split."""
+    the one place to change, and test_confedit pins the split.
+
+    `mixer` is a group with no tab of its own -- its rows render inside rbp settings under
+    their own heading (confscreen.section_for says so). What it buys is a heading and its own
+    restart sentence, which is what the mode wants: it is the one setting here that changes
+    what the unit DOES rather than how it is configured, and it is worth finding on purpose."""
     if key == "RB_PASSWORD" or key.startswith("RB_VNC"):
         return "vnc"
+    if key == "RB_MIXER_MODE":
+        return "mixer"
     return "rbp"
 
 

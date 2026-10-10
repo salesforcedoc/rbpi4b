@@ -285,7 +285,7 @@ def test_topics(m):
     check(not set(vnc) & set(rbp), "and the two never overlap")
     check("RB_FB_LIE_BPP" not in vnc + rbp,
           "no read-only key is offered by either -- a field the writer would refuse")
-    check(all(m.topic_of(k) in ("vnc", "rbp") for k in m.BY_KEY), "every key has a group")
+    check(all(m.topic_of(k) in ("vnc", "rbp", "mixer") for k in m.BY_KEY), "every key has a group")
 
 
 def main():

@@ -596,10 +596,11 @@ def test_write_path(env, port):
     check("action=/set" in sv and "action=/set" in sr, "both groups carry save forms")
     check('name=key value="RB_VNC_FPS"' in sv,
           "addressed by key, so one handler serves every setting")
-    check("picked up when rblive4-vnc next starts" in sv,
-          "and the group names the unit a saved value waits for -- said ONCE, not on every "
-          "row")
-    check('href="#services"' in sv, "pointing at the buttons that do it")
+    check("next starts" not in sv and "next starts" not in sr,
+          "and NO static restart sentence under any group: it said the same thing whether or "
+          "not anything had been saved, so the promise a reader needs -- that a save is waiting "
+          "on a restart, and which unit -- is the `owed` line's alone, and it is said only when "
+          "it is true (operator, 2026-10-10)")
     check("<code>RB_VNC_FPS</code>" in sv,
           "the key name rides in the (i) beside the label, so hand-editing the file is still "
           "possible without printing it on twenty rows")

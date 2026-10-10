@@ -70,14 +70,18 @@ and rendered with their reason — shown, explained, and impossible to submit.
 rows, and it repeated the same *"restart the viewer to apply"* sentence on every one of them — so the
 single line worth reading was buried in twenty copies of one that was not. Now the **key name lives in
 the (i)**, which is where a reader about to hand-edit `rb.local.conf` is already looking; the **value is
-only in the control that already shows it**; and the restart sentence is **said once per group**,
-naming the units the schema says that group's *savable* settings belong to (a `service:` row is changed
-by a button elsewhere on the page, so its unit is not named and no promise is made that this table cannot
-keep). The hint column is left for the few rows with something short to say — *read-only*, *not editable
-here: no config editor*, *changed with the buttons under viewer settings*, or *\(set\)* for the password, which
-must never be printed but whose being set is worth knowing. A `service:` hint names the section the
-button is really in, which is why it says *viewer settings* for the viewer and *under services* for
-anything else: a hint that points confidently at the wrong section is worse than no hint.
+only in the control that already shows it**. The static *"Saved values are picked up when X next starts"*
+sentence that used to sit under each group is **gone** (operator, 2026-10-10): it said the same thing whether
+or not anything had been saved, and it was the only place the words appeared, so the same edit removed it from
+every group rather than from one. What carries that promise now is the **`owed` line**, which appears *only*
+when a save is genuinely waiting on a restart and names the unit that has to start again — state rather than
+standing prose. The hint column is left for the few rows with something short to say — *read-only*, *not editable
+here: no config editor*, or *\(set\)* for the password, which must never be printed but whose being set is worth
+knowing. A `service:` row's hint is **empty** (operator, 2026-10-10): it used to read *changed by the
+enable/disable on the `<unit>` row under services* on every one of them, which told a reader how to change the
+row they were already looking at — and the enable/disable it named is the control in the services table's
+startup column, which is where anyone looking for it goes next anyway. That branch was also what a save's
+confirmation line repeated, so removing it removed it from both places at once.
 
 **A save changes one line and restarts nothing.** `confedit` validates the value by type, refuses
 anything with a shell metacharacter in it, locks the file, checks the result with `sh -n`, keeps a
