@@ -43,7 +43,11 @@ else. No package has to be added to the unit.
 | **half the screen is not in fb0** | the two edge drawers, the top band and the USB-STOP chooser are **vc4 DRM overlay planes** on `/dev/dri/card1`, RGB565, **opaque** | [06](06-display.md) names this gap |
 | `/dev/video11` | `bcm2835-codec-encode`, a V4L2 **M2M** device; accepts `RGB565` (`'RGBP'`), emits `MJPG` | `--list-formats-out` / `--list-formats` |
 | the encoder's speed | **10.73 ms/frame, 93.2 fps** at 1280×800; 16–37 KB a frame | 30 consecutive frames, 322 ms total |
-| its quality knob | **there is none** | `V4L2_CID_JPEG_COMPRESSION_QUALITY` is refused; the device exposes the H.264 control set instead |
+| its quality knob | **there is none on this node** | `V4L2_CID_JPEG_COMPRESSION_QUALITY` is refused **here**; the device exposes the H.264 control set instead |
+| `/dev/video31` | `bcm2835-codec-encode_image`, the **image** encoder — a different component. Also takes `'RGBP'`, but emits **`JPEG`** where the video encoder says `MJPG`: the same bitstream under two names | `--list-formats-out` |
+| **its quality knob** | **`compression_quality`, 1–100, default 80** — the control the row above says is refused, refused *there* | `v4l2-ctl -d /dev/video31 -l` |
+| video31's speed | **15.5 ms/frame, 60–65 fps** at 1280×800, against a 12 fps budget | `work/venc_bench.c`, 120 frames from the live screen |
+| **what the two cost** | for the same screen: video11 ≈ **45 KB**; video31 **182 KB at 80**, 132 at 60, 104 at 40, 72 at 20 — and **61 KB at 12**, measured through the server | so *matching* video11's bytes is about **quality 6–8**, not 10–15 |
 | macOS Screen Sharing's `SetEncodings` | **thirteen entries**, led by `zlib` (6) and `ZRLE` (16), and **no Tight and no Raw**; and **no JPEG quality level** | the log of a live session, 2026-10-09 11:52 — see below |
 | the same, as this repo previously recorded it | `Raw, Tight, NewFBSize` — three entries | **wrong, and it cost a day.** That is *this repo's own test client's* list (`rfbclient.py`'s `encs`), mistaken for Apple's |
 

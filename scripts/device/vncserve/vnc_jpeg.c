@@ -27,6 +27,11 @@
 #include "vnc_jpeg.h"
 #include "vnc_net.h"
 
+/* WHERE THE ENCODER LIVES, AND THE TWO CANDIDATES ARE NOT THE SAME ENCODER. This is the
+ * default -- /dev/video11, bcm2835-codec-encode, the VIDEO encoder -- and it is what this
+ * unit has always used. /dev/video31 is a different component, bcm2835-codec-encode_image,
+ * and it is the one that exposes the JPEG quality control; see vnc_jpeg.h for the measured
+ * trade, which is real on both sides. */
 #define VNC_JPEG_DEV      "/dev/video11"
 
 /* How long to leave a broken encoder alone. Long enough that a device that is gone for
@@ -39,6 +44,9 @@ struct vnc_jpeg {
     int fd;
     int ok;
     int w, h;
+    char dev[64];                    /* which node; see VNC_JPEG_DEV above */
+    int quality;                     /* 0 = leave the node's own default alone */
+    char qnote[96];                  /* what actually happened to the quality, in words */
 
     /* The two mapped buffers. `in_map` is the RGB565 side -- the driver's copy of the
      * frame, because V4L2_MEMORY_MMAP is the only memory model this driver takes
@@ -112,9 +120,9 @@ static int jpeg_up(struct vnc_jpeg *j)
     struct v4l2_plane planes[1];
     int t;
 
-    j->fd = open(VNC_JPEG_DEV, O_RDWR);
+    j->fd = open(j->dev, O_RDWR);
     if (j->fd < 0) {
-        fail(j, "open " VNC_JPEG_DEV);
+        snprintf(j->detail, sizeof j->detail, "open %s: %s", j->dev, strerror(errno));
         return -1;
     }
 
@@ -149,14 +157,47 @@ static int jpeg_up(struct vnc_jpeg *j)
     f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MJPEG;
     f.fmt.pix_mp.field = V4L2_FIELD_NONE;
     if (ioctl(j->fd, VIDIOC_S_FMT, &f) < 0) { fail(j, "S_FMT capture MJPG"); goto bad; }
-    if (f.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_MJPEG) {
+    /* TWO NAMES FOR THE SAME BITSTREAM, and this is the line the image encoder found. The
+     * video encoder answers MJPG; /dev/video31 answers JPEG -- which is what a still-image
+     * encoder calls exactly the same payload. Both are baseline JPEG, which is what a preview
+     * part and a Tight-JPEG rectangle both need, so either is taken. The substitution is still
+     * refused for anything ELSE: a driver picking a genuinely different format at this point
+     * would have us pushing bytes it will not read the way we think. */
+    if (f.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_MJPEG &&
+        f.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_JPEG) {
         snprintf(j->detail, sizeof j->detail,
-                 "the encoder will not emit Motion-JPEG (it answered %c%c%c%c)",
+                 "the encoder will not emit JPEG (it answered %c%c%c%c)",
                  (char)(f.fmt.pix_mp.pixelformat & 0xff),
                  (char)((f.fmt.pix_mp.pixelformat >> 8) & 0xff),
                  (char)((f.fmt.pix_mp.pixelformat >> 16) & 0xff),
                  (char)((f.fmt.pix_mp.pixelformat >> 24) & 0xff));
         goto bad;
+    }
+
+    /* THE QUALITY CONTROL, WHERE THE NODE HAS ONE -- and on the default node it does not.
+     * The video encoder refuses V4L2_CID_JPEG_COMPRESSION_QUALITY outright, so a refusal here
+     * is the ORDINARY case rather than a failure: the node's own default stands and the reason
+     * is written down instead of acted on. Where it does take, it is read back, because "I set
+     * it" and "the device is using it" are different claims and this string is what the page
+     * shows the operator. */
+    if (j->quality > 0) {
+        struct v4l2_control c;
+
+        memset(&c, 0, sizeof c);
+        c.id = V4L2_CID_JPEG_COMPRESSION_QUALITY;
+        c.value = j->quality;
+        if (ioctl(j->fd, VIDIOC_S_CTRL, &c) < 0) {
+            snprintf(j->qnote, sizeof j->qnote,
+                     "quality %d not accepted on %s (%s), so the node's own default stands",
+                     j->quality, j->dev, strerror(errno));
+        } else if (ioctl(j->fd, VIDIOC_G_CTRL, &c) == 0) {
+            snprintf(j->qnote, sizeof j->qnote, "quality %d on %s", c.value, j->dev);
+        } else {
+            snprintf(j->qnote, sizeof j->qnote, "quality %d on %s (not readable back)",
+                     j->quality, j->dev);
+        }
+    } else {
+        snprintf(j->qnote, sizeof j->qnote, "%s, quality left at its own default", j->dev);
     }
 
     /* One buffer a side. The driver granted two when asked for two and index 0 was
@@ -209,8 +250,9 @@ static int jpeg_up(struct vnc_jpeg *j)
 
     j->ok = 1;
     j->detail[0] = '\0';
-    set_why(j, "ready: %dx%d RGB565 -> Motion-JPEG, %u KB in / %u KB out, no CPU",
-            j->w, j->h, (unsigned)(j->in_len / 1024), (unsigned)(j->out_len / 1024));
+    set_why(j, "ready: %dx%d RGB565 -> Motion-JPEG, %u KB in / %u KB out, no CPU -- %s",
+            j->w, j->h, (unsigned)(j->in_len / 1024), (unsigned)(j->out_len / 1024),
+            j->qnote);
     return 0;
 
 bad:
@@ -240,7 +282,7 @@ static void jpeg_down(struct vnc_jpeg *j)
     j->ok = 0;
 }
 
-struct vnc_jpeg *vnc_jpeg_create(int w, int h)
+struct vnc_jpeg *vnc_jpeg_create(int w, int h, const char *dev, int quality)
 {
     struct vnc_jpeg *j = calloc(1, sizeof *j);
     if (!j)
@@ -248,6 +290,8 @@ struct vnc_jpeg *vnc_jpeg_create(int w, int h)
     j->fd = -1;
     j->w = w;
     j->h = h;
+    snprintf(j->dev, sizeof j->dev, "%s", dev && *dev ? dev : VNC_JPEG_DEV);
+    j->quality = quality > 0 ? quality : 0;
     set_why(j, "not started yet");
     if (jpeg_up(j) < 0) {
         j->down_until = now_ms() + VNC_JPEG_RETRY_MS;

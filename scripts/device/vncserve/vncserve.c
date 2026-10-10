@@ -496,6 +496,12 @@ int main(int argc, char **argv)
                                          * this is the one whose default decides
                                          * whether a BOOT touches the display */
     int zlib_level = 1;                 /* 0 disables compressing updates entirely */
+    /* WHICH ENCODER, AND HOW HARD IT WORKS. Two nodes can make the Motion-JPEG this server
+     * sends, and only one of them has a quality control -- see vnc_jpeg.h. Both defaults here
+     * are the conservative ones: the node this unit has always used, and that node's own
+     * default quality, which is not settable and does not need to be. */
+    const char *jpeg_dev = NULL;
+    int jpeg_quality = 0;
     const char *bindaddr = NULL, *logpath = NULL, *mode_file = NULL;
     const char *input_file = NULL, *input_dev = NULL, *live_file = NULL;
     const char *password = getenv("RB_VNC_PASSWORD");
@@ -549,6 +555,17 @@ int main(int argc, char **argv)
                 return 2;
             }
             zlib_level = v;
+        }
+        else if (!strcmp(argv[i], "--jpeg-dev") && i + 1 < argc) jpeg_dev = argv[++i];
+        else if (!strcmp(argv[i], "--jpeg-quality") && i + 1 < argc) {
+            /* 0 means "leave the node's own default alone", which is the only correct value
+             * for a node that has no such control. */
+            int v = atoi(argv[++i]);
+            if (v < 0 || v > 100) {
+                fprintf(stderr, "--jpeg-quality wants 0 (leave it) or 1..100 (not %d)\n", v);
+                return 2;
+            }
+            jpeg_quality = v;
         }
         else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
             int m;
@@ -643,6 +660,19 @@ int main(int argc, char **argv)
             fprintf(stderr, "RB_VNC_ZLIB_LEVEL=%s is not 0..9; using %d\n",
                     getenv("RB_VNC_ZLIB_LEVEL"), zlib_level);
     }
+    /* The environment only reaches here for a hand-run server: vnc-run.sh passes both of
+     * these on the command line, because rb_load_conf sets shell variables and does not
+     * export them. */
+    if (getenv("RB_VNC_JPEG_DEV"))
+        jpeg_dev = getenv("RB_VNC_JPEG_DEV");
+    if (getenv("RB_VNC_JPEG_QUALITY")) {
+        int v = atoi(getenv("RB_VNC_JPEG_QUALITY"));
+        if (v >= 0 && v <= 100)
+            jpeg_quality = v;
+        else
+            fprintf(stderr, "RB_VNC_JPEG_QUALITY=%s is not 0..100; using %d\n",
+                    getenv("RB_VNC_JPEG_QUALITY"), jpeg_quality);
+    }
     /* The page goes next door to the session by default, so one port number in rb.conf
      * names both and the operator only has one thing to remember. */
     if (http_port < 0)
@@ -697,6 +727,8 @@ int main(int argc, char **argv)
         opts.default_mode = default_mode;
         opts.http_port = http_port;
         opts.zlib_level = zlib_level;
+        opts.jpeg_dev = jpeg_dev;
+        opts.jpeg_quality = jpeg_quality;
         opts.input_path = input_file;
         opts.input_dev = input_dev;
         opts.default_input = default_input;

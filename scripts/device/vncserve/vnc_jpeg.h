@@ -41,7 +41,28 @@ struct vnc_jpeg;
 /* Create the handle and try once to bring the encoder up. Returns NULL only when
  * memory is exhausted -- an encoder that will not open is still a handle, because the
  * caller wants to hold on to the reason. */
-struct vnc_jpeg *vnc_jpeg_create(int w, int h);
+/* TWO NODES CAN DO THIS JOB, and they are not the same encoder:
+ *
+ *   /dev/video11  bcm2835-codec-encode        the VIDEO encoder. Its MJPG path exposes no
+ *                                            quality control at all -- V4L2_CID_JPEG_
+ *                                            COMPRESSION_QUALITY is refused on it -- and it
+ *                                            is what this unit has always used.
+ *   /dev/video31  bcm2835-codec-encode_image  the IMAGE encoder. It exposes that control,
+ *                                            1..100, default 80, and it STREAMS: measured on
+ *                                            this unit at 1280x800 from the live screen,
+ *                                            60-65 fps (15.5 ms a frame) against a 12 fps
+ *                                            budget, with the knob monotonic -- 182 KB at
+ *                                            quality 80 down to 72 KB at quality 20.
+ *
+ * THE SCALES ARE NOT COMPARABLE, which is the part that decides anything: for the same screen
+ * the video encoder produces about 45 KB and the image encoder AT ITS DEFAULT 80 about 182 KB
+ * -- four times the bytes for the same picture. Moving to the image encoder to gain the knob
+ * therefore means choosing a quality as well, and around 10-15 is where its bytes match what
+ * the video encoder gives today.
+ *
+ * `dev` NULL or empty means the video encoder. `quality` 0 means leave the node's own default
+ * alone; a node that refuses the control keeps its default and says so in the status. */
+struct vnc_jpeg *vnc_jpeg_create(int w, int h, const char *dev, int quality);
 void vnc_jpeg_destroy(struct vnc_jpeg *j);
 
 /* Is the encoder streaming right now? */

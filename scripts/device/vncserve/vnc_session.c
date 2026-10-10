@@ -1151,7 +1151,7 @@ static int start_serving(struct vnc_capture **cap, struct vnc_jpeg **jpeg,
      * first. It costs a few hundred kilobytes of mapping and, until a preview or a
      * hwjpeg client wants a frame, not one millisecond of CPU -- no buffer is ever
      * queued to it until vnc_jpeg_frame is called. */
-    *jpeg = vnc_jpeg_create(fr->w, fr->h);
+    *jpeg = vnc_jpeg_create(fr->w, fr->h, o->jpeg_dev, o->jpeg_quality);
     if (!*jpeg) {
         vlog("out of memory for the JPEG encoder handle");
         goto fail_frames;

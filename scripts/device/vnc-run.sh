@@ -129,4 +129,6 @@ exec "$BIN" \
     --live "$RB_VNC_LIVE" \
     --live-file "$RB_VNC_LIVE_FILE" \
     --zlib-level "$RB_VNC_ZLIB_LEVEL" \
+    --jpeg-dev "$RB_VNC_JPEG_DEV" \
+    --jpeg-quality "$RB_VNC_JPEG_QUALITY" \
     --log "${RB_LOG_DIR:-$RB_DEPLOY_ROOT/log}/vncserve.log"

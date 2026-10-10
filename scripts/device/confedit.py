@@ -109,6 +109,21 @@ SCHEMA = [
     dict(key="RB_VNC_MODE", group="basic", type=E, choices=["raw", "hwjpeg"], restart="viewer",
          risk="low", label="Startup encoding",
          help="raw or hwjpeg. The live choice is the switch file, which the page sets."),
+    dict(key="RB_VNC_JPEG_DEV", group="basic", type=E,
+         choices=["/dev/video11", "/dev/video31"], restart="viewer", risk="medium",
+         label="JPEG encoder",
+         help="Which encoder makes the preview and the hwjpeg frames. /dev/video11 -- the "
+              "video encoder -- is what this unit has always used and has NO quality control. "
+              "/dev/video31 -- the image encoder -- has one, and streams at 60-65 fps "
+              "measured. It also produces about four times the bytes for the same screen, so "
+              "choosing it means choosing a quality below as well."),
+    dict(key="RB_VNC_JPEG_QUALITY", group="basic", type=I, lo=0, hi=100, restart="viewer",
+         risk="low",
+         label="JPEG quality",
+         help="0 leaves the encoder's own default alone, which is the only correct value on "
+              "/dev/video11 (it refuses the control). On /dev/video31, 1-100: measured here on "
+              "the live screen, 182 KB a frame at 80, 132 at 60, 104 at 40, 72 at 20 -- "
+              "against the video encoder's ~45 KB."),
     dict(key="RB_PASSWORD", group="basic", type=S, secret=True,
          pattern=r"^[A-Za-z0-9._@%+=:-]{1,63}$", restart="viewer", risk="medium",
          label="VNC client password",

@@ -54,6 +54,13 @@ struct vnc_session_opts {
      * one -- see RB_VNC_ZLIB_LEVEL in rb.conf. */
     int zlib_level;
 
+    /* WHICH ENCODER, AND HOW HARD IT WORKS. Two nodes can produce the Motion-JPEG this server
+     * sends: the video encoder, which has no quality control, and the image encoder, which
+     * does. NULL/0 keeps the node this unit has always used with its own defaults -- see
+     * vnc_jpeg.h for the measured reason the defaults are the conservative ones. */
+    const char *jpeg_dev;
+    int jpeg_quality;
+
     /* THE SWITCH. The mode file is what the operator's page writes and what this loop
      * reads; passing the path in rather than letting the session hardcode it is what
      * lets a test run against a file in a scratch directory. NULL means "no switch",
