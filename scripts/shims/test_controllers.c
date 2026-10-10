@@ -47,6 +47,7 @@
  */
 #define _GNU_SOURCE
 #include "controllers.h"
+#include "usb_devices.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -100,12 +101,29 @@ static void test_shape(void)
 
         CHECK(c->id && c->id[0], "row %u must have an id", i);
         CHECK(c->name && c->name[0], "row %s must have a human name", c->id);
-        CHECK(c->map_name && c->map_name[0],
-              "row %s must name the map it selects", c->id);
-        if (c->map_name)
-            CHECK(is_a_map(c->map_name),
-                  "row %s selects map '%s', which this build does not have",
-                  c->id, c->map_name);
+
+        /* A ROW IS EITHER A SURFACE WITH A MAP OR A MIXER, never both and never neither.
+         * This is the pin that catches the two ways the distinction can rot: a surface that
+         * stops naming the map it selects (the drift this table exists to remove), and a mixer
+         * row that grows one, or a mixer row nothing can recognise at all.
+         *
+         * The mixer half is not decoration -- it is what these six rows were added under, and
+         * the check above it had to learn that "no map" is CORRECT for a mixer rather than a
+         * missing field. */
+        if (controller_is_mixer(c)) {
+            CHECK(!c->map_name, "row %s is a mixer and must select no map -- the maps are "
+                  "selected by name and a mixer has none", c->id);
+            CHECK(c->usb != NULL || (c->product && c->product[0]),
+                  "row %s is a mixer with neither a USB id nor a model-name token, so nothing "
+                  "can ever recognise it: external mixer routing would never turn on", c->id);
+        } else {
+            CHECK(c->map_name && c->map_name[0],
+                  "row %s must name the map it selects", c->id);
+            if (c->map_name)
+                CHECK(is_a_map(c->map_name),
+                      "row %s selects map '%s', which this build does not have",
+                      c->id, c->map_name);
+        }
 
         /* No field is the EMPTY STRING. NULL means "not known" and is written
          * as NULL; "" is a value that reads like one and matches every needle
@@ -117,6 +135,9 @@ static void test_shape(void)
               "row %s: alsa_hint is \"\" rather than NULL", c->id);
         CHECK(!c->card_id || c->card_id[0],
               "row %s: card_id is \"\" rather than NULL", c->id);
+        CHECK(!c->product || c->product[0],
+              "row %s: product is \"\" rather than NULL -- an empty token matches every device "
+              "name, which is the same trap alsa_hint documents", c->id);
 
         /* Every SysEx is well-formed: a message that does not start with F0 or
          * end with F7 is a truncated paste, and the surface answers nothing.
@@ -446,15 +467,105 @@ static void test_keepalive_due(void)
           "the widest forward count is due -- the comparison must not overflow");
 }
 
-int main(void)
+/* ---------------------------------------------------------------------------
+ * 8. Mixers: who may answer the external-mixer question
+ */
+
+static void test_mixers(void)
 {
-    test_shape();
+    const struct controller *c;
+
+    /* BY ID. The euphonia's is the one this tree measured: 2b73:0047, read off .239's sysfs
+     * beside product string "euphonia" and ALSA card "euphonia". */
+    c = controllers_mixer_by_usb("2b73:0047");
+    CHECK(c != NULL && strcmp(c->id, "euphonia") == 0,
+          "2b73:0047 is the euphonia, not %s", c ? c->id : "(nothing)");
+
+    /* A SURFACE IS NEVER A MIXER, whatever it is asked. The FLX4's id is in this table too, and
+     * it must not turn external routing on: it has no channel strips to hand the mixing to, so
+     * the decks would go out on pairs nothing is listening to and the mix -- which is what the
+     * FLX4's own output carries -- would have been dropped. */
+    CHECK(controllers_mixer_by_usb("2b73:0045") == NULL,
+          "the DDJ-FLX4's id must not answer the mixer question");
+    CHECK(controllers_by_usb("2b73:0045") != NULL, "though it is still a row of this table");
+    CHECK(!controller_is_mixer(controllers_by_usb("2b73:0045")), "and it is not a mixer");
+    CHECK(!controller_is_mixer(NULL), "NULL is not a mixer either");
+    CHECK(controllers_mixer_by_usb(NULL) == NULL, "a NULL id asks nothing");
+    CHECK(controllers_mixer_by_usb("") == NULL,
+          "and an empty id must not fall through to the first mixer row");
+
+    /* THE NORMALISATION, which is the whole reason the by-name lookup exists: one model is
+     * written three ways by three sources, and all three have to reach one token. */
+    c = controllers_mixer_by_product("DJM-900NXS2");
+    CHECK(c != NULL && strcmp(c->id, "djm900nxs2") == 0, "DJM-900NXS2 by its model name");
+    c = controllers_mixer_by_product("DJM900NXS2");
+    CHECK(c != NULL && strcmp(c->id, "djm900nxs2") == 0, "by the ALSA card id's spelling");
+    c = controllers_mixer_by_product("djm-900nxs2");
+    CHECK(c != NULL && strcmp(c->id, "djm900nxs2") == 0, "and lowercased");
+    c = controllers_mixer_by_product("Pioneer DJ DJM-V10");
+    CHECK(c != NULL && strcmp(c->id, "djmv10") == 0,
+          "a product string matches as a SUBSTRING, so a vendor prefix is fine");
+
+    /* TABLE ORDER DECIDES TIES. "djm900nxs" is a substring of "djm900nxs2", so the family row
+     * is listed last and a 900NXS2 keeps its own name; and "djmv5" is NOT a substring of
+     * "djmv10", so the V5 and the V10 do not shadow each other -- worth pinning, because a
+     * token that did would silently name the wrong device. */
+    c = controllers_mixer_by_product("DJM-900NXS");
+    CHECK(c != NULL && strcmp(c->id, "djm900nxs") == 0, "a 900NXS is the family row");
+    c = controllers_mixer_by_product("DJM-V5");
+    CHECK(c != NULL && strcmp(c->id, "djmv5") == 0, "a DJM-V5 is its own row, not the V10");
+    c = controllers_mixer_by_product("DJM-V10");
+    CHECK(c != NULL && strcmp(c->id, "djmv10") == 0, "and the V10 is the V10");
+
+    /* WHAT DOES NOT ANSWER. A surface's name reaches nothing, because surfaces carry no token
+     * -- that is what keeps this lookup to mixers. NULL, and a string that normalises away to
+     * nothing, both answer nothing: the empty-needle trap in two spellings. */
+    CHECK(controllers_mixer_by_product("DDJ-FLX4") == NULL,
+          "a surface's name must not answer the mixer question");
+    CHECK(controllers_mixer_by_product(NULL) == NULL, "a NULL name asks nothing");
+    CHECK(controllers_mixer_by_product("-") == NULL,
+          "and a name of pure punctuation normalises to nothing rather than to everything");
+}
+
+static int count_visit(const struct controller *c, void *ctx)
+{
+    (void)c;
+    (*(int *)ctx)++;
+    return 0;
+}
+
+/* THE WALK'S TWO ANSWERS, which are the ones a caller acts on. "No mixer here" and "could not
+ * ask" are deliberately different return values, and controllers_cli's exit codes carry the
+ * difference: a bus that cannot be read is a unit on which the question was never put, and the
+ * page's gate must not turn its own blind spot into "no mixer". The POSITIVE path is proved on
+ * the unit (`controllers_cli mixer` -> the euphonia, `mixer /tmp/emptybus` -> none); what is
+ * pinned here is that the two negatives are not the same answer. */
+static void test_the_walk_refuses(void)
+{
+    int seen = 0;
+
+    CHECK(usb_table_walk_in(NULL, NULL, NULL) == -1, "no root is not a walk");
+    CHECK(mixer_present_in(NULL) == NULL, "and finds nothing");
+    CHECK(usb_table_walk_in("/nonexistent/rbpi4b-usb-root", count_visit, &seen) == -1,
+          "a root that is not there is UNREADABLE, not empty");
+    CHECK(mixer_present_in("/nonexistent/rbpi4b-usb-root") == NULL, "and finds nothing");
+    /* A root that IS there with no devices in it is the other answer: readable, nothing
+     * matched. /tmp is that root on every machine this test runs on. */
+    CHECK(usb_table_walk_in("/tmp", count_visit, &seen) == 0,
+          "a readable root with no devices in it is 0 matches, not an error");
+    CHECK(seen == 0, "and it visited nothing");
+}
+
+int main(void)
+{    test_shape();
     test_the_measured_row();
     test_the_unknowns_stay_unknown();
     test_find_and_hint();
     test_default();
     test_sysex();
     test_keepalive_due();
+    test_mixers();
+    test_the_walk_refuses();
 
     printf("%s: %d checks, %d failures\n", failures ? "FAIL" : "ok", checks,
            failures);

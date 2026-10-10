@@ -145,6 +145,12 @@ install_override() {
         echo "  WARNING: could not install override $src" >&2
     fi
 }
+# THE DEPLOY ROOT IS THE SOURCE OF TRUTH AND THE CHROOT IS DERIVED. Every launch
+# copies these in, so a shim staged directly into the chroot is overwritten here
+# on the next start -- the deployed file to replace is $RB_DEPLOY_ROOT/<name>.so,
+# and the chroot's copy is only ever a copy of it. (`cmp -s` means the copy is
+# skipped when the two already match, so this is also why a chroot-only edit
+# appears to work until the next restart and then silently reverts.)
 install_override "$RB_DEPLOY_ROOT/fbshim.so"     "$RB_CHROOT/usr/lib/fbshim.so"
 install_override "$RB_DEPLOY_ROOT/knobshim.so"   "$RB_CHROOT/usr/lib/knobshim.so"
 install_override "$RB_DEPLOY_ROOT/audioshim.so"  "$RB_CHROOT/usr/lib/audioshim.so"
@@ -292,7 +298,7 @@ DFB_PRESENT_AUTO DFB_PRESENT_FIT DFB_PRESENT_SKIP DFB_PRESENT_PX_BUDGET
 POINT_KIND POINT_DEV POINT_DEBUG POINT_MIN_DWELL_MS POINT_MOUSE_SPEED
 POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y POINT_CURSOR POINT_CURSOR_MS
 POINT_QUANTIZE_TAP POINT_MENU POINT_MENU_MOUSE POINT_FX_TOUCH POINT_HOTCUE_TOUCH
-AUDIO_DEV AUDIO_CHANNELS AUDIO_MAP AUDIO_FMT AUDIO_MONITOR_PAIR
+AUDIO_DEV AUDIO_CHANNELS AUDIO_MAP AUDIO_FMT AUDIO_MONITOR_PAIR MIXER_MODE
 AUDIO_MIRROR_DEV AUDIO_MIRROR_FMT AUDIO_MIRROR_REOPEN_MS AUDIO_MIRROR_BOOST_DB
 STARTUP_MUTE_MS STARTUP_FADE_MS SCHED_RT
 MIDI_MAP EVDEV_MAP MIDI_IN_MATCH MIDI_OUT_MATCH MIDI_DUMP MIDI_REPLAY

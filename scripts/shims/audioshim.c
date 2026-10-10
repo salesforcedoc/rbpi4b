@@ -78,6 +78,8 @@
 /* Declarations of the state owned by the controls shim (which is preloaded
  * before us), plus the constructor-time check that it is actually there. */
 #include "shmstate.h"
+#include "rbp_abi.h"       /* ADDR_MIXER_ROUTE_PLAYER0: the deck taps (external mode) */
+#include "usb_devices.h"   /* mixer_present: external mode applies only with one on the bus */
 #include "envutil.h"
 #include "s24pack.h"
 #include "mirror_policy.h"
@@ -221,6 +223,10 @@ static struct {
     struct pair headphones;
     struct pair booth;
     struct pair monitor;       /* AUDIO_MONITOR_PAIR */
+    struct pair deck1;         /* AUDIO_MAP's deck1/deck2: MIXER_MODE=external only */
+    struct pair deck2;
+    int  mixer_external;       /* MIXER_MODE: 1 = send the decks raw, not the mix */
+    int  tap_guard_logged;     /* the "this card is too narrow" NOTE, said once */
     char mirror_dev[DEV_MAX + 64]; /* AUDIO_MIRROR_DEV, the raw list ("" = off) */
     int  mirror_fmt;           /* s24pack format, from AUDIO_MIRROR_FMT */
     char mirror_fmt_name[24];  /* as written, for the log */
@@ -945,9 +951,13 @@ static void parse_map(const char *s)
             dst = &g_cfg.headphones;
         else if (strcmp(name, "booth") == 0)
             dst = &g_cfg.booth;
+        else if (strcmp(name, "deck1") == 0)
+            dst = &g_cfg.deck1;
+        else if (strcmp(name, "deck2") == 0)
+            dst = &g_cfg.deck2;
         else {
             alog("audioshim: AUDIO_MAP stream '%s' is not one of "
-                 "master/headphones/booth; ignoring it\n", name);
+                 "master/headphones/booth/deck1/deck2; ignoring it\n", name);
             continue;
         }
         parse_pair(name, val, dst);
@@ -1049,9 +1059,46 @@ static void load_config(void)
     g_cfg.headphones.a = 2;  g_cfg.headphones.b = 3;
     g_cfg.booth.a = PAIR_NONE; g_cfg.booth.b = PAIR_NONE;
     g_cfg.monitor.a = PAIR_NONE; g_cfg.monitor.b = PAIR_NONE;
+    /* The deck taps. These defaults are only ever read in external mixer mode;
+     * in internal mode nothing looks at them. 2,3 and 4,5 are where the
+     * Euphonia's USB channels land on its own channel strips, and they are the
+     * operator's choice rather than a derivation -- AUDIO_MAP moves them. */
+    g_cfg.deck1.a = 2;       g_cfg.deck1.b = 3;
+    g_cfg.deck2.a = 4;       g_cfg.deck2.b = 5;
 
     parse_map(env_str("AUDIO_MAP", ""));
     parse_pair("AUDIO_MONITOR_PAIR", env_str("AUDIO_MONITOR_PAIR", ""), &g_cfg.monitor);
+
+    /* MIXER_MODE=external: an external digital mixer is the mixer, so what goes to the card
+     * is each deck's own audio on its own pair and rbp's mix is NOT sent at all -- sending
+     * both would play every deck twice. Anything else, including unset and unparseable, is
+     * internal mode, which is the behaviour that shipped and is also what a shim run by
+     * hand with no environment at all gets.
+     *
+     * AND IT APPLIES ONLY WHILE ONE IS ACTUALLY PLUGGED IN. The whole point of the mode is
+     * the other device's channel strips: with none on the bus the decks would go out on
+     * pairs nothing is listening to, and the mix -- which is what a controller's own output
+     * carries -- would have been dropped. So the question is asked of the BUS and not of the
+     * setting, and a refusal is SAID rather than assumed, because a silent fallback to
+     * internal is a night of "the setting does nothing". */
+    {
+        int want = (strcmp(env_str("MIXER_MODE", ""), "external") == 0);
+        const struct controller *mixer = want ? mixer_present() : NULL;
+
+        g_cfg.mixer_external = want && mixer != NULL;
+        if (g_cfg.mixer_external)
+            alog("audioshim: MIXER_MODE=external, with %s (%s) on the bus -- the deck taps "
+                 "go out on %d,%d and %d,%d and rbp's own mix is NOT sent. rbp's faders, "
+                 "EQ, isolator, crossfader and its FX are out of the path; the decks are "
+                 "taken pre-trim from the engine (see fill_deck_taps)\n",
+                 mixer->name, mixer->usb ? mixer->usb : mixer->product,
+                 g_cfg.deck1.a, g_cfg.deck1.b, g_cfg.deck2.a, g_cfg.deck2.b);
+        else if (want)
+            alog("audioshim: MIXER_MODE=external was asked for, but no recognised external "
+                 "digital mixer is on the USB bus -- staying INTERNAL, so rbp's mix still "
+                 "goes to the master pair. Controllers_cli's `detect` prints what this "
+                 "shim's table knows about what is plugged in (%s)\n", USB_DEVICES_ROOT);
+    }
 
     /* Taken here, before resolve_pairs() can clamp anything — see g_cfg_map0. */
     g_cfg_map0.master = g_cfg.master;
@@ -1158,12 +1205,14 @@ static void load_config(void)
 
     alog("audioshim: config dev=%s card=%s channels=%s map=[master=%d,%d "
          "headphones=%d,%d booth=%d,%d monitor=%d,%d] fmt=%s mute=%ldms "
-         "fade=%ldms sched_rt=%d\n",
+         "fade=%ldms sched_rt=%d mixer=%s deck1=%d,%d deck2=%d,%d\n",
          g_cfg.dev, g_cfg.card_id[0] ? g_cfg.card_id : "-",
          g_cfg.channels ? "fixed" : "auto",
          g_cfg.master.a, g_cfg.master.b, g_cfg.headphones.a, g_cfg.headphones.b,
          g_cfg.booth.a, g_cfg.booth.b, g_cfg.monitor.a, g_cfg.monitor.b,
-         g_cfg.fmt_name, mute_ms, fade_ms, g_cfg.sched_rt);
+         g_cfg.fmt_name, mute_ms, fade_ms, g_cfg.sched_rt,
+         g_cfg.mixer_external ? "external" : "internal",
+         g_cfg.deck1.a, g_cfg.deck1.b, g_cfg.deck2.a, g_cfg.deck2.b);
 }
 
 /* Verify the shared-state contract before anything reads g_master_gain and
@@ -3040,6 +3089,89 @@ static void fold_stage(const struct stage *st, const struct pair *pair,
     }
 }
 
+/* ---- external mixer mode: the deck taps ----------------------------------
+ *
+ * In external mixer mode the Euphonia is the mixer, so rbp's own channel strips
+ * -- trim, EQ, isolator, channel fader, crossfader, Sound Color FX and Beat FX --
+ * must not touch what the decks send, and rbp's mix must not be sent at all or
+ * every deck would be heard twice. What is sent instead is each deck's own audio,
+ * taken from the engine's per-input player buffer: the exact data rbp's
+ * MixerChannel::update hands up to the strip before any of it runs. Pre-trim,
+ * pre-EQ, pre-fader.
+ *
+ * THERE IS NO HOOK AND NO PATCHED CODE. djengine::MixerRouteMngr keeps one source
+ * object per mixer input, and that object's +4 is the address of the input's
+ * Float2 block for the block in flight. rbp's own MixerChannel::update @0x9e890
+ * fetches it with getPlayerDataPointer @0x85898, whose whole body is
+ *     r0 = *(uint32_t *)(0x01149f08 + input*4 + 0x48);  return r0 ? *(uint32_t *)(r0+4) : 0;
+ * -- two loads. This reads the same two words the engine reads, so there is
+ * nothing to patch and no trampoline to get wrong, and the address is re-read
+ * every flush rather than cached, so a change of engine or buffer cannot be
+ * missed.
+ *
+ * THAT IT IS SAFE TO READ HERE IS A MEASUREMENT, not an assumption. The buffer is
+ * a FIXED address written in place each block: measured on .239 2026-10-10, deck
+ * 1's pointer held 0xc8b28ea8 across 5 s while its contents moved on every ~15 ms
+ * sample, and deck 2's held 0xc8b474d8. So reading it at flush time gives the
+ * block being written -- the same block, in the same snd_pcm_writei as the master
+ * -- and the latency is rbp's own, with no queue and no second thread.
+ *
+ * The length is safe by construction rather than by a bound: the `src` block this
+ * flush is writing IS that same engine block, so the per-input buffers are at
+ * least `size` frames long, exactly as `src` is. (The staged phone/booth streams
+ * are the ones whose lengths are rbp's own business -- see struct stage.)
+ *
+ * The one thing that is NOT safe by construction is the channel count: the pairs
+ * are validated against the card because AUDIO_MAP's numbers are hardware
+ * indices, and a card opened at two channels must not be written at index 4. */
+#define TAP_FULL_SCALE 8388607.0f   /* rbp's 24-bit full scale, the S24 container's */
+
+static int32_t tap_to_s24(float f)
+{
+    float v = f * TAP_FULL_SCALE;
+
+    if (v >  TAP_FULL_SCALE) return (int32_t)TAP_FULL_SCALE;
+    if (v < -TAP_FULL_SCALE) return -(int32_t)TAP_FULL_SCALE;
+    return (int32_t)v;
+}
+
+static void fill_deck_taps(snd_pcm_uframes_t size)
+{
+    int d;
+
+    for (d = 0; d < 2; d++) {
+        const struct pair *p = d ? &g_cfg.deck2 : &g_cfg.deck1;
+        const float *src;
+        uint32_t obj, buf;
+        snd_pcm_uframes_t i;
+
+        if (!pair_mapped(p))
+            continue;
+        if (p->a >= (int)g_out_channels || p->b >= (int)g_out_channels) {
+            if (!g_cfg.tap_guard_logged) {
+                g_cfg.tap_guard_logged = 1;
+                alog("audioshim: external mixer mode wants deck %d on channels "
+                     "%d,%d but the card was opened with %u; those decks are NOT "
+                     "sent. AUDIO_MAP and the card must agree\n",
+                     d + 1, p->a, p->b, g_out_channels);
+            }
+            continue;
+        }
+        obj = *(volatile uint32_t *)(ADDR_MIXER_ROUTE_PLAYER0 + (unsigned)d * 4);
+        if (obj == 0)
+            continue;
+        buf = *(volatile uint32_t *)((uintptr_t)obj + MIXER_ROUTE_PTR_OFF);
+        if (buf == 0)
+            continue;
+        src = (const float *)(uintptr_t)buf;   /* 2 floats a frame, interleaved */
+
+        for (i = 0; i < size; i++) {
+            g_out[i * g_out_channels + p->a] = tap_to_s24(src[i * 2 + 0]);
+            g_out[i * g_out_channels + p->b] = tap_to_s24(src[i * 2 + 1]);
+        }
+    }
+}
+
 static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size)
 {
     float master_gain = clamp01(g_master_gain);
@@ -3058,6 +3190,10 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
      * mirror_saturate() in the loop below: a lifted sample that runs out of
      * headroom clips, counted as g_mirror_clips. */
     float mirror_gain = clamp01(g_mirror_gain) * (float)g_cfg.mirror_boost;
+    /* Hoisted with the gains and for the same reason: it is read from the
+     * environment once, in the constructor, so every frame of every block takes
+     * the same branch and no frame can straddle a change of mode. */
+    const int external = g_cfg.mixer_external;
     snd_pcm_uframes_t i;
     unsigned long long t0 = g_startup_frames_done;
     unsigned long long mute = (unsigned long long)g_cfg.mute_frames;
@@ -3104,15 +3240,19 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
         }
         ol = (int32_t)(sl * g);
         or_ = (int32_t)(sr * g);
-        if (pair_mapped(&g_cfg.master)) {
+        /* In external mixer mode the mix goes nowhere: the deck taps below are
+         * what the card gets, and sending this as well would put every deck on
+         * the card twice. The samples are still computed and still reach the
+         * mirror beneath, so the HDMI monitor keeps rbp's mix whether the
+         * Euphonia is mixing or rbp is. */
+        if (!external && pair_mapped(&g_cfg.master)) {
             g_out[i * g_out_channels + g_cfg.master.a] = ol;
             g_out[i * g_out_channels + g_cfg.master.b] = or_;
         }
-        if (pair_mapped(&g_cfg.monitor)) {
+        if (!external && pair_mapped(&g_cfg.monitor)) {
             g_out[i * g_out_channels + g_cfg.monitor.a] = ol;
             g_out[i * g_out_channels + g_cfg.monitor.b] = or_;
         }
-
         /* The HDMI mirror's copy of the same two samples: channel 0 is the
          * master's left and channel 1 its right — post Main Vol, post startup
          * mute and fade, exactly the values that went to the card, then scaled
@@ -3156,8 +3296,16 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
         alog("audioshim: NOTE the booth stream staged %u frames against a %lu "
              "frame flush\n", g_booth_stage.frames, (unsigned long)size);
     }
-    fold_stage(&g_phone_stage, &g_cfg.headphones, (unsigned)size);
-    fold_stage(&g_booth_stage, &g_cfg.booth, (unsigned)size);
+    /* The cue and booth pairs are pairs of rbp's MIX, so external mode drops them
+     * with the master. Their stages are still filled by the phone/booth writei
+     * interceptors -- staging is cheap and unconditional, and a mode that also
+     * changed what rbp is allowed to write would be a second thing to keep true. */
+    if (!external) {
+        fold_stage(&g_phone_stage, &g_cfg.headphones, (unsigned)size);
+        fold_stage(&g_booth_stage, &g_cfg.booth, (unsigned)size);
+    } else {
+        fill_deck_taps(size);
+    }
 
     g_write_count++;
 

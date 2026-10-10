@@ -282,14 +282,21 @@ $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 # rbp_vu.c's log10() and rbp_led.c. A host libm here would stamp GLIBC_2.29+
 # references and the shim would refuse to load in the glibc-2.13 chroot.
 audioshim.so: audioshim.o s24pack.o mirror_policy.o master_policy.o \
-              pace_policy.o controllers.o
+              pace_policy.o controllers.o usb_devices.o
 	$(CC) $(CFLAGS) -shared -o $@ audioshim.o s24pack.o mirror_policy.o \
-	    master_policy.o pace_policy.o controllers.o $(RX3LIB)/libdl.so.2 -lm -lc \
+	    master_policy.o pace_policy.o controllers.o usb_devices.o \
+	    $(RX3LIB)/libdl.so.2 -lm -lc \
 	    $(LDFLAGS)
 
 audioshim.o: audioshim.c shmstate.h envutil.h s24pack.h mirror_policy.h \
-             master_policy.h pace_policy.h controllers.h
+             master_policy.h pace_policy.h controllers.h usb_devices.h rbp_abi.h
 s24pack.o: s24pack.c s24pack.h
+
+# usb_devices.o is the ONE walk of /sys/bus/usb/devices: audioshim.o takes it to answer
+# "is an external digital mixer here?" before it honours MIXER_MODE=external, and
+# controllers_cli takes it for `detect` and `mixer`. Both link this object rather than a
+# copy, so a unit cannot be told one thing by the shim and another by the diagnostic.
+usb_devices.o: usb_devices.c usb_devices.h controllers.h
 
 # controllers.o is shared with knobshim.so, and audioshim.o now includes its
 # header: the default ALSA card and the FLX4's port-name hint are two fields of
@@ -617,9 +624,9 @@ udplog: udplog.c
 # STATIC because it is a diagnostic that must run on the unit whatever state the
 # deploy root's shared libraries are in -- the moment it is wanted is the moment
 # something else is wrong. Installed by install.sh beside the other artifacts.
-controllers_cli: controllers_cli.c controllers.c controllers.h
+controllers_cli: controllers_cli.c controllers.c controllers.h usb_devices.c usb_devices.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -static -o $@ \
-	    controllers_cli.c controllers.c
+	    controllers_cli.c controllers.c usb_devices.c
 
 # pcmprobe is a diagnostic, not a shim: NOT built by `all` and never shipped. It
 # links the chroot's libasound — the same copy the audio shim dlopens — because
@@ -829,9 +836,9 @@ test_plinn_scan: test_plinn_scan.c plinn_scan.c plinn_scan.h
 # one is the day this module has stopped being pure. It is also the source for
 # controllers_cli.c below, which doctor.sh and install.sh read instead of keeping
 # their own copy of the list.
-test_controllers: test_controllers.c controllers.c controllers.h
+test_controllers: test_controllers.c controllers.c controllers.h usb_devices.c usb_devices.h
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \
-	    -Wall -Wextra -static -o $@ test_controllers.c controllers.c
+	    -Wall -Wextra -static -o $@ test_controllers.c controllers.c usb_devices.c
 
 # test_usblabel links the PRODUCTION usb_label.c, for the same reason the four
 # tests above link their modules: the rules it holds are the ones that would

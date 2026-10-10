@@ -22,13 +22,13 @@
  *     make controllers_cli
  */
 #define _GNU_SOURCE
-#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "controllers.h"
+#include "usb_devices.h"
 
 static void usage(FILE *f)
 {
@@ -45,6 +45,12 @@ static void usage(FILE *f)
 "                  could not be read at all\n"
 "  names           'id name' for every row\n"
 "  usbids          'id usb' for every row, '-' where the table records none\n"
+"  mixer           the external digital mixer on the USB bus, 'id name'. This is\n"
+"                  the question RB_MIXER_MODE=external is gated on\n"
+"                  (scripts/shims/usb_devices.h); prints 'none' and exits 1 when\n"
+"                  none is present, and exits 2 when the bus could not be read.\n"
+"                  Takes an optional sysfs root, for asking about a path that is\n"
+"                  not the running bus: `mixer /tmp/empty` is 'no mixer here'\n"
 "  card-id <id>    the ALSA card id -- the CARD= half of hw:CARD=<id>,DEV=<n>\n"
 "  match <id>      the ALSA sequencer port-name substring the surface is found\n"
 "                  by (MIDI_IN_MATCH's default for that row)\n"
@@ -52,13 +58,34 @@ static void usage(FILE *f)
 "Exit: 0 printed, 1 no such row or no such value, 2 could not answer.\n");
 }
 
-/* Trailing whitespace off a sysfs read. */
-static void trim(char *s)
+/* Print one recognised device. The walker's visitor; returning 0 keeps it walking. */
+static int print_match(const struct controller *c, void *ctx)
 {
-     size_t n = strlen(s);
+     int *n = ctx;
 
-     while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' '))
-          s[--n] = '\0';
+     /* `usb` is what a USB match was made on, and a mixer row reached by its MODEL NAME
+      * instead has none -- those print a dash rather than "(null)", the same way the
+      * `usbids` command already reports a row with no id. */
+     printf("%s %s %s\n", c->id, c->name, c->usb ? c->usb : "-");
+     (*n)++;
+     return 0;
+}
+
+/* The first mixer in the walk. It deliberately does NOT stop on a surface and does not stop
+ * at the first mixer either: the CLI needs the walk's RETURN VALUE alongside the row, because
+ * "none" and "could not read the bus" are different answers and only one of them should let a
+ * caller conclude there is no mixer here. */
+struct mixer_hit {
+     const struct controller *found;
+};
+
+static int take_mixer(const struct controller *c, void *ctx)
+{
+     struct mixer_hit *h = ctx;
+
+     if (!h->found && controller_is_mixer(c))
+          h->found = c;
+     return 0;
 }
 
 /* Ask the USB ids in sysfs about the table. Returns how many rows matched, or -1
@@ -73,55 +100,13 @@ static void trim(char *s)
  * shelling out to lsusb, so this works on a unit where lsusb is not installed. */
 static int detect(void)
 {
-     DIR *d;
-     struct dirent *e;
      int printed = 0;
 
-     d = opendir("/sys/bus/usb/devices");
-     if (!d) {
-          fprintf(stderr, "controllers_cli: cannot read /sys/bus/usb/devices: %s\n",
-                  strerror(errno));
+     if (usb_table_walk_in(USB_DEVICES_ROOT, print_match, &printed) < 0) {
+          fprintf(stderr, "controllers_cli: cannot read %s: %s\n",
+                  USB_DEVICES_ROOT, strerror(errno));
           return -1;
      }
-
-     while ((e = readdir(d)) != NULL) {
-          char path[512], id[32], v[16], p[16];
-          const struct controller *c;
-          FILE *f;
-
-          if (e->d_name[0] == '.')
-               continue;
-
-          snprintf(path, sizeof path, "/sys/bus/usb/devices/%s/idVendor",
-                   e->d_name);
-          f = fopen(path, "r");
-          if (!f)
-               continue;
-          if (!fgets(v, sizeof v, f)) { fclose(f); continue; }
-          fclose(f);
-
-          snprintf(path, sizeof path, "/sys/bus/usb/devices/%s/idProduct",
-                   e->d_name);
-          f = fopen(path, "r");
-          if (!f)
-               continue;
-          if (!fgets(p, sizeof p, f)) { fclose(f); continue; }
-          fclose(f);
-
-          trim(v);
-          trim(p);
-          if (!v[0] || !p[0])
-               continue;
-
-          snprintf(id, sizeof id, "%s:%s", v, p);
-          c = controllers_by_usb(id);
-          if (!c)
-               continue;
-
-          printf("%s %s %s\n", c->id, c->name, c->usb);
-          printed++;
-     }
-     closedir(d);
      return printed;
 }
 
@@ -157,6 +142,30 @@ int main(int argc, char **argv)
           return argc < 2 ? 2 : 0;
      }
      cmd = argv[1];
+
+     if (strcmp(cmd, "mixer") == 0) {
+          /* An optional root, because the walker takes one and a diagnostic needs to be
+           * able to ask the question about somewhere that is NOT the running bus -- pointing
+           * this at an empty directory is how the "no mixer here" half of the page's gate is
+           * demonstrated on a unit whose mixer is plugged in. */
+          const char *root = argc > 2 ? argv[2] : USB_DEVICES_ROOT;
+          struct mixer_hit h;
+          int n;
+
+          h.found = NULL;
+          n = usb_table_walk_in(root, take_mixer, &h);
+          if (n < 0) {
+               fprintf(stderr, "controllers_cli: cannot read %s: %s\n",
+                       root, strerror(errno));
+               return 2;
+          }
+          if (h.found) {
+               printf("%s %s\n", h.found->id, h.found->name);
+               return 0;
+          }
+          printf("none\n");
+          return 1;
+     }
 
      if (strcmp(cmd, "detect") == 0) {
           int n = detect();

@@ -99,6 +99,25 @@ struct controller {
      const unsigned char *keepalive;
      unsigned keepalive_len;
      unsigned keepalive_ms;
+
+     /* ---- mixers: rows that are about DETECTION, not about a binding table ----------
+      *
+      * `mixer` marks an EXTERNAL DIGITAL MIXER -- a device with channel strips of its
+      * own, which is the only thing RB_MIXER_MODE=external is for. Such a row is NOT a
+      * control surface: no map (`map_name` is NULL, and the maps are selected by name
+      * anyway), no SysEx, no keepalive. What it buys is recognition, and recognition is
+      * the whole feature: external routing APPLIES only while one of these is on the USB
+      * bus, and the config page does not offer the setting while none is (usb_devices.h
+      * asks the question, for both of them).
+      */
+     int mixer;
+
+     /* A MODEL NAME, matched against what the kernel says the device is -- its USB
+      * product string or its ALSA card id. Both sides are normalised before the
+      * comparison (see controllers_mixer_by_product), so the spellings that differ only
+      * in punctuation all reach one token. NULL for a row reached by its USB id alone,
+      * and for every control surface. */
+     const char *product;
 };
 
 /* The table. `at()` is for walking it (the CLI's detect, the tests); `find()`
@@ -130,6 +149,30 @@ const struct controller *controllers_by_usb(const char *usb);
  * table cannot be empty and the default cannot be missing without failing to
  * build, so a caller does not have to carry a NULL arm for it. */
 const struct controller *controllers_default(void);
+
+/* Is this row an external digital mixer rather than a control surface? NULL-safe, and 0
+ * for NULL: a caller that has just failed a lookup should not have to carry an arm. */
+int controller_is_mixer(const struct controller *c);
+
+/* A MIXER row whose USB id matches ("vvvv:pppp"), or NULL. Restricted to mixer rows on
+ * purpose -- a DDJ-FLX4 is in this table too, and it must never be the thing that turns
+ * external routing on, because it has no channel strips to hand the mixing to. */
+const struct controller *controllers_mixer_by_usb(const char *usb);
+
+/* A MIXER row whose `product` token appears in `text`, or NULL.
+ *
+ * THE COMPARISON IS NORMALISED, and that is the point of it: one model is written three
+ * ways by three sources -- the USB product string `DJM-900NXS2`, the ALSA card id
+ * `DJM900NXS2`, and the model name `DJM-900NXS2` -- so both sides are lowercased with
+ * everything outside [a-z0-9] dropped before the substring test. A matcher that only
+ * knows one of those spellings fails on a real unit, and fails silently, which is the
+ * shape of failure this whole port keeps paying for.
+ *
+ * TABLE ORDER DECIDES TIES, first match wins, so a family token (`DJM-900NXS`, which is
+ * a substring of `DJM-900NXS2`) must be listed after the specific row it would otherwise
+ * swallow. An empty token never matches -- the rule controllers_by_hint states, for the
+ * same reason: an empty needle matches every haystack. */
+const struct controller *controllers_mixer_by_product(const char *text);
 
 /* Is the keepalive due at `now_ms`, given it last went out at `last_ms`?
  *

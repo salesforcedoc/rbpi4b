@@ -63,6 +63,7 @@ static const struct controller table[] = {
           "flx4",
           NULL, 0,                                  /* no SysEx of its own */
           sysex_flx4_keepalive, sizeof sysex_flx4_keepalive, 200,
+          0, NULL,                                  /* a surface, not a mixer */
      },
      {
           "jp21",
@@ -76,6 +77,82 @@ static const struct controller table[] = {
           "jp21",
           sysex_jp21_abs, sizeof sysex_jp21_abs,
           NULL, 0, 0,                               /* wants no keepalive */
+          0, NULL,                                  /* a surface, not a mixer */
+     },
+
+     /* ---- external digital mixers ------------------------------------------------
+      *
+      * NOT control surfaces, and the row says so by having no map: these are the devices
+      * RB_MIXER_MODE=external hands the mixing to. With one on the bus the mixer-routing
+      * setting applies and the page offers it; with none of them it does not. See
+      * usb_devices.h for the asking and docs/09-audio.md for what turns on.
+      *
+      * HOW MUCH OF EACH ROW IS A MEASUREMENT IS SAID PER ROW, because the three kinds of
+      * fact here are not interchangeable:
+      *
+      *   euphonia     id AND product string BOTH measured on .239 2026-10-10
+      *                (`2b73:0047`, product "euphonia", ALSA card "euphonia").
+      *   DJM-V10      id from the kernel's own sound/usb/quirks-table.h -- a device the
+      *   DJM-A9       kernel already carries a quirk for, which is a citable source and
+      *   DJM-900NXS2  not a guess. The model name is the product token.
+      *   DJM-V5       id NOT recorded anywhere this tree could check, so it is NULL --
+      *   DJM-900NXS   unknown, printed as unknown -- and the row is reached by its model
+      *                name alone. The V5 is a 2026 product with no kernel quirk yet, and a
+      *                GUESSED id here is exactly the drift this table exists to remove.
+      *
+      * The 900NXS family token is last of the family: "djm900nxs" is a substring of
+      * "djm900nxs2", so first-match-wins order is what keeps the specific row's name on a
+      * 900NXS2. */
+     {
+          "euphonia",
+          "AlphaTheta euphonia",
+          "2b73:0047",                              /* measured on .239 */
+          NULL,                                     /* not reached by a sequencer name */
+          "euphonia",                               /* and its card id, also measured */
+          NULL,                                     /* no map: not a surface */
+          NULL, 0,                                  /* no SysEx of its own */
+          NULL, 0, 0,                               /* wants no keepalive */
+          1, "euphonia",
+     },
+     {
+          "djm900nxs2",
+          "DJM-900NXS2",
+          "2b73:000a",                              /* kernel quirks-table.h */
+          NULL, NULL, NULL,
+          NULL, 0, NULL, 0, 0,
+          1, "DJM-900NXS2",
+     },
+     {
+          "djmv10",
+          "DJM-V10",
+          "2b73:0034",                              /* kernel quirks-table.h */
+          NULL, NULL, NULL,
+          NULL, 0, NULL, 0, 0,
+          1, "DJM-V10",
+     },
+     {
+          "djma9",
+          "DJM-A9",
+          "2b73:003c",                              /* kernel quirks-table.h */
+          NULL, NULL, NULL,
+          NULL, 0, NULL, 0, 0,
+          1, "DJM-A9",
+     },
+     {
+          "djmv5",
+          "DJM-V5",
+          NULL,                                     /* id not known here: see above */
+          NULL, NULL, NULL,
+          NULL, 0, NULL, 0, 0,
+          1, "DJM-V5",
+     },
+     {
+          "djm900nxs",
+          "DJM-900NXS",
+          NULL,                                     /* id not known here */
+          NULL, NULL, NULL,
+          NULL, 0, NULL, 0, 0,
+          1, "DJM-900NXS",                          /* family token: must stay last */
      },
 };
 
@@ -155,6 +232,71 @@ const struct controller *controllers_default(void)
       * the first one, which the same test pins, so even a hypothetical miss
       * lands on the surface this port targets. */
      return c ? c : &table[0];
+}
+
+/* One spelling rule for a model name, and the only place it is applied. See the
+ * declaration in controllers.h for why punctuation is DROPPED rather than turned into a
+ * separator: "DJM-900NXS2", "DJM900NXS2" and "djm-900nxs2" all have to reach one token,
+ * and a rule that keeps the dash cannot reach all three. Written out rather than using
+ * tolower(), so it does not depend on the locale of the unit's libc. */
+static void normalize_into(const char *s, char *out, size_t outsz)
+{
+     size_t o = 0;
+
+     if (!s)
+          s = "";
+     for (; *s && o + 1 < outsz; s++) {
+          unsigned char c = (unsigned char)*s;
+
+          if (c >= 'A' && c <= 'Z')
+               c = (unsigned char)(c - 'A' + 'a');
+          if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+               out[o++] = (char)c;
+     }
+     out[o] = '\0';
+}
+
+int controller_is_mixer(const struct controller *c)
+{
+     return c != NULL && c->mixer != 0;
+}
+
+const struct controller *controllers_mixer_by_usb(const char *usb)
+{
+     unsigned i;
+
+     if (!usb || !usb[0])
+          return NULL;
+     for (i = 0; i < controllers_count(); i++)
+          /* A row that does not record its id is not reachable by one -- NULL never
+           * matches -- and `mixer` is what keeps a surface out of this lookup. */
+          if (table[i].mixer && table[i].usb && strcmp(table[i].usb, usb) == 0)
+               return &table[i];
+     return NULL;
+}
+
+const struct controller *controllers_mixer_by_product(const char *text)
+{
+     char hay[128];
+     unsigned i;
+
+     if (!text || !text[0])
+          return NULL;
+     normalize_into(text, hay, sizeof hay);
+     if (!hay[0])
+          return NULL;
+     for (i = 0; i < controllers_count(); i++) {
+          char needle[128];
+
+          if (!table[i].mixer || !table[i].product || !table[i].product[0])
+               continue;
+          normalize_into(table[i].product, needle, sizeof needle);
+          /* Both halves of the guard above are load-bearing, the rule
+           * controllers_by_hint states: an empty needle matches every haystack. */
+          if (needle[0] && strstr(hay, needle) != NULL)
+               return &table[i];
+     }
+     return NULL;
 }
 
 int controller_keepalive_due(const struct controller *c,

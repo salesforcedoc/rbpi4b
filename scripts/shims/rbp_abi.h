@@ -856,6 +856,27 @@ static const signed char bfx_type_to_pos[15] = {
 #define ADDR_MIXER_ROUTE_PLAYER1 0x01149f54UL   /* *word = MIXER_ROUTE_INPUT1 */
 #define MIXER_ROUTE_INPUT1       0x01149f10UL
 
+/* And one hop further on is that input's AUDIO: the word at source_object+4 is
+ * the address of the input's Float2 block for the block in flight. This is what
+ * djengine::MixerRouteMngr::getPlayerDataPointer(EnMixerInput) @0x85898 returns,
+ * and its whole body is these two loads --
+ *
+ *   r3 = 0x01149f08 + input*4;  r0 = *(u32 *)(r3 + 0x48);  return r0 ? *(u32 *)(r0+4) : 0;
+ *
+ * -- so the routing words above and this pointer are fields of one per-input
+ * object (0x01149f08 + 0x48 IS ADDR_MIXER_ROUTE_PLAYER0). Two loads is why
+ * audioshim reads it rather than calling in: its fill_deck_taps() records the
+ * measurement that the address is fixed and the buffer written in place each
+ * block, which is what makes the deck taps readable at flush time with no hook,
+ * no patch and no added latency.
+ *
+ * The data is rbp's, pre-strip: mixerengine::MixerChannel::update @0x9e890
+ * fetches this pointer and then applies TRIM -> EQ -> isolator -> fader -> FX to
+ * it, so this is the deck before any of that. Inputs 0 and 1 are the two decks
+ * (2 preview, 3 mic, 4 aux, 5/6 the USB/PC pair -- read off the live objects'
+ * vtables on .239 2026-10-10). */
+#define MIXER_ROUTE_PTR_OFF     4
+
 
 /* ---- meter hook: ui::Mixer::MonoLvMeter::getLedValue(unsigned char) -----
  * rbp computes every meter's LED bitmask in this one function, and

@@ -991,3 +991,96 @@ speakers, so `g_speaker_gain`/`g_speaker_on` have no consumer here.
 * `/tmp/audioshim.log` records the device candidates tried, the result of each,
   the negotiated parameters and the stream→pair map. It is the first place to
   look when there is no sound.
+
+## External mixer mode: sending each deck raw
+
+`RB_MIXER_MODE=external` hands the mixing to whatever is on the other end of USB
+and takes rbp's mixer out of the path. Each deck goes out **on its own pair**
+(`RB_AUDIO_MAP`'s `deck1`/`deck2`, default **2,3** and **4,5**), and **rbp's mix
+is not sent at all** — sending both would play every deck twice.
+
+| | `internal` (default) | `external` |
+|---|---|---|
+| what the card gets | rbp's mix, post Main Vol, on `master` | the two decks, raw, on `deck1`/`deck2` |
+| cue/booth pairs | folded from rbp's own streams | not sent |
+| rbp's trim, EQ, isolator, fader, crossfader | in the path | **out of the path** |
+| rbp's Sound Color FX and Beat FX | in the path | **not on the deck feeds** (see below) |
+| HDMI mirror | rbp's mix | unchanged — still rbp's mix |
+
+**The tap is the deck before its channel strip**, which is the only place that
+makes "external" mean what it says. rbp's own `mixerengine::MixerChannel::update`
+(`0x9e890`) fetches the deck's audio with
+`djengine::MixerRouteMngr::getPlayerDataPointer(EnMixerInput)` (`0x85898`) and
+*then* applies TRIM → EQ → isolator → fader. That function's whole body is two
+loads:
+
+```
+r3 = 0x01149f08 + input*4;   r0 = *(u32 *)(r3 + 0x48);   return r0 ? *(u32 *)(r0+4) : 0;
+```
+
+so the shim reads the same two words rather than calling in. **There is no hook
+and no patched code** — no trampoline, no `mprotect`, no prologue to match — and
+the address is re-read every flush instead of cached, so a rebuilt engine or a
+moved buffer cannot be missed. Inputs 0 and 1 are the two decks; 2 is preview, 3
+mic, 4 aux, and 5/6 the USB/PC pair (read off the live objects' vtables).
+
+**Reading it at flush time is safe, and that is a measurement.** The buffer is a
+fixed address written in place each block: measured on `.239` (2026-10-10) deck 1's
+pointer held `0xc8b28ea8` across five seconds while its contents moved on every
+sample, and deck 2's held `0xc8b474d8`. So the deck taps ride the **same
+`snd_pcm_writei`** as the master always did — same block, same instant, no queue
+and no second thread — which is what makes the latency identical to internal
+mode's rather than merely small. The length needs no bound either: the master
+block being written *is* that engine block, so the per-input buffers are at least
+that long, exactly as the master's own source is.
+
+**It applies only while an external digital mixer is on the USB bus.** That is the whole
+point of the mode — the other device's channel strips — so with none of them plugged in the
+decks would go out on pairs nothing is listening to, and the mix (which is what a
+controller's own output carries) would have been dropped. The recognised devices are the
+`mixer` rows of `scripts/shims/controllers.c`: **euphonia** (id and product string measured on
+`.239`), **DJM-V10**, **DJM-A9** and **DJM-900NXS2** (ids from the kernel's own
+`sound/usb/quirks-table.h`), **DJM-V5** and **DJM-900NXS** (no id recorded anywhere this tree
+could check, so they are reached by model name alone — a guessed id is the drift that table
+exists to remove).
+
+The question is asked of **sysfs**, once, by `scripts/shims/usb_devices.c` — the same single
+walk behind `controllers_cli detect`, so the shim and the diagnostic cannot answer
+differently. Matching is by USB id first and by model name second, both sides normalised
+(lowercased, punctuation dropped) so that `DJM-900NXS2`, `DJM900NXS2` and `djm-900nxs2` all
+reach one token. Ask it by hand:
+
+```
+controllers_cli mixer        # 'id name', or 'none' with exit 1
+controllers_cli mixer /tmp   # the same question about a path that is not the bus
+controllers_cli detect       # every recognised device, mixers included
+```
+
+When the bus has no recognised mixer and `RB_MIXER_MODE` still says `external`, the shim
+**says so and stays internal** rather than doing nothing quietly, and the config page hides
+the setting instead of offering one that cannot apply — except to say the saved value is
+inert, which is the one case where hiding it would leave a setting doing nothing with nothing
+on the page to explain why.
+
+Two consequences worth knowing before choosing the mode:
+
+* **The card must be wide enough.** The pairs are hardware channel indices, so
+  external mode wants **6 channels** (2 + 2 + 2). On a card opened narrower than a
+  pair's indices those decks are skipped and `/tmp/audioshim.log` says so once
+  rather than writing past the frame.
+* **rbp's FX cannot ride the deck feeds.** Beat FX and Sound Color FX are applied
+  at the master, after the channel sum — and the master is exactly what external
+  mode does not send. A deck that needs one of rbp's effects wants `internal`.
+
+The shim's constructor logs the mode and the pairs it chose, so
+`/tmp/audioshim.log` distinguishes the two modes without inference:
+
+```
+audioshim: MIXER_MODE=external -- the deck taps go out on 2,3 and 4,5 and rbp's own mix is NOT sent. ...
+```
+
+`RB_MIXER_MODE` is read **once**, in the constructor, like every other value in
+this file: it is not a live switch, and changing it takes a player restart.
+`start-rb.sh` passes it through as `MIXER_MODE` (`SHIM_VARS`), so a value that is
+missing there reaches the shim as empty — which is internal mode, the shipped
+behaviour, and also what a hand-run shim with no environment at all gets.
