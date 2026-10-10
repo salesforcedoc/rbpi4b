@@ -124,9 +124,13 @@ def make_fake(root, frames=40, pid=4242, depth=(0x03, 0x40), live="on"):
 
     with open(os.path.join(proc, str(pid), "cmdline"), "wb") as f:
         f.write(b"/lib/ld-linux.so.3\x00/root/pdj/rbp\x00-a\x00")
-    # field 3 onward after `(comm)`; utime and stime are fields 14 and 15.
+    # AFTER the `(comm)`, so index 0 here is file field 4 (state is written above): utime
+    # (field 14) is index 10, stime (15) index 11, and starttime (22) index 18 -- which is
+    # what rbp's own uptime is derived from.
+    st = [0] * 20
+    st[10], st[11], st[18] = 100, 200, 1000
     with open(os.path.join(proc, str(pid), "stat"), "wb") as f:
-        f.write(b"%d (rbp) S " % pid + b"0 " * 10 + b"100 200 " + b"0 " * 8)
+        f.write(b"%d (rbp) S " % pid + b" ".join(str(v).encode() for v in st))
     with open(os.path.join(proc, "4001", "cmdline"), "wb") as f:
         f.write(b"/lib/ld-linux.so.3\x00/usr/bin/edb_streamd\x00")
     with open(os.path.join(proc, "4001", "stat"), "wb") as f:
@@ -190,7 +194,7 @@ def make_fake(root, frames=40, pid=4242, depth=(0x03, 0x40), live="on"):
         RB_CHROOT=os.path.join(deploy, "rbx3-run"),
         RB_LOCAL_CONF=os.path.join(deploy, "rb.local.conf"),
         RB_HOSTNAME_FILE=os.path.join(root, "hostname"),
-        RB_CONF_REFRESH_S="0",
+        RB_CONF_REFRESH_S="5",
         PATH=shim + ":" + os.environ.get("PATH", ""),
         FAKE_LOG=os.path.join(root, "calls.log"),
         FAKE_UNITS=units,
@@ -340,7 +344,24 @@ def test_page(env, port):
     check("yes" in body, "the depth pair is reported as agreeing")
     check("RB_FB_LIE_BPP" in body, "the settings are listed")
     check("7" in body, "the rb.local.conf override is resolved (RB_VNC_FPS=7)")
-    check("read-only" in body, "the page says it is read-only")
+    check("shown read-only" in body,
+          "the settings are shown read-only (the form is the next slice)")
+
+    print("\n== the refresh re-reads the DATA, it does not reload the page ==")
+    check("http-equiv=refresh" not in body, "there is no meta refresh anywhere")
+    check("/data" in body and "<script>" in body,
+          "the page's own script fetches /data instead")
+    check("id=data1" in body and "id=data2" in body, "and swaps both live halves by id")
+    check("running for" in body and "20m 24s" in body,
+          "and the player section says how long rbp has been RUNNING (starttime, not the "
+          "box's uptime)")
+
+    print("\n== the sections are navigable from the left ==")
+    anchors = re.findall(r'href="#([a-z0-9]+)"', body)
+    check(len(anchors) >= 6, "the nav links the sections (%s)" % ", ".join(anchors))
+    missing = [a for a in anchors if ("id=%s" % a) not in body]
+    check(not missing, "and every link has a target on the page (%s)" % (missing or "none"))
+    check("<nav id=nav>" in body, "the nav is a real element, before the content")
 
     print("\n== the frame counter decides the state ==")
     frames0 = "running and painting" in body or "too soon" in body
@@ -420,6 +441,41 @@ def test_bind_failure(env, port):
         check("cannot bind" in (out or ""), "and says why")
     finally:
         s.close()
+
+
+def test_data_fragment(env, port):
+    """The poll must return DATA, not a document. If it returned the whole page the browser
+    would be swapping in a second <html> -- and, worse, a second copy of the sign-in form,
+    which is the very thing a reload was eating."""
+    print("\n== the fragment the poll fetches ==")
+    s, frag = get(port, "/data")
+    check(s == 200, "GET /data answers")
+    check("<html" not in frag and "<script" not in frag,
+          "and is a fragment, not a document: no <html>, no script")
+    check("rbp is" in frag, "it carries the player's own state words")
+    check("frames drawn" in frag and "running for" in frag,
+          "the frame counter and how long rbp has been running")
+    check("action=/login" not in frag and "Sign in" not in frag,
+          "but NOT the sign-in form -- re-fetching that is what ate a half-typed password")
+    check("action=/vnc" not in frag, "and not the buttons either")
+    check('id=data1' in frag and 'id=data2' in frag,
+          "both live halves, under the ids the script swaps")
+    check("id=nav" not in frag and 'href="#' not in frag,
+          "and NO nav in it: the poll must never inject a second one")
+    check("id=player" in frag and "id=settings" in frag,
+          "while the section ids it does carry keep the left-hand links working after a "
+          "swap")
+
+    print("\n== and fetching it changes nothing ==")
+    conf = os.path.join(env["RB_DEPLOY_ROOT"], "rb.local.conf")
+    before = open(conf).read()
+    for _ in range(3):
+        get(port, "/data")
+    check(open(conf).read() == before, "the config is untouched by polling")
+    # `--now` is what separates a mutation from a read: the fragment does call
+    # `systemctl is-active`/`is-enabled` on every unit, which is the point of it.
+    log = open(env["FAKE_LOG"]).read() if os.path.exists(env["FAKE_LOG"]) else ""
+    check("--now" not in log, "and nothing was enabled or disabled")
 
 
 def test_write_path(env, port):
@@ -544,6 +600,37 @@ def test_no_password(root, port):
         p.wait(timeout=5)
 
 
+def test_no_auth(root, port):
+    """`RB_CONF_AUTH=0`: writes with no password -- and SAID LOUDLY, on the page and in
+    doctor.sh, rather than left as a lock nobody notices is missing."""
+    print("\n== a unit that asks for no password ==")
+    env = make_fake(root)
+    with open(env["RB_LOCAL_CONF"], "a") as f:
+        f.write("RB_CONF_AUTH=0\n")
+    p = start_daemon(env, port)
+    try:
+        body = wait_up(port)
+        check(body is not None, "the page answers")
+        if body:
+            check("unprotected" in body, "and says the writes are unprotected")
+            check("Nothing to sign in to" in body, "and offers nothing to sign in to")
+            check("action=/login" not in body, "no login form at all")
+            check("Enable the viewer" in body, "with the buttons rendered")
+        s, _b, _h = post(port, "/vnc", {"action": "on"})
+        check(s == 303, "a write with no session and no CSRF value succeeds")
+        conf = open(env["RB_LOCAL_CONF"]).read()
+        check("RB_VNC=1" in conf, "and it wrote the setting")
+        log = open(env["FAKE_LOG"]).read() if os.path.exists(env["FAKE_LOG"]) else ""
+        check("systemctl enable --now rblive4-vnc" in log, "and it enabled the viewer")
+        # The origin check STAYS ON: it costs the operator nothing and it stops another
+        # website driving this unit through their browser.
+        s, _b, _h = post(port, "/vnc", {"action": "off"}, origin="http://evil.example")
+        check(s == 403, "but a cross-origin POST is still refused")
+    finally:
+        p.terminate()
+        p.wait(timeout=5)
+
+
 def main():
     m = load_module()
 
@@ -556,10 +643,12 @@ def main():
         env = make_fake(root)
         daemon = start_daemon(env, port)
         test_page(env, port)
+        test_data_fragment(env, port)
         test_write_path(env, port)
 
         test_states(tempfile.mkdtemp(prefix="confscreen-states."), free_port())
         test_no_password(tempfile.mkdtemp(prefix="confscreen-nopass."), free_port())
+        test_no_auth(tempfile.mkdtemp(prefix="confscreen-noauth."), free_port())
         # A port of its own: the daemon above is still holding the one it was given.
         test_bind_failure(env, free_port())
     finally:

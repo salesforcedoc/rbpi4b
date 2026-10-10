@@ -679,6 +679,16 @@ if [ "${RB_VNC:-0}" = "1" ] || [ -f /etc/systemd/system/rblive4-vnc.service ]; t
 		fi
 	fi
 
+	# The page can be told to ask for nothing. That is a choice, not a fault, so it is a
+	# warning -- but it is the line that says so, and a page that silently has no lock is
+	# one nobody ever re-checks.
+	if [ "${RB_CONF_AUTH:-1}" = "0" ]; then
+		warn "RB_CONF_AUTH=0 -- the configuration page asks for NO password"
+		note "anyone who can reach it on this LAN can change a setting, enable or stop the"
+		note "viewer, and start sharing the screen. Set RB_CONF_AUTH=1 in rb.local.conf to"
+		note "put the password back in front of it."
+	fi
+
 	# The page's editor, which install.sh copies beside it. confscreen.py refuses every
 	# write when it is missing -- fail closed, and the page says so -- but that is a page
 	# you only see in a browser, and this is the check that would have caught the deploy

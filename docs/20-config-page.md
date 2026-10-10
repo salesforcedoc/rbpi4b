@@ -67,7 +67,16 @@ not offer to change either.
 | `RB_CONF` | `1` | whether `install.sh` enables `rblive4-conf.service` |
 | `RB_CONF_HTTP_PORT` | `5904` | the page's port |
 | `RB_CONF_BIND` | `0.0.0.0` | what it binds |
-| `RB_CONF_REFRESH_S` | `5` | the page's self-reload interval, seconds; `0` disables |
+| `RB_CONF_REFRESH_S` | `5` | how often the page re-reads its data, seconds; `0` leaves the poll out |
+
+**The refresh re-reads the data, it does not reload the page.** A `<meta http-equiv=refresh>` was the
+first version, and it resets the scroll position and discards anything half-typed into the sign-in box
+every few seconds — to update some numbers. So the page carries one small inline script that fetches
+`/data` (the live halves, drawn by the *same* function as the first load, so they cannot drift) and swaps
+its contents into `#data1`/`#data2`. The interactive part — the sign-in box and the buttons — is
+deliberately outside those regions, which is the point. The page is complete without the script: the first
+load has every figure in the HTML, so a browser that blocks it shows a correct page that simply does not
+update itself. Still no CDN, no framework, no build step.
 
 **The credential is `RB_PASSWORD`, and it is one password for two surfaces** — the page's
 writes, and the viewer's VNC clients. It defaults to `password` so the feature works out of

@@ -89,8 +89,9 @@ _LOGIN_FAILS = {}          # client address -> monotonic times of recent failure
 # written once per frame with no message, so a line count IS a frame count.
 DSHW = "DS_HW_Glib3_DFB.c <1106>"
 
-# The status page's live-update mechanism, and it is not JavaScript: the house rule for
-# this page family is that a LAN page needing a CDN fails the one time it is needed.
+# How often the page re-reads its DATA, in seconds. 0 leaves the poll out entirely. This is
+# a fetch of /data and a swap of two divs, not a reload -- see POLL_JS for why that
+# distinction earned a script.
 REFRESH_S = int(os.environ.get("RB_CONF_REFRESH_S", "5"))
 
 # The units worth showing. Names are literals, so nothing here is ever interpolated into
@@ -107,6 +108,7 @@ CONF_KEYS = (
     "RB_VNC_LIVE",
     "RB_VNC_INPUT",
     "RB_PASSWORD",
+    "RB_CONF_AUTH",
     "RB_BOOTSCREEN",
     "RB_PREWARM",
     "RB_POINT_KIND",
@@ -203,6 +205,41 @@ def cpu_ticks(pid):
         return int(fields[11]) + int(fields[12])
     except (ValueError, IndexError):
         return None
+
+
+def rbp_uptime(pid):
+    """How long the player has been RUNNING, which is not the unit's uptime and is the more
+    useful of the two: a player that restarted an hour ago is a different machine from one
+    that has been up since the power cut.
+
+    It is field 22 (`starttime`) of /proc/<pid>/stat -- clock ticks since boot, so the
+    conversion needs the tick rate (SC_CLK_TCK, 100 here) subtracted from the system uptime.
+    Reading the field without the tick rate is the way this is usually got wrong."""
+    if pid is None:
+        return None
+    try:
+        with open(os.path.join(PROC, str(pid), "stat"), "r", errors="replace") as f:
+            data = f.read()
+        start_ticks = int(data[data.rindex(")") + 2:].split()[19])
+        up = float(_text(os.path.join(PROC, "uptime")).split()[0])
+        hz = float(os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        return None
+    secs = up - (start_ticks / hz)
+    return secs if secs >= 0 else None
+
+
+def human_duration(secs):
+    """Seconds as `2h 14m`, or `13m 04s` under an hour -- and `14s` under a minute, because
+    a player that has just come back is the case where the exact number matters."""
+    if secs is None:
+        return "&mdash;"
+    s = int(secs)
+    if s >= 3600:
+        return "%dh %02dm" % (s // 3600, (s % 3600) // 60)
+    if s >= 60:
+        return "%dm %02ds" % (s // 60, s % 60)
+    return "%ds" % s
 
 
 def frame_count():
@@ -379,6 +416,14 @@ def writes_available():
     return confedit is not None
 
 
+def auth_required():
+    """Whether a write needs the password. `RB_CONF_AUTH=0` turns it off, which is the
+    operator's call to make on their own LAN -- and it is read from the conf rather than
+    from this process's environment, so the file that decides it is the same file that says
+    everything else about this unit."""
+    return conf_values(("RB_CONF_AUTH",)).get("RB_CONF_AUTH", "1") != "0"
+
+
 def _run_rc(argv, timeout=25):
     """(rc, output) for a constant argv. Used where the EXIT STATUS is the answer -- an
     enable that failed must never be reported as an enable."""
@@ -512,6 +557,56 @@ button:hover { background: #262d38; }
 input[type=password] { font: inherit; padding: 3px 7px; border-radius: 4px;
          border: 1px solid #38414f; background: #0d0f14; color: #d8dee9; }
 footer { margin-top: 28px; color: #6b7480; font-size: 12px; }
+/* The sections are navigable from the left, and it is anchors and CSS rather than script:
+   it survives the data poll (the ids are inside the swapped regions and are re-created with
+   the same names), and it works with the script blocked, which is the rule here. */
+#layout { display: flex; gap: 26px; align-items: flex-start; }
+#nav { position: sticky; top: 14px; flex: 0 0 168px; display: flex; flex-direction: column;
+       border-right: 1px solid #232833; padding-right: 14px; }
+#nav b { color: #8b94a3; font-weight: normal; margin-bottom: 8px; }
+#nav a { color: #a9b4c2; text-decoration: none; padding: 3px 0; }
+#nav a:hover { color: #eceff4; }
+#main { min-width: 0; flex: 1 1 auto; }
+h2 { scroll-margin-top: 14px; }
+h2:target { color: #d8dee9; border-bottom-color: #4a5568; }
+@media (max-width: 720px) {
+  #layout { display: block; }
+  #nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 0 14px;
+         border-right: 0; border-bottom: 1px solid #232833; padding: 0 0 8px; margin-bottom: 10px; }
+  #nav b { width: 100%; }
+}
+"""
+
+# THE ONLY SCRIPT, and it re-reads the DATA rather than the page. A `<meta http-equiv=refresh>`
+# is one line of HTML and no script at all, and it was the first version of this page -- but it
+# reloads the whole document, which throws away the scroll position and anything half-typed
+# into the sign-in box, every few seconds, to update some numbers. So this fetches `/data` (the
+# live halves of the page, as HTML) and swaps their contents in place.
+#
+# It stays inside the rule this page family follows -- no CDN, no framework, no build step --
+# and the page is complete without it: the first load already carries every one of these
+# figures in the HTML, so a browser that blocks the script shows a correct page that simply
+# does not update itself. RB_CONF_REFRESH_S=0 leaves the script out entirely.
+POLL_JS = """
+<script>
+(function () {
+  var ms = %d * 1000;
+  if (!ms) { return; }
+  function tick() {
+    fetch('/data', {cache: 'no-store'}).then(function (r) { return r.text(); }).then(function (t) {
+      var box = document.createElement('div');
+      box.innerHTML = t;
+      ['data1', 'data2'].forEach(function (id) {
+        var fresh = box.querySelector('#' + id), here = document.getElementById(id);
+        if (fresh && here) { here.innerHTML = fresh.innerHTML; }
+      });
+    }).catch(function () {});
+  }
+  setInterval(tick, ms);
+  var flash = document.querySelector('.flash');
+  if (flash) { setTimeout(function () { flash.style.display = 'none'; }, 8000); }
+})();
+</script>
 """
 
 
@@ -531,29 +626,104 @@ def player_state(pid, frames, rate):
     return "ok", "rbp is running and painting"
 
 
-def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="", auth=None):
+def render_actions(a, auth):
+    """The interactive half: sign in, and the two buttons. Kept OUT of the live region on
+    purpose -- re-fetching this would throw away anything half-typed into the sign-in box,
+    which is the whole reason the page polls the data instead of reloading itself. Nothing
+    here changes on its own: signing in navigates, and the buttons navigate."""
+    a('<h2 id=actions>actions</h2>')
+    if not auth["writes"]:
+        a('<div class=note>The config editor is not installed beside this page, so nothing '
+          'here will write. Re-run install.sh.</div>')
+    elif not auth.get("required", True):
+        # Turned off on purpose by the operator, and said loudly rather than left implicit:
+        # a page that silently has no lock is one nobody re-checks.
+        a('<div class="note bad">Writes on this unit are <b>unprotected</b> '
+          '(<code>RB_CONF_AUTH=0</code>): anyone who can reach this page can change a '
+          'setting, enable or stop the viewer, and start sharing the screen. No password '
+          'is asked for, and the VNC client password is separate.</div>')
+    elif not auth["password_set"]:
+        a('<div class="note bad">No password is configured (<code>RB_PASSWORD</code> is '
+          'empty), so writes are REFUSED rather than allowed. Set one in <code>%s</code> '
+          'and restart this page.</div>' % esc(LOCAL_CONF))
+    if not auth["signed_in"]:
+        a('<div class=note>Reading is open on this LAN. Changing anything -- including '
+          'starting the viewer -- needs the password.</div>')
+        a('<form method=post action=/login>'
+          # No placeholder: the shipped default password is the word "password", and a
+          # form that spells it out advertises the credential to anyone who loads the
+          # page. doctor.sh tells the OWNER it is still the placeholder; the page does not
+          # need to tell a passer-by.
+          '<label>password <input type=password name=pw autocomplete=current-password>'
+          '</label> <button>Sign in</button></form>')
+    else:
+        csrf = '<input type=hidden name=csrf value="%s">' % esc(auth["csrf"])
+        if auth.get("required", True):
+            a('<div class=note>Signed in. '
+              '<form method=post action=/logout><button>Sign out</button></form></div>')
+        else:
+            a('<div class=note>Nothing to sign in to: this unit does not ask for a '
+              'password.</div>')
+        a("<table>")
+        a("<tr><td class=k>the viewer</td><td>"
+          '<form method=post action=/vnc>' + csrf +
+          '<button name=action value=on>Enable the viewer</button>'
+          '<button name=action value=off>Stop and disable it</button></form>'
+          '<div class=note>Enabling is two things: it starts the viewer now, and writes '
+          'RB_VNC=1 so it comes back after a power cut.</div></td></tr>')
+        a("<tr><td class=k>screen sharing</td><td>"
+          '<form method=post action=/share>' + csrf +
+          '<button name=action value=on>Start sharing</button>'
+          '<button name=action value=off>Stop sharing</button></form>'
+          '<div class=note>The live switch the viewer re-reads each turn. No restart, and '
+          'it works whether or not the viewer is running.</div></td></tr>')
+        a("</table>")
+
+
+def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="", auth=None,
+           data_only=False):
+    """The whole page, or -- with `data_only` -- just the two halves the poll re-reads.
+
+    They are one function on purpose. The fragment MUST be drawn by the same code as the
+    first load, or the page and its updates drift apart, and the drift shows up as a figure
+    that changes when you reload and not otherwise. What separates them is only the shell:
+    the head, the flash, the actions and the footer, none of which the poll touches."""
     auth = auth or {"signed_in": False, "csrf": "", "flash": "", "writes": False,
                     "password_set": False}
     h = []
     a = h.append
-    a("<!doctype html><html lang=en><head><meta charset=utf-8>")
-    a('<meta name=viewport content="width=device-width,initial-scale=1">')
-    if REFRESH_S > 0:
-        a('<meta http-equiv=refresh content="%d">' % REFRESH_S)
-    a("<title>%s - rbp status</title><style>%s</style></head><body>" % (esc(hostname()), CSS))
-    a("<h1>%s &mdash; rbp status</h1>" % esc(hostname()))
-    a('<div class=sub>page %d &middot; refreshed every %ds &middot; %s</div>'
-      % (PORT, REFRESH_S, esc(time.strftime("%H:%M:%S"))))
-    if auth["flash"]:
-        a('<div class="flash%s">%s</div>'
-          % (" bad" if auth["flash"].startswith("FAILED") else "", esc(auth["flash"])))
+    if not data_only:
+        a("<!doctype html><html lang=en><head><meta charset=utf-8>")
+        a('<meta name=viewport content="width=device-width,initial-scale=1">')
+        a("<title>%s - rbp status</title><style>%s</style></head><body>"
+          % (esc(hostname()), CSS))
+        a("<h1>%s &mdash; rbp status</h1>" % esc(hostname()))
+        a('<div class=sub>page %d &middot; %s &middot; the data re-reads every %ds</div>'
+          % (PORT, esc(time.strftime("%H:%M:%S")), REFRESH_S))
+        if auth["flash"]:
+            a('<div class="flash%s">%s</div>'
+              % (" bad" if auth["flash"].startswith("FAILED") else "",
+                 esc(auth["flash"])))
+        # The sections, as items down the left. In PAGE order, which is the order they are
+        # read in -- the actions sit between the viewer and the unit because the buttons
+        # belong next to what they act on.
+        a('<div id=layout><nav id=nav><b>%s</b>' % esc(hostname()))
+        for anchor, label in (("player", "player"), ("services", "services"),
+                              ("launcher", "launcher"), ("viewer", "viewer"),
+                              ("actions", "actions"), ("unit", "unit"),
+                              ("settings", "settings")):
+            a('<a href="#%s">%s</a>' % (anchor, esc(label)))
+        a("</nav><main id=main>")
+
+    a('<div id=data1>')
 
     # --- the player, first, because it is the thing that is either working or not ---
     cls, words = player_state(pid, frames, rate)
-    a("<h2>player</h2>")
+    a('<h2 id=player>player</h2>')
     a('<div class="state %s">%s</div>' % (cls, esc(words)))
     a("<table>")
     a("<tr><td class=k>pid</td><td>%s</td></tr>" % esc(pid if pid is not None else "&mdash;"))
+    a("<tr><td class=k>running for</td><td>%s</td></tr>" % human_duration(rbp_uptime(pid)))
     if frames is not None:
         a("<tr><td class=k>frames drawn (DS_HW lines)</td><td>%d</td></tr>" % frames)
     if rate is not None:
@@ -565,7 +735,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         a("<pre>%s</pre>" % esc("\n".join(lt)))
 
     # --- services ---
-    a("<h2>services</h2><table><tr><th>unit</th><th>active</th><th>enabled</th></tr>")
+    a('<h2 id=services>services</h2><table><tr><th>unit</th><th>active</th><th>enabled</th></tr>')
     for u in UNITS:
         act, en = services.get(u, ("unknown", "unknown"))
         c = "ok" if act == "active" else ("dim" if act in ("inactive", "unknown") else "bad")
@@ -576,13 +746,13 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     # --- the launcher's own account of the last start ---
     stage = _text(BOOT_STAGE).strip()
     blog = tail(BOOT_LOG, 14)
-    a("<h2>launcher</h2>")
+    a('<h2 id=launcher>launcher</h2>')
     if stage:
         a('<div class=note>last boot-screen stage: %s</div>' % esc(stage))
     a("<pre>%s</pre>" % esc("\n".join(blog) if blog else "(no %s)" % BOOT_LOG))
 
     # --- the viewer, and its switches ---
-    a("<h2>viewer</h2><table>")
+    a('<h2 id=viewer>viewer</h2><table>')
     a("<tr><td class=k>sharing (vnc.live)</td><td>%s</td></tr>" % esc(switches.get("live")))
     a("<tr><td class=k>encoding (vnc.mode)</td><td>%s</td></tr>" % esc(switches.get("mode")))
     a("<tr><td class=k>pointer injection (vnc.input)</td><td>%s</td></tr>"
@@ -605,46 +775,15 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         a('<div class=shot><img src="//%s:%s/preview.mjpg" alt="screen preview"></div>'
           % (esc(host_only), esc(pg)))
 
-    # --- the unit ---
-    # --- what can be done, which is where the password starts to matter ---
-    a("<h2>actions</h2>")
-    if not auth["writes"]:
-        a('<div class=note>The config editor is not installed beside this page, so nothing '
-          'here will write. Re-run install.sh.</div>')
-    elif not auth["password_set"]:
-        a('<div class="note bad">No password is configured (<code>RB_PASSWORD</code> is '
-          'empty), so writes are REFUSED rather than allowed. Set one in <code>%s</code> '
-          'and restart this page.</div>' % esc(LOCAL_CONF))
-    if not auth["signed_in"]:
-        a('<div class=note>Reading is open on this LAN. Changing anything -- including '
-          'starting the viewer -- needs the password.</div>')
-        a('<form method=post action=/login>'
-          # No placeholder: the shipped default password is the word "password", and a
-          # form that spells it out advertises the credential to anyone who loads the
-          # page. doctor.sh tells the OWNER it is still the placeholder; the page does not
-          # need to tell a passer-by.
-          '<label>password <input type=password name=pw autocomplete=current-password>'
-          '</label> <button>Sign in</button></form>')
-    else:
-        csrf = '<input type=hidden name=csrf value="%s">' % esc(auth["csrf"])
-        a('<div class=note>Signed in. '
-          '<form method=post action=/logout><button>Sign out</button></form></div>')
-        a("<table>")
-        a("<tr><td class=k>the viewer</td><td>"
-          '<form method=post action=/vnc>' + csrf +
-          '<button name=action value=on>Enable the viewer</button>'
-          '<button name=action value=off>Stop and disable it</button></form>'
-          '<div class=note>Enabling is two things: it starts the viewer now, and writes '
-          'RB_VNC=1 so it comes back after a power cut.</div></td></tr>')
-        a("<tr><td class=k>screen sharing</td><td>"
-          '<form method=post action=/share>' + csrf +
-          '<button name=action value=on>Start sharing</button>'
-          '<button name=action value=off>Stop sharing</button></form>'
-          '<div class=note>The live switch the viewer re-reads each turn. No restart, and '
-          'it works whether or not the viewer is running.</div></td></tr>')
-        a("</table>")
+    a("</div>")                      # end of the first live half
 
-    a("<h2>unit</h2><table>")
+    if not data_only:
+        render_actions(a, auth)
+
+    a('<div id=data2>')
+
+    # --- the unit ---
+    a('<h2 id=unit>unit</h2><table>')
     if "uptime" in facts:
         a("<tr><td class=k>uptime</td><td>%.0f s</td></tr>" % facts["uptime"])
     if "load" in facts:
@@ -672,7 +811,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a("</table>")
 
     # --- settings, as resolved -- the surface the next slice makes editable ---
-    a("<h2>settings <span class=dim>(shown read-only; the form is the next slice)"
+    a('<h2 id=settings>settings <span class=dim>(shown read-only; the form is the next slice)'
       "</span></h2><table>")
     for k in CONF_KEYS:
         v = conf.get(k, "")
@@ -691,12 +830,16 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     a("</table>")
     a('<div class=note>The depth pair is shown and never editable: it is half of the '
       'player build, and a value that disagrees is rbp SIGSEGV to a black screen.</div>')
+    a("</div>")                      # end of the second live half
 
-    a("<footer>%s See <code>docs/20-config-page.md</code>.</footer>"
-      % ("reading is open; writes need the password."
-         if auth["writes"] else
-         "read-only: the config editor is not installed beside this page."))
-    a("</body></html>")
+    if not data_only:
+        a("</main></div>")           # close #main and #layout
+        a("<footer>%s See <code>docs/20-config-page.md</code>.</footer>"
+          % ("reading is open; writes need the password."
+             if auth["writes"] else
+             "read-only: the config editor is not installed beside this page."))
+        a(POLL_JS % REFRESH_S)
+        a("</body></html>")
     return "".join(h)
 
 
@@ -785,6 +928,10 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html", "/status"):
             self._send(200, self.page())
+        elif path == "/data":
+            # The live halves, for the page's own poll. Never a full document: this is what
+            # the browser swaps into #data1/#data2 so a refresh does not reload the page.
+            self._send(200, self.data())
         elif path == "/healthz":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
         elif path in ("/login", "/logout", "/vnc", "/share"):
@@ -817,6 +964,11 @@ class Handler(BaseHTTPRequestHandler):
                                       'Try <a href="/">/</a> instead.'))
 
     def _login(self, form):
+        if not auth_required():
+            # Nothing to sign in to. Say so rather than 401, which would look like a wrong
+            # password and send the operator hunting for one.
+            self._redirect("/")
+            return
         pw = password()
         addr = self.client_address[0]
         if not pw:
@@ -845,46 +997,66 @@ class Handler(BaseHTTPRequestHandler):
                                  % (COOKIE, sid, SESSION_TTL_S))
 
     def _action(self, path, form):
+        if auth_required():
+            s = self._session()
+            if s is None:
+                self._send(401, self._msg("sign in first",
+                            "Reading is open on this page; changing anything needs the "
+                            "password."))
+                return
+            if not secrets.compare_digest(form.get("csrf", "").encode(),
+                                          s["csrf"].encode()):
+                self._send(403, self._msg("stale form",
+                            "That form did not come from this session. Reload the page and "
+                            "try again."))
+                return
         s = self._session()
-        if s is None:
-            self._send(401, self._msg("sign in first",
-                        "Reading is open on this page; changing anything needs the "
-                        "password."))
-            return
-        if not secrets.compare_digest(form.get("csrf", "").encode(), s["csrf"].encode()):
-            self._send(403, self._msg("stale form",
-                        "That form did not come from this session. Reload the page and try "
-                        "again."))
-            return
         action = form.get("action", "")
         if action not in ("on", "off"):
             self._send(400, self._msg("bad request", "action must be on or off."))
             return
         on = action == "on"
         ok, msg = vnc_set(on) if path == "/vnc" else share_set(on)
-        s["flash"] = ("the viewer: " if path == "/vnc" else "sharing: ") + \
-                     ("" if ok else "FAILED: ") + msg
+        # There may be no session at all: with RB_CONF_AUTH=0 there is nothing to sign in
+        # to, so the flash has nowhere to live and the redirect simply shows the new state.
+        if s is not None:
+            s["flash"] = ("the viewer: " if path == "/vnc" else "sharing: ") + \
+                         ("" if ok else "FAILED: ") + msg
         print("confscreen: %s %s -> %s%s" % (path, action, "" if ok else "FAILED: ", msg),
               flush=True)
         self._redirect("/")
 
+    def _context(self):
+        """Everything the page and its fragment both need, gathered once. The frame RATE is
+        computed from the interval between calls, so the poll IS the frame sampler -- which
+        is why this is gathered per request rather than cached."""
+        return (conf_values(), rbp_pid(), frames_since_last(), unit_facts(),
+                {u: unit_state(u) for u in UNITS},
+                {n: switch_state(n) for n in ("live", "mode", "input")},
+                player_depth(), self.headers.get("Host", ""))
+
     def page(self):
-        conf = conf_values()
         s = self._session()
-        auth = {"signed_in": s is not None,
+        conf, pid, (frames, rate), facts, services, switches, depth, host = self._context()
+        required = conf.get("RB_CONF_AUTH", "1") != "0"
+        auth = {"signed_in": (not required) or s is not None,
+                "required": required,
                 "csrf": (s or {}).get("csrf", ""),
                 "flash": (s or {}).get("flash", ""),
                 "writes": writes_available(),
-                # From the values the page already resolved, so a poll costs no extra fork.
+                # From the values already gathered above, so a poll costs no extra fork.
                 "password_set": bool(conf.get("RB_PASSWORD", ""))}
         if s:
             s["flash"] = ""       # a flash is shown once, on the page after the write
-        pid = rbp_pid()
-        frames, rate = frames_since_last()
-        services = {u: unit_state(u) for u in UNITS}
-        switches = {n: switch_state(n) for n in ("live", "mode", "input")}
-        return render(conf, pid, frames, rate, unit_facts(), services, switches,
-                      player_depth(), self.headers.get("Host", ""), auth)
+        return render(conf, pid, frames, rate, facts, services, switches, depth, host, auth)
+
+    def data(self):
+        """Just the live halves. NO session work here on purpose: this is fetched every few
+        seconds by the page's own script, so it must not consume a flash, clear a session or
+        otherwise change any state -- it only reads."""
+        conf, pid, (frames, rate), facts, services, switches, depth, host = self._context()
+        return render(conf, pid, frames, rate, facts, services, switches, depth, host,
+                      data_only=True)
 
 
 def main():
