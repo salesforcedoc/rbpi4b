@@ -271,6 +271,23 @@ def test_password_wiring(m):
           "while RB_VNC_PASSWORD is not writable from the page -- it is the alias, not the knob")
 
 
+def test_topics(m):
+    """The page's two settings groups, and the rule that makes them -- which is what keeps a
+    form from offering a field the writer would refuse."""
+    print("\n== the two settings groups ==")
+    vnc = m.writable_keys("vnc")
+    rbp = m.writable_keys("rbp")
+    check("RB_VNC_FPS" in vnc and "RB_PASSWORD" in vnc,
+          "vnc settings holds the viewer's knobs and the shared credential")
+    check(not [k for k in vnc if not (k == "RB_PASSWORD" or k.startswith("RB_VNC"))],
+          "and nothing else (%s)" % ", ".join(vnc))
+    check("RB_PREWARM" in rbp and "RB_POINT_KIND" in rbp, "rbp settings holds the player's")
+    check(not set(vnc) & set(rbp), "and the two never overlap")
+    check("RB_FB_LIE_BPP" not in vnc + rbp,
+          "no read-only key is offered by either -- a field the writer would refuse")
+    check(all(m.topic_of(k) in ("vnc", "rbp") for k in m.BY_KEY), "every key has a group")
+
+
 def main():
     m = load()
     test_schema(m)
@@ -278,6 +295,7 @@ def main():
     test_read(m)
     test_set(m)
     test_password_wiring(m)
+    test_topics(m)
     tmp = tempfile.mkdtemp(prefix="confedit-test.")
     try:
         test_write(tmp, m)

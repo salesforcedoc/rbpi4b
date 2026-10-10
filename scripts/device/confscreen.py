@@ -722,15 +722,162 @@ def player_state(pid, frames, rate):
     return "ok", "rbp is running and painting"
 
 
-def _conf_rows(a, conf, keys):
-    """The value rows for one settings group. A secret is never printed -- `(set)` or
-    `(empty)` is all the page says about it, whatever `RB_PASSWORD` currently is."""
-    for k in keys:
-        v = conf.get(k, "")
-        shown = "(empty)" if v == "" else v
-        if k in ("RB_PASSWORD", "RB_VNC_PASSWORD"):
-            shown = "(set)"
-        a("<tr><td class=k>%s</td><td>%s</td></tr>" % (esc(k), esc(shown)))
+# --- what has been saved but not yet applied ------------------------------------------
+#
+# A saved line takes effect when the process that READS it next starts, and that is the
+# operator's decision -- this page never restarts anything on a save, because a save that
+# blanks the screen would be a trap. So each unit that owes a restart gets a stamp beside it,
+# and the stamp is discharged by comparing it with the unit's own
+# ActiveEnterTimestampMonotonic: when the unit next starts that number moves, and the debt is
+# paid. Both are monotonic and on this boot, and the stamp lives in /run (tmpfs), so a reboot
+# clears both together and cannot leave a stale debt behind.
+
+
+def unit_for(restart):
+    """The unit that has to restart for a value to take effect, or None when nothing does."""
+    if restart == "player":
+        return PLAYER_UNIT
+    if restart == "viewer":
+        return VIEWER_UNIT
+    if isinstance(restart, str) and restart.startswith("service:"):
+        return restart.split(":", 1)[1]
+    return None
+
+
+def apply_note(restart):
+    """What applies a value, in the operator's words."""
+    if restart == "player":
+        return "restart the player to apply -- the button is under services"
+    if restart == "viewer":
+        return "restart the viewer to apply"
+    if isinstance(restart, str) and restart.startswith("service:"):
+        return "changed with the buttons under actions"
+    return ""
+
+
+def unit_stamp(unit):
+    v = _run([SYSTEMCTL, "show", "-p", "ActiveEnterTimestampMonotonic", "--value", unit])
+    return v.strip() or None
+
+
+def pending_path(unit):
+    return os.path.join(RUN_DIR, "conf.dirty." + unit)
+
+
+def mark_pending(restart):
+    unit = unit_for(restart)
+    if not unit:
+        return
+    stamp = unit_stamp(unit)
+    if stamp is None:
+        return
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        with open(pending_path(unit), "w") as f:
+            f.write(stamp + "\n")
+    except OSError:
+        pass
+
+
+def pending_unit(unit):
+    """True while a value saved for this unit has not been applied. Clears the stamp itself
+    when the unit turns out to have started since."""
+    try:
+        with open(pending_path(unit)) as f:
+            was = f.read().strip()
+    except OSError:
+        return False
+    now = unit_stamp(unit)
+    if now is None or now == was:
+        return True
+    try:
+        os.unlink(pending_path(unit))
+    except OSError:
+        pass
+    return False
+
+
+def topic_pending(topic):
+    units = {unit_for(e.get("restart", "")) for e in confedit.SCHEMA
+             if confedit.topic_of(e["key"]) == topic and not e.get("readonly")} \
+        if confedit else set()
+    return sorted(u for u in units if u and pending_unit(u))
+
+
+# --- the settings form ---------------------------------------------------------------
+
+
+def _set_form(key, e, current, auth):
+    """One row's form, by the schema's TYPE -- so a value cannot be entered in a shape the
+    validator will refuse without the operator being told why."""
+    csrf = '<input type=hidden name=csrf value="%s">' % esc(auth["csrf"])
+    hid = '<input type=hidden name=key value="%s">' % esc(key)
+    open_form = '<form method=post action=/set>' + hid + csrf
+    t = e["type"]
+    if t in ("enum", "bool"):
+        choices = e["choices"] if t == "enum" else ["0", "1"]
+        opts = "".join(
+            '<option value="%s"%s>%s</option>'
+            % (esc(c), " selected" if str(current) == str(c) else "",
+               esc(c if c != "" else "(empty)"))
+            for c in choices)
+        return (open_form + '<select name=value>' + opts +
+                '</select> <button>save</button></form>')
+    if t == "int":
+        return (open_form + '<input name=value type=number min="%s" max="%s" value="%s" '
+                'size=6> <button>save</button></form>'
+                % (esc(e.get("lo", "")), esc(e.get("hi", "")), esc(current)))
+    if e.get("secret"):
+        # Never pre-filled: the page does not know the password and must not print it, so a
+        # blank field means "leave it alone" rather than "set it to empty".
+        return (open_form + '<input name=value type=password placeholder="(unchanged)" '
+                'size=18> <button>set</button></form>')
+    return (open_form + '<input name=value value="%s" size=26> <button>save</button></form>'
+            % esc(current))
+
+
+def render_settings(a, conf, topic, auth):
+    """One group of settings, EDITABLE.
+
+    Every field is built from confedit's schema, which is the same object the writer validates
+    against -- so the form cannot offer something `confedit.write_local()` would refuse, and a
+    setting appears here by being added to the schema and nowhere else."""
+    owed = topic_pending(topic)
+    if owed:
+        a('<div class="note bad">saved, not applied yet: restart %s</div>'
+          % esc(", ".join(owed)))
+    if not confedit:
+        a('<div class=note>The config editor is not installed beside this page, so nothing '
+          'here can be changed. Re-run install.sh.</div>')
+        return
+    a("<table>")
+    for e in confedit.SCHEMA:
+        k = e["key"]
+        if confedit.topic_of(k) != topic:
+            continue
+        cur = confedit.reads_as(e) or (conf.get(k, "") or "(empty)")
+        a("<tr><td class=k>%s<div class=note>%s</div></td><td>"
+          % (esc(e.get("label", k)), esc(e.get("help") or e.get("why", ""))))
+        a('<div class=dim>%s = %s</div>' % (esc(k), esc(cur)))
+        if e.get("readonly"):
+            a('<div class=note>read-only: %s</div>' % esc(e.get("why", "")))
+        elif not auth["writes"]:
+            a('<div class=note>the config editor is not installed, so this cannot be '
+              'changed here</div>')
+        elif not auth["signed_in"]:
+            # The page never offers a control it will refuse -- the same rule the buttons
+            # under actions follow.
+            a('<div class=note>sign in under <a href="#actions">actions</a> to change '
+              'this</div>')
+        elif isinstance(e.get("restart"), str) and e["restart"].startswith("service:"):
+            a('<div class=note>%s</div>' % esc(apply_note(e["restart"])))
+        else:
+            a(_set_form(k, e, conf.get(k, ""), auth))
+            note = apply_note(e.get("restart", ""))
+            if note:
+                a('<div class=note>%s</div>' % esc(note))
+        a("</td></tr>")
+    a("</table>")
 
 
 def render_actions(a, auth):
@@ -946,15 +1093,20 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     # --- the settings, in the two groups the operator asked for: what the VIEWER is, and
     # what the player and the unit are. Both are shown read-only; the form is the next slice.
     a('<section id=vncsettings>')
-    a('<h2>vnc settings <span class=dim>(shown read-only)</span></h2><table>')
-    _conf_rows(a, conf, VNC_KEYS)
-    a("</table></section>")
+    a("<h2>vnc settings</h2>")
+    render_settings(a, conf, "vnc", auth)
+    a("</section>")
 
     a('<section id=rbpsettings>')
-    a('<h2>rbp settings <span class=dim>(shown read-only)</span></h2><table>')
-    _conf_rows(a, conf, RBP_KEYS)
+    a("<h2>rbp settings</h2>")
+    render_settings(a, conf, "rbp", auth)
+    # The depth pair is the one reading that spans two sources -- the lie in the conf and the
+    # word inside the deployed player -- so it is not a row in either group. Shown, never
+    # editable: a pair that disagrees is rbp SIGSEGV to a black screen.
+    a("<table>")
     lie = conf.get("RB_FB_LIE_BPP", "")
-    a("<tr><td class=k>player's layer format word</td><td>%s</td></tr>"
+    a("<tr><td class=k>player's layer format word<div class=note>read from the two "
+      "immediates the depth patch rewrites in the deployed player</div></td><td>%s</td></tr>"
       % esc(("not readable" if depth is None else "%s bpp" % depth)))
     if depth is not None and lie:
         agree = str(depth) == str(lie)
@@ -1069,7 +1221,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.data())
         elif path == "/healthz":
             self._send(200, "ok\n", "text/plain; charset=utf-8")
-        elif path in ("/login", "/logout", "/vnc", "/share", "/restart"):
+        elif path in ("/login", "/logout", "/vnc", "/share", "/restart", "/set"):
             # A state change is never a GET. Refused as a METHOD here, so that no handler
             # can later be got wrong into acting on one -- which is the bug the viewer's
             # own page has, where /session, /input and /mode are state-changing GETs.
@@ -1096,6 +1248,8 @@ class Handler(BaseHTTPRequestHandler):
             self._action(path, form)
         elif path == "/restart":
             self._restart(form)
+        elif path == "/set":
+            self._set(form)
         else:
             self._send(404, self._msg("no such page here",
                                       'Try <a href="/">/</a> instead.'))
@@ -1224,6 +1378,59 @@ class Handler(BaseHTTPRequestHandler):
         # Land on the services tab, where the button was: the rows show the player coming
         # back, and with auth off there is no session to flash a message into.
         self._redirect("/#services")
+
+    def _set(self, form):
+        """Save ONE setting, through confedit -- which validates it by type, locks the file,
+        keeps a one-generation backup, and copies every other byte of the operator's file
+        through untouched.
+
+        A SAVE NEVER RESTARTS ANYTHING. A save that blanked the screen would be a trap, so
+        what it does instead is record which unit owes a restart; the settings section says so
+        until that unit starts again."""
+        s = self._session()
+        if auth_required():
+            if s is None:
+                self._send(401, self._msg("sign in first",
+                            "Changing a setting needs the password."))
+                return
+            if not secrets.compare_digest(form.get("csrf", "").encode(), s["csrf"].encode()):
+                self._send(403, self._msg("stale form",
+                            "That form did not come from this session. Reload the page."))
+                return
+        key = form.get("key", "")
+        value = form.get("value", "")
+        e = confedit.BY_KEY.get(key) if confedit else None
+        tab = "/#" + ((confedit.topic_of(key) + "settings") if e else "rbpsettings")
+
+        if confedit is None:
+            ok, text = False, "the config editor is not installed beside this page"
+        elif e is None:
+            ok, text = False, "%s is not a setting this page knows about" % key
+        elif e.get("secret") and value == "":
+            # A blank password field means "leave it alone", not "set it to empty" -- the page
+            # never had the value to pre-fill, so it cannot tell the two apart any other way.
+            ok, text = True, "%s left blank, so nothing was changed" % key
+        else:
+            done, why = confedit.write_local(LOCAL_CONF, key, value)
+            if done:
+                mark_pending(e.get("restart", ""))
+                note = apply_note(e.get("restart", ""))
+                ok = True
+                text = ("saved %s=%s" % (key, "********" if e.get("secret") else value)
+                        + (". " + note if note else ""))
+            else:
+                ok, text = False, "%s not saved: %s" % (key, why)
+
+        print("confscreen: set %s -> %s%s" % (key, "" if ok else "FAILED: ", text), flush=True)
+        if s is not None:
+            s["flash"] = ("" if ok else "FAILED: ") + text
+            self._redirect(tab)
+        else:
+            # No session to flash into (`RB_CONF_AUTH=0`), and a silent failure is the worst
+            # outcome -- so say it here rather than redirect to a page that looks fine.
+            self._send(200 if ok else 400,
+                       self._msg("saved" if ok else "not saved",
+                                 esc(text) + '<p><a href="%s">back</a></p>' % esc(tab)))
 
     def page(self):
         conf, pid, (frames, rate), facts, services, switches, depth, host = self._context()

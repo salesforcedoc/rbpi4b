@@ -69,14 +69,17 @@ def free_port():
 
 FAKE_SH = r"""#!/bin/sh
 # A fake tool, installed as both `systemctl` and `vcgencmd` on a shim PATH. It records
-# every argv it is handed, so the test can assert that nothing ever names the player path.
+# every argv it is handed, so the test can assert that nothing ever names the player path --
+# and that a save never restarts or enables anything.
 printf '%s\n' "$(basename "$0") $*" >> "$FAKE_LOG"
 case "$(basename "$0")" in
   systemctl)
-    unit=$2
-    case "$1" in
+    verb=$1
+    for a in "$@"; do unit=$a; done     # the unit is the LAST argument, not the second
+    case "$verb" in
       is-active)  cat "$FAKE_UNITS/$unit.active"  2>/dev/null || echo inactive ;;
       is-enabled) cat "$FAKE_UNITS/$unit.enabled" 2>/dev/null || echo disabled ;;
+      show)       cat "$FAKE_UNITS/$unit.since"   2>/dev/null || echo 0 ;;
       *) : ;;
     esac ;;
   vcgencmd) cat "$FAKE_THROTTLED" 2>/dev/null || echo "throttled=0x0" ;;
@@ -180,6 +183,10 @@ def make_fake(root, frames=40, pid=4242, depth=(0x03, 0x40), live="on"):
         f.write("enabled\n")
     with open(os.path.join(units, "rblive4-vnc.active"), "w") as f:
         f.write("inactive\n")
+    for u, since in (("rblive4", "4000000"), ("rblive4-vnc", "5000000"),
+                     ("rblive4-boot", "3000000")):
+        with open(os.path.join(units, u + ".since"), "w") as f:
+            f.write(since + "\n")
 
     env = dict(os.environ)
     env.update(
@@ -344,8 +351,17 @@ def test_page(env, port):
     check("yes" in body, "the depth pair is reported as agreeing")
     check("RB_FB_LIE_BPP" in body, "the settings are listed")
     check("7" in body, "the rb.local.conf override is resolved (RB_VNC_FPS=7)")
-    check("shown read-only" in body,
-          "the settings are shown read-only (the form is the next slice)")
+    print("\n== the settings, as values an unsigned visitor may read ==")
+    vnc = body.split("section id=vncsettings")[1].split("</section>")[0]
+    rbp = body.split("section id=rbpsettings")[1].split("</section>")[0]
+    check("RB_VNC_FPS" in vnc and "RB_PREWARM" in rbp and "RB_VNC_FPS" not in rbp,
+          "each key is listed in its own group")
+    check("action=/set" not in vnc and "action=/set" not in rbp,
+          "and an UNSIGNED visitor is offered no form -- the page never shows a control it "
+          "would only refuse")
+    check("sign in under" in vnc, "it says to sign in instead")
+    lie_row = [r for r in rbp.split("<tr>") if "RB_FB_LIE_BPP" in r][0]
+    check("read-only:" in lie_row, "and the depth pair's lie says why it is read-only")
 
     print("\n== the refresh re-reads the DATA, it does not reload the page ==")
     check("http-equiv=refresh" not in body, "there is no meta refresh anywhere")
@@ -534,6 +550,17 @@ def test_write_path(env, port):
     check("Enable the viewer" in page and "Start sharing" in page, "and offers both actions")
     check("signed in -- the actions below" in page, "and shows the flash from the login")
 
+    print("\n== signed in, the settings become forms ==")
+    sv = page.split("section id=vncsettings")[1].split("</section>")[0]
+    sr = page.split("section id=rbpsettings")[1].split("</section>")[0]
+    check("action=/set" in sv and "action=/set" in sr, "every group carries save forms")
+    check('name=key value="RB_VNC_FPS"' in sv,
+          "addressed by key, so one handler serves every setting")
+    check("restart the viewer to apply" in sv, "and each field names what applies it")
+    lie_row = [r for r in sr.split("<tr>") if "RB_FB_LIE_BPP" in r][0]
+    check("action=/set" not in lie_row,
+          "the read-only ones are STILL offered no form -- the writer would refuse them")
+
     print("\n== the CSRF value is not decoration ==")
     s, _b, _h = post(port, "/vnc", {"action": "on", "csrf": "0" * 32}, cookie=cookie)
     check(s == 403, "a form with the WRONG csrf value is 403")
@@ -708,6 +735,70 @@ def test_restart(env, port):
           "and systemd was NOT asked a second time")
 
 
+def test_set(env, port):
+    """Saving one setting, through the editor -- and the promise that a save changes ONE line
+    of the operator's file and restarts nothing."""
+    print("\n== saving a setting ==")
+    conf = os.path.join(env["RB_DEPLOY_ROOT"], "rb.local.conf")
+    if os.path.exists(env["FAKE_LOG"]):
+        os.unlink(env["FAKE_LOG"])       # the log has the other suites' calls in it
+    before = open(conf).read()
+    s, _b, h = post(port, "/login", {"pw": "password"})
+    cookie = cookie_of(h)
+    _s, page = get_with(port, "/", cookie)
+    csrf = csrf_of(page.split("section id=vncsettings")[1].split("</section>")[0])
+    check(bool(csrf), "the save form carries a CSRF value")
+
+    s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "9"})
+    check(s == 401, "saving with no session is 401")
+    s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "9", "csrf": "0" * 32},
+                     cookie=cookie)
+    check(s == 403, "a wrong CSRF value is 403")
+    s, _b, _h = post(port, "/set", {"key": "RB_FB_LIE_BPP", "value": "16", "csrf": csrf},
+                     cookie=cookie)
+    check(s == 303, "a read-only key is refused (with a message, see below)")
+    _s, page = get_with(port, "/", cookie)
+    check("pair" in page and "FAILED" in page, "and the page says why")
+    check(open(conf).read() == before, "the file is untouched by all of that")
+
+    print("\n== values the schema refuses ==")
+    for bad in ("999", "4; rm -rf /", "$(reboot)", "`id`"):
+        post(port, "/set", {"key": "RB_VNC_FPS", "value": bad, "csrf": csrf}, cookie=cookie)
+    check(open(conf).read() == before,
+          "an out-of-range value and three injections leave the file BYTE-IDENTICAL")
+    s, _b, _h = post(port, "/set", {"key": "RB_PASSWORD", "value": "", "csrf": csrf},
+                     cookie=cookie)
+    check(s == 303, "a blank password field is accepted as 'leave it alone'")
+    check(open(conf).read() == before, "and changes nothing")
+
+    print("\n== saving for real ==")
+    s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "9", "csrf": csrf},
+                     cookie=cookie)
+    check(s == 303, "a valid save redirects")
+    after = open(conf).read()
+    # Relative to what the file was, not to a pristine one: the earlier suites have already
+    # written to it, and the promise being checked is "one value, everything else identical".
+    check(after == before.replace("RB_VNC_FPS=7", "RB_VNC_FPS=9"),
+          "and the file is EXACTLY as it was with one value changed")
+    check(os.path.exists(conf + ".prev"), "a one-generation backup was kept")
+    _s, page = get_with(port, "/", cookie)
+    check("saved RB_VNC_FPS=9" in page, "the page says what it saved")
+    check("restart the viewer to apply" in page, "and what applies it")
+    check("saved, not applied yet" in page, "and marks the group as not yet applied")
+
+    print("\n== and nothing was restarted to do it ==")
+    log = open(env["FAKE_LOG"]).read() if os.path.exists(env["FAKE_LOG"]) else ""
+    check("--now" not in log, "a save enables and disables nothing")
+    check("restart rblive4" not in log, "and restarts nothing")
+
+    print("\n== the marker is discharged by the unit starting again ==")
+    with open(os.path.join(env["FAKE_UNITS"], "rblive4-vnc.since"), "w") as f:
+        f.write("9000000\n")            # ActiveEnterTimestampMonotonic moved: it restarted
+    _s, page = get_with(port, "/", cookie)
+    check("saved, not applied yet" not in page,
+          "and the page stops saying so once the viewer has restarted")
+
+
 def main():
     m = load_module()
 
@@ -722,6 +813,7 @@ def main():
         test_page(env, port)
         test_data_fragment(env, port)
         test_write_path(env, port)
+        test_set(env, port)
         test_restart(env, port)
         test_rate_limit(env, port)      # last: it refuses this client's logins for a minute
 

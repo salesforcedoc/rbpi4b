@@ -39,8 +39,29 @@ It shows one section at a time, navigated from the left:
 | **viewer** | the three live switch files (`vnc.live`, `vnc.mode`, `vnc.input`), whether the RFB and viewer-page ports answer, and the preview (pointed at the viewer, which owns the capture) |
 | **actions** | sign in or out, **enable/disable the viewer**, and **start/stop sharing** |
 | **unit** | uptime, load, memory, SoC temperature, `get_throttled` decoded into words, free space, the last health line |
-| **vnc settings** | the viewer's own knobs, read-only for now |
-| **rbp settings** | the player's and the unit's, read-only for now, plus the depth pair and whether it agrees |
+| **vnc settings** | the viewer's own knobs, **editable** |
+| **rbp settings** | the player's and the unit's, likewise editable, plus the depth pair and whether it agrees |
+
+### The settings form is built from the editor's schema
+
+Every field — its label, its help, its allowed values and whether it is editable at all — comes from
+`confedit.SCHEMA`, which is the same object `confedit.write_local()` validates against. So **the form
+cannot offer something the writer would refuse**, and a setting appears on the page by being added to
+the schema and nowhere else. The keys that are *pairs* or need a shim rebuild (`RB_FB_LIE_BPP`,
+`RB_DFB_PRESENT`, the audio-mirror trio, `RB_AUTOSTART`, the paths) are schema entries marked read-only
+and rendered with their reason — shown, explained, and impossible to submit.
+
+**A save changes one line and restarts nothing.** `confedit` validates the value by type, refuses
+anything with a shell metacharacter in it, locks the file, checks the result with `sh -n`, keeps a
+one-generation `.prev`, and copies every other byte of the operator's file through untouched — verified
+by comparing the file before and after a save round-trip. Restarting is a *separate, explicit* action on
+the services screen, because a save that blanked the screen would be a trap.
+
+What a save does instead is record which **unit owes a restart** (`/run/rblive4/conf.dirty.<unit>`,
+stamped with that unit's `ActiveEnterTimestampMonotonic`), and the settings group says *saved, not
+applied yet: restart rblive4-vnc* until that unit next starts — at which point the stamp no longer
+matches, and the debt is discharged by itself. Both stamps are monotonic and on this boot, and the marker
+is in `/run` (tmpfs), so a reboot clears both together and cannot leave a stale debt behind.
 
 The sections are a real nav rather than a long scroll: one is shown at a time, and their ids live
 *inside* the regions the poll re-reads, so the left-hand links keep pointing at something after every
@@ -132,12 +153,11 @@ after every request.
 
 Stated plainly so that nobody reads this page as more than it is:
 
-* **the settings are read-only** — the form that would write them through `confedit.py` is the next
-  landing. `confedit` itself is written and tested (87 checks) and called by nothing yet; today
-  `RB_CONF_AUTH` and `RB_PASSWORD` are set by hand in `rb.local.conf`;
 * **the viewer's page is still on the LAN, unauthenticated** — its `/session`, `/input` and `/mode`
-  are state-changing GETs, and moving it to loopback-only is the next landing;
+  are state-changing GETs, and moving it to loopback-only is the next landing. It is the remaining
+  unauthenticated way in;
 * **no TLS**, and **no privilege drop** — the service runs as root, as every unit here does, so the
-  write path that has landed runs as root too;
+  write path runs as root too;
 * the display-path knobs, the audio-mirror trio (`rb.conf` states a change needs the shim rebuilt,
-  not a restart) and the Pro DJ Link knobs are deliberately out of scope.
+  not a restart) and the Pro DJ Link knobs are deliberately out of scope — read-only, shown, and
+  refused by the writer rather than merely absent from the form.

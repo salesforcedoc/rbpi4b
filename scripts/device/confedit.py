@@ -174,6 +174,31 @@ SCHEMA = [
 
 BY_KEY = {e["key"]: e for e in SCHEMA}
 
+
+def topic_of(key):
+    """Which of the page's two settings groups a key belongs to.
+
+    Rule-based rather than a field on every entry, because the rule IS the grouping: the
+    viewer's settings are all `RB_VNC_*`, plus the credential it shares with this page, and
+    everything else is the player's or the unit's. If that stops being true the rule below is
+    the one place to change, and test_confedit pins the split."""
+    if key == "RB_PASSWORD" or key.startswith("RB_VNC"):
+        return "vnc"
+    return "rbp"
+
+
+def writable_keys(topic=None):
+    """The keys a form may offer: the schema's, minus the read-only ones. The page builds its
+    fields from this, so a field it renders is always one the writer will accept -- the form
+    cannot offer something write_local() would refuse."""
+    return [e["key"] for e in SCHEMA
+            if not e.get("readonly") and (topic is None or topic_of(e["key"]) == topic)]
+
+
+def reads_as(e):
+    """The word the page shows for a value that is set but must never be printed."""
+    return "(set)" if e.get("secret") else None
+
 # Every string value must survive this before the per-entry pattern is even tried. It is not
 # a substitute for the pattern; it is the part of validation that belongs to the FILE rather
 # than to the setting, because the file is shell.
