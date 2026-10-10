@@ -21,13 +21,23 @@ write path lands, the viewer's page moves to loopback-only and this page owns th
 
 ## What it does
 
-**It reads, and it acts — behind a password that can be turned off.** Reads are open on the LAN.
-Every write is a POST that needs a session: `/login` against `RB_PASSWORD` (read live from the conf),
-a 128-bit id held in memory behind an `HttpOnly; SameSite=Strict` cookie, a per-session CSRF value in
-every form, a cross-origin POST refused, a GET on a write endpoint answered **405 by method**, logins
-rate-limited, and an EMPTY password **failing closed** with 503. `RB_CONF_AUTH=0` removes the password
-entirely — and then the page says so at the top of its actions and `doctor.sh` warns, because that is a
-choice rather than an accident, not a silent switch.
+**The password for this page is off by default.** `RB_CONF_AUTH` ships as `0`: reading *and changing*
+are open on the LAN, because a configuration screen you have to sign in to is one you stop using. Set
+`RB_CONF_AUTH=1` and every write becomes a POST that needs a session — `/login` against `RB_PASSWORD`
+(read live from the conf), a 128-bit id held in memory behind an `HttpOnly; SameSite=Strict` cookie, a
+per-session CSRF value in every form, a cross-origin POST refused, a GET on a write endpoint answered
+**405 by method**, logins rate-limited, and an EMPTY password **failing closed** with 503. The page says
+at the top of its actions when its writes are open, rather than looking locked, and `doctor.sh` notes
+when a unit has opted in.
+
+**The VNC client password is a different thing and is unaffected either way**: it is `RB_PASSWORD`, which
+`RB_VNC_PASSWORD` derives from, and macOS's Screen Sharing will not connect without one.
+
+**And the fallback direction matters.** A conf that cannot be READ — a card failing, say — yields an
+*empty* `RB_CONF_AUTH`, not a missing one. The test for it is only an explicit `=1`, so a page that
+cannot check a password does not demand one; the first version tested `!= "0"`, which turned an empty
+value into a sign-in form and made a storage failure look like a policy. That is what the operator saw,
+and `test_confscreen.py` now pins both the shipped default and the unreadable-conf case.
 
 It shows one section at a time, navigated from the left:
 

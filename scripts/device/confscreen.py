@@ -414,12 +414,18 @@ def writes_available():
     return confedit is not None
 
 
+def conf_auth_on(conf):
+    """Is the password required for writes? Only an explicit `RB_CONF_AUTH=1` turns it ON.
+
+    That predicate is doing real work. A conf that cannot be READ does not yield a missing
+    key, it yields an EMPTY one -- so `.get(k, "0")` returns "" and a test of `!= "0"` would
+    still demand a password the page has no way to check. Which is exactly what the operator
+    saw: a failing card, an unreadable conf, and a sign-in form invented out of the failure."""
+    return str(conf.get("RB_CONF_AUTH", "")).strip() == "1"
+
+
 def auth_required():
-    """Whether a write needs the password. `RB_CONF_AUTH=0` turns it off, which is the
-    operator's call to make on their own LAN -- and it is read from the conf rather than
-    from this process's environment, so the file that decides it is the same file that says
-    everything else about this unit."""
-    return conf_values(("RB_CONF_AUTH",)).get("RB_CONF_AUTH", "1") != "0"
+    return conf_auth_on(conf_values(("RB_CONF_AUTH",)))
 
 
 def _run_rc(argv, timeout=25):
@@ -1331,7 +1337,7 @@ class Handler(BaseHTTPRequestHandler):
         the page takes it and clears it, while the poll -- which must not consume anything --
         only reads it."""
         s = self._session()
-        required = conf.get("RB_CONF_AUTH", "1") != "0"
+        required = conf_auth_on(conf)
         out = {"signed_in": (not required) or s is not None,
                "required": required,
                "csrf": (s or {}).get("csrf", ""),

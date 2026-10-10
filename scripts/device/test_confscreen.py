@@ -115,6 +115,11 @@ def make_fake(root, frames=40, pid=4242, depth=(0x03, 0x40), live="on"):
                 ": \"${RB_MIDI_MAP:=}\"\n: \"${RB_AUDIO_DEV:=}\"\n"
                 ": \"${RB_FB_LIE_BPP:=32}\"\n: \"${RB_VERBOSE:=0}\"\n"
                 ": \"${RB_PASSWORD:=password}\"\n"
+                "# The fixture OPTS IN to the page's password, so the auth suites have a lock\n"
+                "# to test against. The SHIPPED default is 0 (open) -- pinned by\n"
+                "# test_default_open, and by test_unreadable_conf for the case where the conf\n"
+                "# cannot be read at all.\n"
+                ": \"${RB_CONF_AUTH:=1}\"\n"
                 "if [ -f \"$RB_DEPLOY_ROOT/rb.local.conf\" ]; then\n"
                 "  . \"$RB_DEPLOY_ROOT/rb.local.conf\"\nfi\n")
     with open(os.path.join(deploy, "rb.local.conf"), "w") as f:
@@ -799,6 +804,52 @@ def test_set(env, port):
           "and the page stops saying so once the viewer has restarted")
 
 
+def test_default_open(root, port):
+    """The SHIPPED default: no password for configuration. A configuration screen you have to
+    sign in to is one you stop using, so the lock is opt-in -- `RB_CONF_AUTH=1`."""
+    print("\n== the shipped default: nothing to sign in to ==")
+    env = make_fake(root)
+    text = open(env["RB_CONF_FILE"]).read().replace(': "${RB_CONF_AUTH:=1}"',
+                                                   ': "${RB_CONF_AUTH:=0}"')
+    with open(env["RB_CONF_FILE"], "w") as f:
+        f.write(text)
+    p = start_daemon(env, port)
+    try:
+        body = wait_up(port)
+        check(body is not None, "the page answers with no opt-in")
+        if body:
+            check("action=/login" not in body, "and asks for nothing")
+            check("Nothing to sign in to" in body, "saying there is nothing to sign in to")
+        s, _b, _h = post(port, "/set", {"key": "RB_VNC_FPS", "value": "6"})
+        check(s in (200, 303), "a setting can be changed with no session at all")
+        check("RB_VNC_FPS=6" in open(env["RB_LOCAL_CONF"]).read(), "and it was written")
+    finally:
+        p.terminate()
+        p.wait(timeout=5)
+
+
+def test_unreadable_conf(root, port):
+    """THE CASE THE OPERATOR ACTUALLY HIT. A conf that cannot be read does not yield a MISSING
+    RB_CONF_AUTH, it yields an EMPTY one -- so `!= "0"` would demand a password the page has
+    no way to check, which is precisely how a sign-in form appeared out of a failing card."""
+    print("\n== a conf the page cannot read ==")
+    env = make_fake(root)
+    with open(env["RB_CONF_FILE"], "w") as f:
+        f.write("if [ 1 = 1; then\n")        # sourcing this fails: every value comes back empty
+    p = start_daemon(env, port)
+    try:
+        body = wait_up(port)
+        check(body is not None, "the page still answers when the conf cannot be read")
+        if body:
+            check("action=/login" not in body,
+                  "and does NOT invent a sign-in form out of the failure")
+            check("RB_VNC = (empty)" in body,
+                  "while the values it cannot read are visibly empty")
+    finally:
+        p.terminate()
+        p.wait(timeout=5)
+
+
 def main():
     m = load_module()
 
@@ -820,6 +871,8 @@ def main():
         test_states(tempfile.mkdtemp(prefix="confscreen-states."), free_port())
         test_no_password(tempfile.mkdtemp(prefix="confscreen-nopass."), free_port())
         test_no_auth(tempfile.mkdtemp(prefix="confscreen-noauth."), free_port())
+        test_default_open(tempfile.mkdtemp(prefix="confscreen-default."), free_port())
+        test_unreadable_conf(tempfile.mkdtemp(prefix="confscreen-noconf."), free_port())
         # A port of its own: the daemon above is still holding the one it was given.
         test_bind_failure(env, free_port())
     finally:
