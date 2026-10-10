@@ -54,7 +54,7 @@ It shows one section at a time, navigated from the left:
 | **services** | one row per unit, in four columns: the unit, its **Status** (`is-active`), its **startup** (`is-enabled`) as a two-button pair with the state in force drawn as pressed, and its **actions** (start/restart) — because this is where you look when something is wrong |
 | **launcher** | the tail of `/run/rblive4/boot.log` and the last `boot.stage` — the same stage stream the boot screen paints |
 | **viewer settings** | the three live switch files (`vnc.live`, `vnc.mode`, `vnc.input`), whether the RFB and viewer-page ports answer, the preview (pointed at the viewer, which owns the capture), and **the viewer's own buttons** — enable/disable it, and start/stop sharing |
-| **unit** | uptime, load, memory, SoC temperature, `get_throttled` decoded into words, free space, the last health line |
+| **player** (and **device info**) | in the same tab: rbp's own state, and under a *device info* heading the machine it runs on — uptime, load, memory, SoC temperature, `get_throttled` decoded into words, free space, the last health line |
 | **vnc settings** | the viewer's own knobs, **editable** |
 | **rbp settings** | the player's and the unit's, likewise editable, plus the depth pair and whether it agrees |
 

@@ -1099,7 +1099,7 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
         for anchor, label in (("player", "player"), ("services", "services"),
                               ("launcher", "launcher"), ("viewer", "viewer settings"),
                               ("vncsettings", "vnc settings"),
-                              ("rbpsettings", "rbp settings"), ("unit", "unit")):
+                              ("rbpsettings", "rbp settings")):
             a('<a href="#%s">%s</a>' % (anchor, esc(label)))
         a("</nav><main id=main>")
 
@@ -1123,6 +1123,34 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     # counter above says whether it is worth opening.
     a("<tr><td class=k>log</td><td>%s</td></tr>" % esc(RBP_LOG))
     a("</table>")
+    # --- and the machine it is running on, in the same tab ---
+    a("<h2>device info</h2><table>")
+    if "uptime" in facts:
+        a("<tr><td class=k>uptime</td><td>%.0f s</td></tr>" % facts["uptime"])
+    if "load" in facts:
+        a("<tr><td class=k>load</td><td>%s</td></tr>" % esc(facts["load"]))
+    if "mem" in facts:
+        m = facts["mem"]
+        a("<tr><td class=k>memory</td><td>%s MB available of %s MB</td></tr>"
+          % (esc(m.get("MemAvailable", "?")), esc(m.get("MemTotal", "?"))))
+    if "temp_c" in facts:
+        a("<tr><td class=k>SoC temperature</td><td>%.1f &deg;C</td></tr>" % facts["temp_c"])
+    th = facts.get("throttled")
+    if th:
+        now = ", ".join(th["now"]) or "none"
+        was = ", ".join(th["was"]) or "none"
+        c = "bad" if th["now"] else "dim"
+        a("<tr><td class=k>power (get_throttled %s)</td><td class=%s>now: %s<br>has occurred: %s</td></tr>"
+          % (esc(th["raw"]), c, esc(now), esc(was)))
+    fs = free_space(DEPLOY_ROOT)
+    if fs:
+        a("<tr><td class=k>free space on %s</td><td>%.1f GB of %.1f GB (%.0f%%)</td></tr>"
+          % (esc(DEPLOY_ROOT), fs[0] / 1e9, fs[1] / 1e9, fs[2]))
+    hl = tail(HEALTH_LOG, 1)
+    if hl:
+        a("<tr><td class=k>health (last)</td><td>%s</td></tr>" % esc(hl[-1]))
+    a("</table>")
+
     a("</section>")
 
     # --- services ---
@@ -1327,50 +1355,15 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
              "yes" if agree else "NO &mdash; rbp will not start until these match"))
     a("</table>")
     a("</section>")
-    # LAST, and deliberately: the three SETTINGS tabs now sit together -- viewer
-    # settings, vnc settings, rbp settings -- rather than having the unit's readings
-    # wedged between two of them.
-    # --- the unit ---
-    a('<section id=unit>')
-    a("<h2>unit</h2><table>")
-    if "uptime" in facts:
-        a("<tr><td class=k>uptime</td><td>%.0f s</td></tr>" % facts["uptime"])
-    if "load" in facts:
-        a("<tr><td class=k>load</td><td>%s</td></tr>" % esc(facts["load"]))
-    if "mem" in facts:
-        m = facts["mem"]
-        a("<tr><td class=k>memory</td><td>%s MB available of %s MB</td></tr>"
-          % (esc(m.get("MemAvailable", "?")), esc(m.get("MemTotal", "?"))))
-    if "temp_c" in facts:
-        a("<tr><td class=k>SoC temperature</td><td>%.1f &deg;C</td></tr>" % facts["temp_c"])
-    th = facts.get("throttled")
-    if th:
-        now = ", ".join(th["now"]) or "none"
-        was = ", ".join(th["was"]) or "none"
-        c = "bad" if th["now"] else "dim"
-        a("<tr><td class=k>power (get_throttled %s)</td><td class=%s>now: %s<br>has occurred: %s</td></tr>"
-          % (esc(th["raw"]), c, esc(now), esc(was)))
-    fs = free_space(DEPLOY_ROOT)
-    if fs:
-        a("<tr><td class=k>free space on %s</td><td>%.1f GB of %.1f GB (%.0f%%)</td></tr>"
-          % (esc(DEPLOY_ROOT), fs[0] / 1e9, fs[1] / 1e9, fs[2]))
-    hl = tail(HEALTH_LOG, 1)
-    if hl:
-        a("<tr><td class=k>health (last)</td><td>%s</td></tr>" % esc(hl[-1]))
-    a("</table>")
-    a("</section>")
 
     a("</div>")                      # end of the second live half
 
     if not data_only:
         a("</main></div>")           # close #main and #layout
-        # THE FOOTER SAYS ONE THING: where the page is written up. It used to carry a
-        # sentence about the password as well, and there is no version of that sentence worth
-        # having here -- the header already states the posture on EVERY visit, in one place,
-        # including the read-only case when the editor is missing. A second copy at the bottom
-        # is at best a duplicate and at worst the contradiction it had become: the footer still
-        # promised "writes need the password" for a while after the sign-in was retired.
-        a("<footer>See <code>docs/20-config-page.md</code>.</footer>")
+        # NO FOOTER. It held a pointer to the doc, and a pointer the page does not need: the
+        # reader of this page is standing at the machine, and the doc is in the tree beside
+        # the script that draws it. It had also accumulated a duplicated sentence about the
+        # password -- which is the shape a footer takes when it has nothing of its own to say.
         a(POLL_JS % REFRESH_S)
         a("</body></html>")
     return "".join(h)
