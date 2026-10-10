@@ -500,7 +500,7 @@ def set_switch(name, value):
     """One of the live /run/rblive4/vnc.* files the viewer re-reads every turn. Written the
     way vnc_live.c writes it -- a word and a newline -- and created when it is not there
     yet, which it will not be on a unit whose viewer has never run."""
-    path = os.path.join(RUN_DIR, "vnc." + name)
+    path = os.path.join(RUN_DIR, SWITCH_FILES.get(name, "vnc." + name))
     try:
         os.makedirs(RUN_DIR, exist_ok=True)
         with open(path, "w") as f:
@@ -553,7 +553,14 @@ LIVE_SWITCHES = {
     "fps": _sw_int(1, 30),
     "jpeg_dev": lambda v: v if v in ("/dev/video11", "/dev/video31") else None,
     "jpeg_quality": _sw_int(0, 100),
+    "mixer_mode": lambda v: v if v in ("internal", "external") else None,
 }
+
+# The switch files that are NOT under the viewer's `vnc.` prefix. The prefix is the FILE's, and it
+# has always been the viewer's -- audioshim reads this one (the mixer is the player's business,
+# not the viewer's), and the conf names the path it reads (RB_MIXER_MODE_FILE), so the name here
+# has to be that path's basename or the page would write a switch nothing is looking at.
+SWITCH_FILES = {"mixer_mode": "mixer.mode"}
 
 
 def preview_on():
@@ -1580,6 +1587,23 @@ def render(conf, pid, frames, rate, facts, services, switches, depth, req_host="
     mixer = external_mixer()
     if mixer:
         a("<h2>mixer</h2>")
+        # THE LIVE SWITCH, with the boot value as an ordinary row underneath it -- the same pair
+        # this page uses for the frame rate and the encoder, and the reason it is a pair here is
+        # that flipping the route is a decision about a RUNNING set, not about the next power-up.
+        # audioshim re-reads the file while it plays, and re-asks the bus with it, so a mixer
+        # unplugged mid-set falls back to internal on its own and this row goes with it.
+        mx_v, mx_d = eff("mixer_mode", conf.get("RB_MIXER_MODE", "") or "internal")
+        if auth["writes"]:
+            a('<table><tr><td class=k>Mixer routing%s</td><td class=v>'
+              '<form method=post action=/switch>'
+              '<input type=hidden name=name value="mixer_mode">%s</form>%s</td></tr></table>'
+              % (_info("Which mixer is doing the mixing, NOW. External sends each deck RAW on its "
+                       "own pair and stops sending rbp's mix, so rbp's faders, EQ and FX are out "
+                       "of the path. Takes effect within a second, with no restart."),
+                 "".join('<button name=value value="%s"%s>%s</button>'
+                         % (esc(v), " class=cur" if v == mx_v else "", esc(v))
+                         for v in ("internal", "external")),
+                 ('<span class=dim> %s</span>' % esc(mx_d)) if mx_d else ""))
         render_settings(a, conf, "mixer", auth)
     elif conf.get("RB_MIXER_MODE") == "external":
         a("<h2>mixer</h2>")

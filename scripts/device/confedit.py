@@ -80,7 +80,7 @@ SCHEMA = [
          help="ALSA device for the master output, e.g. hw:CARD=DDJFLX4,DEV=0. Empty derives "
               "it from the controller."),
     dict(key="RB_MIXER_MODE", group="basic", type=E, choices=["internal", "external"],
-         restart="player", risk="low", label="Mixer routing",
+         restart="player", risk="low", label="Mixer routing at boot",
          help="internal: rbp's own faders, EQ and FX mix the decks and the master pair carries "
               "the result -- what shipped. external: each deck goes out RAW, pre-trim, on its "
               "own pair (3/4 and 5/6 by default) and rbp's mix and its whole strip are out of "

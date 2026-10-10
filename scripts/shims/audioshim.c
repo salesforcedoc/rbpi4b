@@ -226,6 +226,8 @@ static struct {
     struct pair deck1;         /* AUDIO_MAP's deck1/deck2: MIXER_MODE=external only */
     struct pair deck2;
     int  mixer_external;       /* MIXER_MODE: 1 = send the decks raw, not the mix */
+    int  mixer_boot;           /* ...what the CONSTRUCTOR decided, the file's fallback */
+    char mixer_file[128];      /* MIXER_MODE_FILE: the live switch's path, "" = none */
     int  tap_guard_logged;     /* the "this card is too narrow" NOTE, said once */
     char mirror_dev[DEV_MAX + 64]; /* AUDIO_MIRROR_DEV, the raw list ("" = off) */
     int  mirror_fmt;           /* s24pack format, from AUDIO_MIRROR_FMT */
@@ -984,6 +986,10 @@ static void parse_card_id(const char *dev)
 /* Read the whole configuration once. Called from the constructor, before rbp has
  * threads: an env var read once cannot disagree with itself, and there is no lock
  * to take. */
+/* Where the LIVE mixer-route switch lives when the conf does not name one. Same directory and
+ * same one-word-and-newline shape as the viewer's switch files (RB_VNC_FPS_FILE and friends). */
+#define MIXER_MODE_FILE_DEFAULT "/run/rblive4/mixer.mode"
+
 static void load_config(void)
 {
     const char *s;
@@ -1085,7 +1091,13 @@ static void load_config(void)
         int want = (strcmp(env_str("MIXER_MODE", ""), "external") == 0);
         const struct controller *mixer = want ? mixer_present() : NULL;
 
-        g_cfg.mixer_external = want && mixer != NULL;
+        g_cfg.mixer_boot = want && mixer != NULL;
+        g_cfg.mixer_external = g_cfg.mixer_boot;
+        /* AND THE MODE IS LIVE FROM HERE ON -- mixer_route_tick() re-reads the switch file and
+         * re-asks the bus while the unit plays, so this is the STARTING value, not the last
+         * word. The path is the conf's to name, like every other switch file in this tree. */
+        snprintf(g_cfg.mixer_file, sizeof g_cfg.mixer_file, "%s",
+                 env_str("MIXER_MODE_FILE", MIXER_MODE_FILE_DEFAULT));
         if (g_cfg.mixer_external)
             alog("audioshim: MIXER_MODE=external, with %s (%s) on the bus -- the deck taps "
                  "go out on %d,%d and %d,%d and rbp's own mix is NOT sent. rbp's faders, "
@@ -3124,6 +3136,93 @@ static void fold_stage(const struct stage *st, const struct pair *pair,
  * The one thing that is NOT safe by construction is the channel count: the pairs
  * are validated against the card because AUDIO_MAP's numbers are hardware
  * indices, and a card opened at two channels must not be written at index 4. */
+/* ---- the mixer route, LIVE -------------------------------------------------------
+ *
+ * RB_MIXER_MODE decides what the unit does AT START-UP; the switch file above decides what it
+ * does NOW, and the operator can flip it from the page while the player runs. The file wins
+ * when it exists -- a missing file means "keep what we were started with", the same rule the
+ * viewer's switch files follow -- and it is read HERE rather than from a second thread because
+ * there is one audio thread and it already knows the block boundary.
+ *
+ * WHY IT IS THROTTLED. This runs on the audio callback, so the file is read once every
+ * MIXER_MODE_EVERY_BLOCKS (~0.7 s at 64 frames) rather than 700 times a second, and the BUS is
+ * re-walked only every MIXER_MODE_BUS_EVERY of those (~6 s), because that walk is a dozen sysfs
+ * reads. Both are far under a block's work. THE BUS WALK IS THE PART THAT MATTERS: unplug the
+ * mixer and the decks would otherwise keep going out on pairs nothing is listening to, so the
+ * route falls back to internal ON ITS OWN and says so in the log. */
+#define MIXER_MODE_EVERY_BLOCKS 512
+#define MIXER_MODE_BUS_EVERY    8      /* of those, so ~6 s */
+
+/* One word out of a switch file, or 0 when there is nothing to read. A word and a newline, the
+ * shape vnc_live.c writes and this tree has used for every live switch since. */
+static int read_switch_word(const char *path, char *out, size_t outsz)
+{
+    char buf[32];
+    size_t i;
+    int fd;
+    ssize_t n;
+
+    out[0] = '\0';
+    if (!path || !path[0])
+        return 0;
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    for (i = 0; buf[i] && buf[i] != '\n' && buf[i] != '\r' && i + 1 < outsz; i++)
+        out[i] = buf[i];
+    out[i] = '\0';
+    return out[0] != '\0';
+}
+
+static void mixer_route_tick(void)
+{
+    static unsigned long blocks;
+    static int told;                       /* the start-up statement, said once */
+    char word[32];
+    int want, external, present = 0;
+
+    blocks++;
+    if ((blocks % MIXER_MODE_EVERY_BLOCKS) != 0)
+        return;
+
+    want = g_cfg.mixer_boot;
+    if (read_switch_word(g_cfg.mixer_file, word, sizeof word))
+        want = (strcmp(word, "external") == 0);
+
+    /* Only asked when external is wanted: internal needs no mixer, and the walk is not free. */
+    if (want) {
+        static unsigned long walks;
+        walks++;
+        if (g_cfg.mixer_external || (walks % MIXER_MODE_BUS_EVERY) == 0)
+            present = mixer_present() != NULL;
+        else
+            present = 1;                   /* keep the last answer between walks */
+    }
+    external = want && present;
+
+    if (!told) {
+        told = 1;
+        alog("audioshim: mixer route is %s (MIXER_MODE=%s, switch file %s%s)\n",
+             external ? "EXTERNAL -- the decks go out raw and rbp's mix is not sent"
+                      : "INTERNAL -- rbp's mix goes to the master pair",
+             g_cfg.mixer_boot ? "external" : "internal", g_cfg.mixer_file,
+             read_switch_word(g_cfg.mixer_file, word, sizeof word) ? "" : " (not present)");
+    }
+    if (external != g_cfg.mixer_external) {
+        g_cfg.mixer_external = external;
+        alog("audioshim: mixer route -> %s%s\n",
+             external ? "EXTERNAL (decks raw on their own pairs, rbp's mix not sent)"
+                      : "INTERNAL (rbp's mix, and its faders and EQ are the path again)",
+             (want && !present) ? " -- external was asked for but no recognised external "
+                                  "digital mixer is on the USB bus" : "");
+    }
+}
+
 #define TAP_FULL_SCALE 8388607.0f   /* rbp's 24-bit full scale, the S24 container's */
 
 static int32_t tap_to_s24(float f)
@@ -3206,6 +3305,7 @@ static snd_pcm_sframes_t flush_master(const int32_t *src, snd_pcm_uframes_t size
     unsigned out_bytes;
 
     resolve_pairs();
+    mixer_route_tick();
 
     /* Cleared every block. With pair routing — unlike the old fixed 8-channel
      * frame, where some branch always wrote every channel — a channel no stream
