@@ -192,20 +192,38 @@ static int client_jpeg_ok(const struct client *c)
 /* The compressing encoding this client will be sent, or -1 if it can be sent none --
  * in which case the caller sends Raw.
  *
- * TIGHT IS PREFERRED ONLY BECAUSE IT IS THE ONE EVERY OTHER CLIENT ASKS FOR; the bytes
- * on the wire are the same either way, since both are the same deflate stream over the
- * same bands. What matters is that BOTH are here: choosing Tight alone was a one-line
- * decision that cost a day, because the client this whole feature exists for is the
- * one client that does not offer it. */
+ * ZLIB (6) IS PREFERRED OVER TIGHT (7), AND THAT ORDER IS A MEASUREMENT, NOT A TASTE.
+ * The two containers carry the same deflate stream, and that stream is a ZLIB stream in
+ * the RFC1950 sense (windowBits 15 -- see vnc_zlib.c). That is exactly what encoding 6
+ * wants and exactly what Tight's BASIC compression does not: Tight is raw deflate. So a
+ * client that offers both and is handed Tight is given bytes it cannot inflate, and the
+ * only symptom is the client hanging up.
+ *
+ * Measured 2026-10-10 on this unit, from vncserve's own log: macOS Screen Sharing, which
+ * offers zlib and never Tight, held one session from 08:34 onward ("first frame sent
+ * (181601 bytes, zlib (encoding 6), lossless)"). Every noVNC session -- which offers
+ * both, so was given Tight before this change -- was closed BY THE CLIENT 66-94 ms after
+ * its first frame: eight for eight, uniformly, with nothing logged, because the client
+ * is the one that hangs up. Preferring zlib puts noVNC on the path macOS had already
+ * proved, and it costs the feature nothing: the hardware JPEG, which is the whole reason
+ * the web client exists, is chosen AHEAD of either container in the send loop -- and
+ * JPEG rides in Tight, which is fine, because JPEG uses no deflate stream at all.
+ *
+ * STILL BROKEN, AND NOT FIXED HERE: a client that offers Tight and NOT zlib (a bare
+ * TigerVNC) is still handed the zlib stream in a Tight container and will still fail to
+ * inflate it. The cure is to emit raw deflate for the Tight arm, which needs a second
+ * deflate mode in vnc_zlib.c and a Tight-only client to verify it against -- neither of
+ * which this unit has. Nothing on this unit is in that class, so this order removes the
+ * failure that is actually reachable. */
 static int comp_encoding_for(const struct client *c,
                              const struct vnc_session_opts *o)
 {
     if (o->zlib_level <= 0)
         return -1;                 /* RB_VNC_ZLIB_LEVEL=0: the switch is off */
-    if (c->tight_seen)
-        return VNC_ENC_TIGHT;
     if (c->zlib_seen)
         return VNC_ENC_ZLIB;
+    if (c->tight_seen)
+        return VNC_ENC_TIGHT;
     return -1;
 }
 
@@ -1639,9 +1657,20 @@ int vnc_session_run(const struct vnc_session_opts *o)
              * client offer, and zlib (6) is what macOS's Screen Sharing offers --
              * and Apple offers no other compressing encoding, which is why a session
              * with it ran on the Raw floor until encoding 6 existed. Raw is the floor,
-             * and the floor is what this server was doing all the time before today. */
+             * and the floor is what this server was doing all the time before today.
+             *
+             * AND THE JPEG RUNG IS GATED ON THE MODE, WHICH IS NOT OBVIOUS. A JPEG is
+             * produced whenever ANYTHING wants one, and the PREVIEW wants one in either
+             * mode -- so in raw mode a `jpg` is sitting right here, made for the control
+             * page, and handing it to a VNC client as a bonus silently downgrades that
+             * session from lossless zlib (~200 KB) to lossy JPEG (~37 KB) that nobody
+             * asked for. Measured 2026-10-10: opening the config page on :5904 -- which
+             * embeds /preview.mjpg -- visibly degraded a noVNC session that was
+             * otherwise pixel-identical to macOS's. The mode is the honest test here,
+             * and it is the rule the `want` computation above already states in words:
+             * "A VNC client wants it only in hwjpeg mode." */
             enc = comp_encoding_for(c, o);
-            if (jpg && jlen && client_jpeg_ok(c)) {
+            if (mode.mode == VNC_MODE_HWJPEG && jpg && jlen && client_jpeg_ok(c)) {
                 if (send_update(c, fr.px, fr.w, fr.h, jpg, jlen) < 0) {
                     vlog("%s: cannot keep up (%zu bytes queued unsent); dropping it "
                          "rather than growing", c->peer, c->outlen - c->outoff);
@@ -1692,7 +1721,16 @@ int vnc_session_run(const struct vnc_session_opts *o)
                  * stream would come up, and once guessed wrong. Printing both here,
                  * after the update has gone out, makes every word of it a fact about
                  * something that has already happened. */
-                const int jpeg = jpg && jlen && client_jpeg_ok(c);
+                /* THIS PREDICATE MUST MIRROR THE SEND SITE ABOVE, MODE GATE INCLUDED.
+                 * It did not, for one build: the gate was added to the send and not to
+                 * this, so a frame that went out as lossless zlib was logged as
+                 * "Tight, hardware JPEG" -- the log stating the opposite of the fact it
+                 * exists to report, and doing it in the one line an operator reads to
+                 * find out what a session actually got. The byte count was the tell
+                 * (183 KB is a zlib frame; a hardware JPEG here is ~37 KB), and the
+                 * wire settled it: encoding 6. Keep the two conditions identical. */
+                const int jpeg = mode.mode == VNC_MODE_HWJPEG && jpg && jlen &&
+                                 client_jpeg_ok(c);
                 const char *what =
                     jpeg ? "Tight, hardware JPEG"
                     : enc == VNC_ENC_ZLIB ? "zlib (encoding 6), lossless"
