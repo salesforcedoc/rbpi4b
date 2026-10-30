@@ -67,7 +67,7 @@ static int checks, failures;
 /* The maps this build has, as ctrlshim.c's midi_maps[]/evdev_maps[] spell them.
  * A COPY, and the header above says which direction that leaves unguarded. */
 static const char *const maps_the_build_has[] = {
-    "flx4", "jp21", "kbd", "none",
+    "flx4", "flx6", "jp21", "kbd", "none",
 };
 
 static int is_a_map(const char *name)
@@ -215,6 +215,31 @@ static void test_the_measured_row(void)
           f->id, f->map_name);
 }
 
+static void test_flx6_measured_row(void)
+{
+    const struct controller *f = controllers_find("flx6");
+
+    CHECK(f != NULL, "the FLX6 must have a row");
+    if (!f)
+        return;
+    CHECK(f->usb && strcmp(f->usb, "2b73:0038") == 0,
+          "the FLX6 USB id must be 2b73:0038");
+    CHECK(f->alsa_hint && strcmp(f->alsa_hint, "FLX6") == 0,
+          "the FLX6 ALSA hint must be FLX6");
+    CHECK(f->card_id && strcmp(f->card_id, "DDJFLX6") == 0,
+          "the FLX6 card id must be DDJFLX6");
+    CHECK(f->map_name && strcmp(f->map_name, "flx6") == 0,
+          "the FLX6 map must be flx6");
+    CHECK(f->init == NULL && f->init_len == 0,
+          "the FLX6 has no verified init SysEx");
+    CHECK(f->keepalive == NULL && f->keepalive_len == 0 && f->keepalive_ms == 0,
+          "the FLX6 must not inherit the FLX4 keepalive");
+    CHECK(controllers_by_hint("AlphaTheta Corporation DDJ-FLX6 MIDI 1") == f,
+          "the measured FLX6 sequencer name must match");
+    CHECK(controllers_by_usb("2b73:0038") == f,
+          "the measured FLX6 USB id must match");
+}
+
 /* ---------------------------------------------------------------------------
  * 3. The JP21's unknowns, and the empty needle
  */
@@ -285,8 +310,7 @@ static void test_find_and_hint(void)
      * pick_map() makes against a map's name -- so "which controller" and "which
      * map" cannot resolve differently. `MIDI_MAP=FLX4` is a typo and the shim
      * warns about it; this lookup must not quietly accept it. */
-    CHECK(f != NULL && f == controllers_at(0),
-          "find(\"flx4\") must be the table's first row");
+    CHECK(f != NULL, "find(\"flx4\") must retain the compatibility row");
     CHECK(controllers_find("FLX4") == NULL,
           "find() must be case-sensitive: MIDI_MAP=FLX4 is a typo, not a hit");
     CHECK(controllers_find("") == NULL, "an empty id is not a controller");
@@ -341,8 +365,8 @@ static void test_default(void)
     CHECK(d == controllers_at(0),
           "and it is the table's first row, so the fallback in "
           "controllers_default() and the table agree");
-    CHECK(strcmp(CONTROLLERS_DEFAULT_ID, "flx4") == 0,
-          "the shipped default is the surface this port targets: flx4");
+    CHECK(strcmp(CONTROLLERS_DEFAULT_ID, "flx6") == 0,
+          "the shipped default is the surface this port targets: flx6");
 }
 
 /* ---------------------------------------------------------------------------
@@ -559,6 +583,7 @@ static void test_the_walk_refuses(void)
 int main(void)
 {    test_shape();
     test_the_measured_row();
+    test_flx6_measured_row();
     test_the_unknowns_stay_unknown();
     test_find_and_hint();
     test_default();

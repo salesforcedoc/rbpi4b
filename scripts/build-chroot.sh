@@ -179,6 +179,11 @@ else
   TAR_IGNORE=""
 fi
 tar -C "$ROOTFS" $TAR_IGNORE -cf - . | tar -C "$CHROOT" -xf -
+
+# Never ship firmware device nodes. In particular, the RX3 rootfs contains
+# a bogus /dev/null (major 0, minor 0). fix-dev.sh binds the host /dev at runtime.
+rm -rf "$CHROOT/dev"
+
 touch "$CHROOT/var/log/wtmp" "$CHROOT/var/log/lastlog" 2>/dev/null || true
 
 # 2. gui assets -> /root/gui  (rbp reads /root/gui/pset/... and /root/gui/system/...;

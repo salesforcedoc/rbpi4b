@@ -88,7 +88,9 @@ def test_validate(m):
     check(m.validate("RB_POINT_KIND", "auto")[0], "an enum member is accepted")
     check(not m.validate("RB_POINT_KIND", "wibble")[0], "a non-member is refused")
     check(m.validate("RB_MIDI_MAP", "")[0], "an empty enum member is allowed where offered")
-    check(m.validate("RB_AUDIO_DEV", "hw:CARD=DDJFLX4,DEV=0")[0],
+    check(m.validate("RB_MIDI_MAP", "flx6")[0], "the target FLX6 map is offered")
+    check(m.validate("RB_MIDI_MAP", "flx4")[0], "the FLX4 compatibility map remains offered")
+    check(m.validate("RB_AUDIO_DEV", "hw:CARD=DDJFLX6,DEV=0")[0],
           "a real ALSA device name is accepted")
     check(not m.validate("RB_AUDIO_DEV", "hw:CARD=x DEV=0")[0], "whitespace is refused")
     check(not m.validate("RB_AUDIO_DEV", "a" * 100)[0], "an over-long value is refused")

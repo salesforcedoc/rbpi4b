@@ -584,7 +584,7 @@ The measurements — and the verification of the fixes — were taken with overr
 in `/opt/rblive4/rb.local.conf`, all marked TEMPORARY there and none of them a
 fix. As of 2026-09-27 the file holds:
 
-* `RB_MIDI_MAP=flx4` — **this one is now the default in `rb.conf` and the line is
+* `RB_MIDI_MAP=flx6` — **this one is now the default in `rb.conf` and the line is
   redundant**; it is kept only so the file records what changed and why. It was
   `kbd` for the earlier bring-up, and under the one-map rule that alone is what
   made the FLX4 look dead ([below](#two-selections-not-one)).
@@ -659,7 +659,7 @@ to consume what was arriving.
 
 | Variable | Chooses | Default |
 |---|---|---|
-| `RB_MIDI_MAP` / `MIDI_MAP` | the controller, on the ALSA sequencer: `flx4`, `jp21`, `kbd`, `none` | `flx4` |
+| `RB_MIDI_MAP` / `MIDI_MAP` | the controller, on the ALSA sequencer: `flx6`, `flx4`, `jp21`, `kbd`, `none` | `flx6` |
 | `RB_EVDEV_MAP` / `EVDEV_MAP` | the non-MIDI surface, on `/dev/input/event*`: `kbd`, `none` | `kbd` |
 
 So a controller, a keyboard and a mouse are all live with no configuration, which

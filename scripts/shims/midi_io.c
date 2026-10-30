@@ -68,7 +68,8 @@ static const char *out_match;
  * surface the table does not name -- that is the documented knob, and docs/15
  * tells them to use it. With nothing set the answer comes from the table:
  *
- *   MIDI_MAP=flx4   -> the FLX4's "FLX4" hint. The shipped default.
+ *   MIDI_MAP=flx6   -> the FLX6's "FLX6" hint. The shipped default.
+ *   MIDI_MAP=flx4   -> the compatibility FLX4 map and its "FLX4" hint.
  *   MIDI_MAP=kbd    -> no row at all (a keyboard is not a controller), so the
  *                      default controller's hint is used. That is deliberate and
  *                      is today's behaviour: under MIDI_MAP=kbd the FLX4 is

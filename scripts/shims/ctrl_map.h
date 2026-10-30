@@ -348,6 +348,10 @@ extern const struct ctrl_map map_kbd;
  * unit confirms them -- see the provenance block in map_flx4.c and docs/15. */
 extern const struct ctrl_map map_flx4;
 
+/* The DDJ-FLX6 two-deck map. Input assignments come from the user's verified
+ * MIDI XML; output/LED assignments remain disabled until measured. */
+extern const struct ctrl_map map_flx6;
+
 /* The selected MIDI surface's LED table, or NULL if it has none to drive. Defined
  * in ctrlshim.c because that is the only file that knows the selection, and asked
  * of the MIDI side alone: the LED panel belongs to the controller, so lighting

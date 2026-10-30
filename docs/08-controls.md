@@ -2,7 +2,8 @@
 
 Transport, deck, mixer, jog, pads and FX are driven from a MIDI control
 surface, and rbp's own LED and VU state is mirrored back onto the panel. On the
-Pi the surface is a **DDJ-FLX4** (`map_flx4.c`, the compiled-in default, see
+Pi the surface is a **DDJ-FLX6** (`map_flx6.c`, the compiled-in default; the
+FLX4 map remains available as a compatibility option, see
 [15 — FLX4 MIDI](15-flx4-midi.md)), whose tables are written from Pioneer's
 published MIDI list and **not yet confirmed against the unit**: nothing in this
 repository has been run with an FLX4 attached. A **keyboard map** needs nothing
@@ -88,10 +89,10 @@ ask rbp for is exactly the set of named functions in `rbp_bridge.h` —
 address itself. Semantics that are peculiar to one surface (shift, FX select,
 whether a CC is a switch) stay local to that map.
 
-`RB_MIDI_MAP` selects one of `flx4`, `jp21`, `kbd`, `none`, and `RB_EVDEV_MAP`
+`RB_MIDI_MAP` selects one of `flx6`, `flx4`, `jp21`, `kbd`, `none`, and `RB_EVDEV_MAP`
 selects one of `kbd`, `none`; they are two independent choices, one per event
 source, because a controller and a keyboard are different devices. Both have a
-default in `rb.conf` and in the source (`flx4` and `kbd`), so a unit with a
+default in `rb.conf` and in the source (`flx6` and `kbd`), so a unit with a
 controller, a keyboard and a mouse has all three live with no configuration. An
 unknown name falls back loudly rather than silently, and the warning names *which*
 variable was wrong — with two selections the bad value alone no longer says.
@@ -253,7 +254,7 @@ Start-up, and the per-event trace under `KNOB_VERBOSE=1`, are both one place to
 read:
 
 ```
-knobshim2: maps: MIDI_MAP='flx4' EVDEV_MAP='kbd'; <n> notes, <m> abs knobs; ...
+knobshim2: maps: MIDI_MAP='flx6' EVDEV_MAP='kbd'; <n> notes, <m> abs knobs; ...
 knobshim2: evdev map 'kbd': 1 non-MIDI source(s) wanted; evdev reader started
 knobshim2: evdev[913] /dev/input/event0 'AT Translated Set 2 keyboard' appeared; adding it
 knobshim2: evdev[914] /dev/input/event2 'Logitech USB Optical Mouse' appeared; adding it
@@ -418,7 +419,7 @@ command reaches rbp through — from the maps, from `pointsrc.c`'s taps, and fro
   # rbpi4b key dump v1 -- t is seconds since the first event; op 0=press ...
   # when 2026-10-09T09:04:11Z epoch 1791… mono_us 8…  pid 437
   # rbp /root/pdj/rbp size 8123456
-  # shim maps MIDI_MAP=flx4 EVDEV_MAP=kbd
+  # shim maps MIDI_MAP=flx6 EVDEV_MAP=kbd
   # media usb1 uuid='1A2B-3C4D' label='SANDISK' usb2 uuid='' label=''
   0.000000 op=0 key=0x410e ch=1 param=0 f=0 l=0 src=midi
   0.083214 op=2 key=0x410e ch=1 param=0 f=0 l=0 src=midi

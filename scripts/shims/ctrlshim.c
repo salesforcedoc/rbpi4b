@@ -92,7 +92,7 @@ static int dump_started;
  * turn `MIDI_MAP=kbd` into a typo warning and a silent fall back to the FLX4,
  * which is the opposite of what an operator writing it wants. */
 static const struct ctrl_map *const midi_maps[] = {
-     &map_flx4, &map_jp21, &map_kbd, &map_none,
+     &map_flx6, &map_flx4, &map_jp21, &map_kbd, &map_none,
 };
 static const struct ctrl_map *const evdev_maps[] = {
      &map_kbd, &map_none,
@@ -106,7 +106,7 @@ static const struct ctrl_map *const evdev_maps[] = {
  * port targets" is written down in exactly one place -- controllers.c -- and a
  * table row naming a map this build does not have is caught twice over (by
  * test_controllers.c, and by the log line below). The fallback's REASON is
- * unchanged: the FLX4 is the surface this port targets and the value rb.conf
+ * unchanged: the FLX6 is the surface this port targets and the value rb.conf
  * ships, so a shim started by hand with no environment and a typo'd name both end
  * up where they would have been anyway. The previous target's map is one word
  * away (MIDI_MAP=jp21) -- the point of the fallback is that a mistake is LOUD,

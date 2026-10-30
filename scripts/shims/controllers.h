@@ -2,7 +2,8 @@
  * controllers.h -- one row per control surface, and it is the only place any of
  * this port's facts about a surface is written down.
  *
- * WHY THIS EXISTS. One physical device -- the DDJ-FLX4 -- used to be named by
+ * WHY THIS EXISTS. One physical device -- originally the DDJ-FLX4, now the
+ * DDJ-FLX6 -- used to be named by
  * four unrelated tokens in four places that never referenced each other:
  *
  *   the map        rb.conf's RB_MIDI_MAP          -> ctrlshim.c's default_midi_map
@@ -11,7 +12,7 @@
  *   its USB id     docs/13 only                   -> nothing at all
  *
  * Change surface and you have to edit all four correctly. Miss one and it drifts
- * in silence: RB_AUDIO_DEV (DDJFLX4) is completely independent of RB_MIDI_MAP, so
+ * in silence: an explicit RB_AUDIO_DEV is independent of RB_MIDI_MAP, so
  * selecting MIDI_MAP=jp21 on a bench leaves the audio pointed at the FLX4 and
  * nothing says so. The two defaults are here so that the literals are in ONE
  * place; rb.conf's settings stay as the operator's overrides (docs/15 tells the
@@ -40,7 +41,7 @@
  * a typo'd name both end up where they would have been anyway. The previous
  * target is one word away (MIDI_MAP=jp21); the point of the fallback is that a
  * mistake is LOUD, not that it is impossible. */
-#define CONTROLLERS_DEFAULT_ID "flx4"
+#define CONTROLLERS_DEFAULT_ID "flx6"
 
 /* The JP21 protocol surface, named for the one caller that has to reach a
  * specific row rather than the selected one: midi_io.c's led_query_absolute()
@@ -53,24 +54,24 @@
 #define JP21_CONTROLLER_ID "jp21"
 
 struct controller {
-     const char *id;          /* "flx4"  -- the MIDI_MAP value and the CLI key.
+     const char *id;          /* "flx6"  -- the MIDI_MAP value and the CLI key.
                                * Case-sensitive, like the map selection it names. */
-     const char *name;        /* "DDJ-FLX4" -- human label for logs and doctor */
-     const char *usb;         /* "2b73:0045" -- the unit's USB id, lowercase hex
+     const char *name;        /* "DDJ-FLX6" -- human label for logs and doctor */
+     const char *usb;         /* "2b73:0038" -- the unit's USB id, lowercase hex
                                * `vvvv:pppp`. Detection only; this port has no
                                * udev rules and matches the card and the
                                * sequencer port, not the USB id. NULL = not
                                * known, and the CLI prints it as unknown. */
-     const char *alsa_hint;   /* "FLX4"  -- the ALSA sequencer PORT-NAME
+     const char *alsa_hint;   /* "FLX6"  -- the ALSA sequencer PORT-NAME
                                * substring, which is how the surface is actually
                                * found (midi_io.c's find_surface). Matched
                                * case-insensitively and as a substring, so it is
                                * "FLX4" and not "DDJ-FLX4 MIDI 1". NULL or empty
                                * = not reachable by name; see
                                * controllers_by_hint(). */
-     const char *card_id;     /* "DDJFLX4" -- the ALSA card id, as it appears in
+     const char *card_id;     /* "DDJFLX6" -- the ALSA card id, as it appears in
                                * `hw:CARD=<id>,DEV=<n>`. NULL = not known. */
-     const char *map_name;    /* "flx4"  -- the ctrl_map this row selects. It is
+     const char *map_name;    /* "flx6"  -- the ctrl_map this row selects. It is
                                * the link from "which controller" to "which
                                * binding table", and it equals `id` for every row
                                * today; test_controllers.c pins that, so a row

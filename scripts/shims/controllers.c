@@ -55,6 +55,17 @@ static const unsigned char sysex_jp21_abs[] = {
  */
 static const struct controller table[] = {
      {
+          "flx6",
+          "DDJ-FLX6",
+          "2b73:0038",                              /* measured on the target */
+          "FLX6",
+          "DDJFLX6",
+          "flx6",
+          NULL, 0,                                  /* init SysEx not established */
+          NULL, 0, 0,                               /* do not inherit FLX4 keepalive */
+          0, NULL,
+     },
+     {
           "flx4",
           "DDJ-FLX4",
           "2b73:0045",
@@ -63,7 +74,7 @@ static const struct controller table[] = {
           "flx4",
           NULL, 0,                                  /* no SysEx of its own */
           sysex_flx4_keepalive, sizeof sysex_flx4_keepalive, 200,
-          0, NULL,                                  /* a surface, not a mixer */
+          0, NULL,                                  /* compatibility surface */
      },
      {
           "jp21",
