@@ -3,14 +3,22 @@
 Transport, deck, mixer, jog, pads and FX are driven from a MIDI control
 surface, and rbp's own LED and VU state is mirrored back onto the panel. On the
 Pi the surface is a **DDJ-FLX6** (`map_flx6.c`, the compiled-in default; the
-FLX4 map remains available as a compatibility option, see
-[15 — FLX4 MIDI](15-flx4-midi.md)), whose tables are written from Pioneer's
-published MIDI list and **not yet confirmed against the unit**: nothing in this
-repository has been run with an FLX4 attached. A **keyboard map** needs nothing
+FLX4 map remains available as an unused compatibility option, see
+[15 — FLX4 MIDI](15-flx4-midi.md)). The [FLX6 inventory](flx6-mapping-audit.md)
+records the current layout and separates user-confirmed functions from recent
+locally checked additions. A **keyboard map** needs nothing
 plugged in, and the previous target's JP21 map is kept in the build as a worked,
 measured example.
 
 ## Structure: the front end, the bridge, and a map
+
+The FLX6 map now includes eight pad modes, auxiliary deck3/4 buttons, 14-bit
+mixer assembly, native shifted transport/Instant Doubles, Color FX controls,
+USB/record utilities and a five-second shutdown hold with ring countdown.
+Its connection callback releases held controls and resets packet/button state
+on loss or fresh subscription, including reused ALSA addresses. Startup uses
+the FLX6 position query with bounded retries; see the inventory for details.
+The dated FLX4/JP21 captures below retain their original device names and results.
 
 The controls shim was one 2500-line file (`knobshim2.c`), which mixed three
 concerns: knowing rbp, knowing a controller, and being a thread. It is now a
@@ -21,6 +29,8 @@ small set of modules built into `knobshim.so`:
 | `ctrlshim.c` | the constructor, the threads, map selection, and map-agnostic dispatch |
 | `ctrl_map.c` / `.h` | `struct ctrl_map`; the note/CC binding tables every map fills, and their invalidation |
 | `map_jp21.c` | the previous target's tables |
+| `map_flx6.c` | default two-deck FLX6 input/LED metadata, utility/shutdown gestures and connection cleanup |
+| `map_flx4.c` | optional FLX4 compatibility mapping |
 | `map_kbd.c` | the keyboard fallback: evdev keycodes → rbp keycodes, with no MIDI and no controller involved |
 | `evdev_io.c` / `.h` | the non-MIDI event source (`/dev/input/event*`): discovery, the poll loop, and a handler that receives raw evdev triples. It knows no keycode. |
 | `mididump.c` / `.h` | the dump format: record a surface, replay it with no hardware |
@@ -312,8 +322,8 @@ Input is never hardcoded to a device node. The shim walks the ALSA sequencer's
 client and port lists with `SNDRV_SEQ_IOCTL_QUERY_NEXT_CLIENT` /
 `SNDRV_SEQ_IOCTL_QUERY_NEXT_PORT`, matches the port name against
 `RB_MIDI_IN_MATCH` (a case-insensitive substring; empty — the shipped default —
-means the selected controller's own hint from the table, which is `FLX4` for the
-FLX4), requires the
+means the selected controller's own hint from the table: `FLX6` by default,
+or `FLX4` when the compatibility map is explicitly selected), requires the
 port's capabilities to include `CAP_READ | SUBS_READ`, excludes its own client,
 and subscribes — **in a retry loop**, because the shim starts before the
 controller is necessarily enumerated and plugging it in late has to work. A
@@ -342,14 +352,14 @@ knobshim2: LED/meter output route: none (no sequencer surface, no rawmidi node)
 — because with no route the UI still draws and no control ever reaches it, which
 looks exactly like a broken map. The log, not this page, is the authority on a
 given build. Note that the match name is the *only* thing selecting a surface:
-with the default `FLX4`, a JP21/SC Live 4 falls through to the rawmidi node,
+with the default `FLX6`, a JP21/SC Live 4 falls through to the rawmidi node,
 which is why the old target's LEDs still light on a bench.
 
 There is one deliberate asymmetry in the output path: the JP21's
 absolute-control query ([below](#keycode--rbp-and-the-absolute-control-query)) is
-a JP21 protocol message, and the sequencer route carries only the three-byte
-note/CC messages, so that query goes out on rawmidi or not at all — and says so
-once in the log when it cannot be sent.
+a JP21 protocol message and remains rawmidi-specific. The sequencer route also
+carries complete SysEx: FLX6 uses its own guarded position query there, at most
+three times per connection, with unreported-fader fallback after six seconds.
 
 See [13](13-raspberrypi4.md) for the bring-up checks that confirm `/dev/snd/seq`
 exists and the port is visible.

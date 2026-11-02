@@ -1,5 +1,13 @@
 # tools/
 
+The active controller is DDJ-FLX6 (ALSA DDJFLX6, port DDJ-FLX6 MIDI 1).
+Use that identity for current diagnostics; dated FLX4 capture/pcmprobe examples
+below retain their measured names and results. The current map is described in
+the [FLX6 inventory](../docs/flx6-mapping-audit.md). Device-side
+[beat-display](../scripts/device/flx6-beat-led-probe.py) and
+[headphone-routing](../scripts/device/flx6-headphone-probe.py) probes temporarily
+stop/restore the player; they are explicit diagnostics, not installation steps.
+
 Two kinds of tool live here:
 
 | Tool | Runs on | Language | Purpose |
@@ -261,7 +269,7 @@ qemu-arm -L extracted/XDJRX3-rootfs scripts/shims/pcmprobe      # names every va
 Run with no arguments it calls `snd_pcm_format_name()` for every candidate and
 prints the mapping **as measured from libasound rather than transcribed**, with
 each format's `width` and `physical` bytes — that difference is what `AUDIO_FMT`
-actually names. Give it a device (`pcmprobe hw:CARD=DDJFLX4,DEV=0`) and it lists
+actually names. Give it a device (`pcmprobe hw:CARD=DDJFLX6,DEV=0` for the current controller) and it lists
 that card's accepted formats by name, which is the same question
 `aplay --dump-hw-params` answers, in the shim's own vocabulary.
 

@@ -74,6 +74,183 @@ void *mixer_engine(void)
      return *(void **)ME_SINGLETON;
 }
 
+int rbp_beatfx_beat(void)
+{
+     if (!is_rbp_process()) return -1;
+     void *me = mixer_engine();
+     if (!me) return -1;
+     const unsigned char *bem = *(const unsigned char *volatile *)
+                                ((const unsigned char *)me + BEM_IN_MIXER);
+     if (!bem) return -1;
+     const unsigned char *be = *(const unsigned char *volatile *)(bem + BEM_OFF_EFFECT);
+     if (!be) return -1;
+     int rung = *(const volatile int *)(be + BE_OFF_BEAT);
+     return rung >= 0 && rung < BFX_BEAT_RUNG_COUNT ? rung : -1;
+}
+
+int rbp_usb_media_state(int slot)
+{
+     if (slot < 1 || slot > 2 || !is_rbp_process()) return -1;
+     const unsigned char *holder = *(const unsigned char **)UIOBJ_HOLDER_GLOBAL;
+     if (!holder) return -1;
+     int count = *(const int *)(holder + UIOBJMGR_OFF_MGRNUM);
+     const unsigned char *const *managers =
+          *(const unsigned char *const **)(holder + UIOBJMGR_OFF_MGRARR);
+     if (!managers || count < slot || count > 8) return -1;
+     const unsigned char *manager = managers[slot - 1];
+     if (!manager || *(const int *)(manager + USB_MGR_OFF_CHANNEL) != slot) return -1;
+     return *(const volatile int *)(manager + USB_MGR_OFF_MEDIA);
+}
+
+int rbp_recording(void)
+{
+     if (!is_rbp_process()) return -1;
+     void *me = mixer_engine();
+     if (!me) return -1;
+     return ((int (*)(void *))ADDR_RECORDING_STATUS)(me) != 0;
+}
+
+int rbp_deck_pad_mode(int deck)
+{
+     if (deck < 0 || deck > 1 || !is_rbp_process())
+          return -1;
+     void *holder = *(void **)UI_PADMODE_HOLDER_GLOBAL;
+     if (!holder) return -1;
+     void *sw = *(void **)((char *)holder + PADMODE_STATWATCHER_OFF);
+     if (!sw) return -1;
+     void *pd = *(void **)((char *)sw +
+                           (deck ? PADMODE_DECK2_OFF : PADMODE_DECK1_OFF));
+     if (!pd) return -1;
+     int mode = *(volatile unsigned char *)((char *)pd + PADMODE_BYTE_OFF);
+     return mode < 8 ? mode : -1;
+}
+
+int rbp_loop_resize(int deck, int halve)
+{
+     if (deck < 0 || deck > 1 || !is_rbp_process())
+          return -1;
+     void *pe = *(void **)PLAYENGINE_GLOBAL;
+     if (!pe) return -1;
+     if (!((int (*)(void *, int))PE_ISLOOPING)(pe, deck))
+          return 0;
+     return ((int (*)(void *, int, int))PE_SETLOOPCUTTERDOUBLE)
+            (pe, deck, halve != 0) != 0;
+}
+
+int rbp_read_deck_feedback(int deck, struct rbp_deck_feedback *state)
+{
+     if (!state || deck < 0 || deck > 1 || !is_rbp_process()) return 0;
+     void *pe = *(void **)PLAYENGINE_GLOBAL;
+     if (!pe) return 0;
+     memset(state, 0, sizeof *state);
+     state->loaded = ((int (*)(void *, int))PE_ISLOADED)(pe, deck) != 0;
+     state->loading = ((int (*)(void *, int))PE_ISLOADING)(pe, deck) != 0;
+     if (state->loaded) {
+          unsigned int music[2] = { 0, 0 };
+          state->samples = ((long (*)(void *, int))PE_GETPLAYINGPOSITION)(pe, deck);
+          ((void (*)(int, unsigned int *))ADDR_CURRENT_MUSIC_ID)(deck, music);
+          state->music_hi = music[0];
+          state->music_lo = music[1];
+     }
+     return 1;
+}
+
+static struct {
+     int pending;
+     unsigned int hi, lo;
+     unsigned long long deadline;
+} shortcut_play[2];
+
+int rbp_transport_shortcut(int deck, int from_cue)
+{
+     struct rbp_deck_feedback state;
+     if (deck < 0 || deck > 1) return -1;
+     shortcut_play[deck].pending = 0;
+     if (!rbp_read_deck_feedback(deck, &state)) return -1;
+     if (!state.loaded || state.loading) return 0;
+     void *pe = *(void **)PLAYENGINE_GLOBAL;
+     if (from_cue) {
+          if (!((int (*)(void *, int))PE_CANBACKCUE)(pe, deck)) return 0;
+          if (!((int (*)(void *, int, int))PE_BACKCUETOSTANDBY)(pe, deck, 0))
+               return 0;
+          /* BackCueACB::operator() @0x7349c enters standby when buffering
+           * finishes. Playing before that callback can be undone by it. */
+          shortcut_play[deck].pending = 1;
+          shortcut_play[deck].hi = state.music_hi;
+          shortcut_play[deck].lo = state.music_lo;
+          shortcut_play[deck].deadline = shim_now_ms() + 2000;
+          rbp_transport_shortcut_tick(0);
+          return 1;
+     }
+     if (!((int (*)(void *, int, int, int, int))PE_PAUSE_SHORTCUT)
+           (pe, deck, 0, 0, 0)) return 0;
+     return ((int (*)(void *, int, long))PE_SETPLAYINGTIME)(pe, deck, 0) != 0;
+}
+
+void rbp_transport_shortcut_tick(int cancel)
+{
+     for (int deck = 0; deck < 2; deck++) {
+          if (!shortcut_play[deck].pending) continue;
+          if (cancel) { shortcut_play[deck].pending = 0; continue; }
+          struct rbp_deck_feedback state;
+          if (!rbp_read_deck_feedback(deck, &state) || !state.loaded || state.loading ||
+              state.music_hi != shortcut_play[deck].hi || state.music_lo != shortcut_play[deck].lo ||
+              shim_now_ms() >= shortcut_play[deck].deadline) {
+               shortcut_play[deck].pending = 0;
+               klog("knobshim2: deck%d cue-and-play cancelled (track changed, unavailable or timed out)\n", deck + 1);
+               continue;
+          }
+          void *pe = *(void **)PLAYENGINE_GLOBAL;
+          if (!((int (*)(void *, int))PE_CUESTANDBY)(pe, deck)) continue;
+          shortcut_play[deck].pending = 0;
+          ((int (*)(void *, int, int, int, int))PE_PLAY_SHORTCUT)(pe, deck, 0, 0, 0);
+     }
+}
+
+void rbp_transport_shortcut_cancel(int deck)
+{
+     if (deck >= 0 && deck < 2) shortcut_play[deck].pending = 0;
+}
+
+int rbp_toggle_active_loop(int deck)
+{
+     struct rbp_deck_feedback state;
+     unsigned int cue[13] = { 0 };
+     if (!rbp_read_deck_feedback(deck, &state)) return -1;
+     if (!state.loaded || state.loading) return 0;
+     if (!((int (*)(int))ADDR_EXIST_MEMORY_CUE)(deck)) return 0;
+     ((void (*)(unsigned int *, int))ADDR_CURRENT_CUE_INFO)(cue, deck);
+     unsigned int index = cue[0] & 0xffff;
+     unsigned int type = cue[0] >> 16;
+     /* This gesture changes a called memory LOOP only, never a hot cue or
+      * plain memory cue. Use CUE/LOOP CALL to choose the stored loop first. */
+     if (index != 0 || (type != 1 && type != 0x8001)) return 0;
+     /* Current cue flags need not change when an Active Loop notification
+      * updates the engine. Read the engine's registered loop rather than
+      * toggling a stale flag from the original memory-cue call. */
+     void *pe = *(void **)PLAYENGINE_GLOBAL;
+     void **begin = *(void ***)((char *)pe + PE_PLAYERS_BEGIN_OFF);
+     void **end = *(void ***)((char *)pe + PE_PLAYERS_END_OFF);
+     if (!begin || !end || end <= begin || end - begin > 8 || deck >= end - begin)
+          return -1;
+     void *player = begin[deck];
+     if (!player) return -1;
+     void *active = *(void **)((char *)player + PE_PLAYER_ACTIVE_LOOP_OFF);
+     if (!active) return -1;
+     long long want_in = (long long)cue[1] * 441 / 10;
+     long long want_out = (long long)cue[2] * 441 / 10;
+     long long delta_in = *(int *)((char *)active + ACTIVE_LOOP_IN_OFF) - want_in;
+     long long delta_out = *(int *)((char *)active + ACTIVE_LOOP_OUT_OFF) - want_out;
+     int same = *(unsigned char *)((char *)active + ACTIVE_LOOP_REGISTERED_OFF) &&
+                llabs(delta_in) <= 44 && llabs(delta_out) <= 44;
+     cue[0] = (cue[0] & 0x7fffffffU) | (same ? 0 : 0x80000000U);
+     int accepted = ((int (*)(int, unsigned int, unsigned int, const void *))
+                     ADDR_DB_SAVE_CUE)(deck + 1, state.music_hi, state.music_lo, cue);
+     klog("knobshim2: deck%d saved Active Loop -> %s request=%s\n", deck + 1,
+          same ? "OFF" : "ON", accepted ? "accepted" : "refused");
+     return accepted != 0;
+}
+
 int me_channel_input(void *engine, int idx)
 {
      void **begin, **end;
@@ -156,6 +333,48 @@ int me_get_master_cue(void)
      if (!engine)
           return -1;
      return ((int (*)(void *))ME_GET_MASTER_CUE)(engine);
+}
+
+int me_set_crossfader_assign(int idx, int assign)
+{
+     void *engine = mixer_engine();
+     int input;
+     if (!engine)
+          return 0;
+     input = me_channel_input(engine, idx);
+     if (input < 0)
+          return 0;
+     ((void (*)(void *, int, int))ME_SET_XFADER_ASSIGN)(engine, input, assign);
+     return ((int (*)(void *, int))ME_GET_XFADER_ASSIGN)(engine, input) == assign;
+}
+
+int me_get_crossfader_assign(int idx)
+{
+     void *engine = mixer_engine();
+     int input;
+     if (!engine)
+          return -1;
+     input = me_channel_input(engine, idx);
+     if (input < 0)
+          return -1;
+     return ((int (*)(void *, int))ME_GET_XFADER_ASSIGN)(engine, input);
+}
+
+int me_set_crossfader_curve(int curve)
+{
+     void *engine = mixer_engine();
+     if (!engine)
+          return 0;
+     ((void (*)(void *, int))ME_SET_XFADER_CURVE)(engine, curve);
+     return ((int (*)(void *))ME_GET_XFADER_CURVE)(engine) == curve;
+}
+
+int me_get_crossfader_curve(void)
+{
+     void *engine = mixer_engine();
+     if (!engine)
+          return -1;
+     return ((int (*)(void *))ME_GET_XFADER_CURVE)(engine);
 }
 static void *g_plinn[2];              /* ui::PlayerInnards per deck */
 

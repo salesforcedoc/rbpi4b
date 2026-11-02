@@ -1,8 +1,8 @@
 # Tutorial — run `rb` on a Raspberry Pi 4B
 
 End-to-end: from the extracted XDJ-RX3 assets to `rbp` running on the Pi.
-Everything targets a **Pi 4B on Pi OS Lite 32-bit (Bookworm)** with an HDMI
-monitor and a DDJ-FLX4.
+Everything targets a **Pi 4B on Pi OS Lite 32-bit (the current unit uses Debian 13 trixie)** with an HDMI
+monitor and a DDJ-FLX6.
 
 > rbpi4b does not cover firmware acquisition, decryption or keys — start from
 > the extracted tree described in [docs/04](docs/04-firmware-assets.md).
@@ -146,8 +146,8 @@ gcc -O2 -static -o evdevdump tools/evdevdump.c
 | `tools/fbdump` (after the `cmdline.txt` recipe + reboot) | **measured: 1280×800, 16 bpp RGB565, `line_length` 2560, `smem_len` 2048000 (one page)** — the panel takes a `video=` mode its EDID never advertised, so the fb matches `rbp`'s surface exactly and the verdict line reads `geometry MATCHES`. `110 x 60 mm` means the EDID is still unread, i.e. the mode is forced, not negotiated. If a sink does refuse the timings you get 1280×720 back instead — then read [docs/06](docs/06-display.md) before assuming the display path is broken |
 | UI on the monitor | rekordbox UI, full-screen ([docs/06](docs/06-display.md)) |
 | `tools/evdevdump --list`, then point at the screen | rb reacts; see the four-corner procedure in [docs/07](docs/07-touch.md) |
-| `speaker-test` on the FLX4, then load + play | master out on the RCA, cue on the headphone jack ([docs/09](docs/09-audio.md)) |
-| `aseqdump -l`, then PLAY / CUE / faders / jog | messages arrive, and the deck responds — the map is written and fixture-tested, but its note/CC tables are unverified until a dump confirms them ([docs/15](docs/15-flx4-midi.md)) |
+| USB playback on the FLX6, then load + play | Master on USB0/1 and headphones on2/3. Hardware MIX and MASTER CUE add master to the cue-only headphone stream ([docs/09](docs/09-audio.md)) |
+| `aseqdump -l`, then PLAY / CUE / faders / jog | Messages arrive and the mapped deck responds; compare the [FLX6 inventory](docs/flx6-mapping-audit.md), which distinguishes confirmed controls from recent locally checked additions |
 | load a track with `1` and press `space` | deck 1 plays; `↑`/`↓` scroll the list, `Esc`/`Backspace`/right-click leave a screen. The keyboard and mouse need no configuration — they run alongside the controller (`EVDEV_MAP=kbd`, the default) and need no MIDI, no controller and no `/dev/snd/seq` ([docs/08](docs/08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)) |
 | Insert a rekordbox USB stick | shows as **USB 1** with the label/track count ([docs/10](docs/10-usb.md)) |
 
@@ -165,28 +165,32 @@ Unlike the previous target there is no vendor OS to hand the hardware back to �
 nothing is disabled at boot, and the services the launcher stops are started
 again by the line above.
 
-## Current limitations
+## Current controls and limitations
 
-* The FLX4 map is written and fixture-tested, but **nothing has been run with an
-  FLX4 attached**, so its note/CC tables come from Pioneer's published MIDI list
-  rather than from the unit. Expect to correct some of them, starting with the
-  channel conversion and the pad encoding; the dump procedure and the open
-  questions are in [docs/15](docs/15-flx4-midi.md). The first sign of a wrong
-  table is silence from a whole section rather than a wrong button — run with
-  `RB_KNOB_VERBOSE=1` and read the unmapped lines in `/tmp/knobshim.log`.
-* The way to drive `rbp` without one is the **keyboard fallback**,
-  `EVDEV_MAP=kbd`, which is the default
-  ([docs/08](docs/08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone)):
-  keyboard and mouse, live alongside the controller rather than instead of it, no
-  MIDI needed for them. It is written, cross-compiled and fixture-tested, and it
-  has since been driven on the Pi. `RB_MIDI_MAP=kbd` additionally selects it as
-  the *controller* map, which is how to stop the shim looking for one at all. The
-  direction its selector turns for `↑`/`↓` is still the one thing about it that
-  only hardware — a screen with a list in it — can settle.
-* Booth output is dropped: the FLX4 has two output pairs ([docs/09](docs/09-audio.md)).
-* DJ FX parameter/layer encoders, TrackSkip, BeatJump and some SHIFT-actions are
-  not mapped ([docs/08](docs/08-controls.md)).
-* Autostart ships enabled — `install.sh` installs and enables `rblive4.service`
-  (`RB_AUTOSTART=1`), so the player is already up after a reboot. `RB_AUTOSTART=0`
-  installs the unit but leaves it disabled, and `start-rb.sh` is then run by hand
-  ([docs/11](docs/11-runtime-launcher.md)).
+FLX6 is the default. Leave RB_MIDI_MAP, RB_AUDIO_DEV and MIDI match overrides
+empty to use its registered identity, or explicitly select RB_MIDI_MAP=flx6.
+Old local overrides naming FLX4/DDJFLX4 must be cleared when moving to FLX6.
+FLX4 remains available only by selecting RB_MIDI_MAP=flx4.
+
+See the [full layout](docs/flx6-mapping-audit.md) and
+[operator shortcuts](scripts/shims/README.md). The keyboard/mouse fallback
+remains enabled through RB_EVDEV_MAP=kbd independently of the controller.
+
+After deploying the latest shim, verify SHIFT+CUE (pause at track zero),
+SHIFT+PLAY (main cue and play), SHIFT+LOAD (Instant Doubles), channel3 FILTER
+(global Color amount), held-input reconnect cleanup, and shutdown/countdown.
+These latest additions have local build/host checks but no reported Pi result.
+
+Right Merge presets1..4 perform USB1 eject, USB2 eject, Track Mark and master
+record toggle. Recording requires writable USB2. Select physical preset1 and
+SHIFT+press its knob to align the utility counter after a mismatch.
+
+Hold unshifted LEFT Merge knob five seconds to request host shutdown -h now;
+release early to cancel. The ring accelerates from1Hz to2Hz to5Hz during the
+hold, then stays lit when the hold completes. Let shutdown finish before
+removing power. The latest shim must be deployed before relying on the shortcut.
+
+Automatic preset discovery, disabling firmware Jog Cutter, four-deck audio,
+and separate RX3 USB booth output are outside the current implementation.
+Autostart remains enabled by RB_AUTOSTART=1; RB_AUTOSTART=0 leaves the installed
+service disabled.

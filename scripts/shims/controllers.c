@@ -39,6 +39,12 @@ static const unsigned char sysex_jp21_abs[] = {
      0xF0, 0x00, 0x02, 0x0B, 0x7F, 0x12, 0x04, 0x00, 0x00, 0xF7
 };
 
+/* Startup position request from the operator's working FLX6 Mixxx script.
+ * This is a software reference; a successful write does not prove a reply. */
+static const unsigned char sysex_flx6_abs[] = {
+     0xF0, 0x00, 0x20, 0x7F, 0x03, 0x01, 0xF7
+};
+
 /*
  * THE TABLE.
  *
@@ -61,7 +67,7 @@ static const struct controller table[] = {
           "FLX6",
           "DDJFLX6",
           "flx6",
-          NULL, 0,                                  /* init SysEx not established */
+          sysex_flx6_abs, sizeof sysex_flx6_abs,
           NULL, 0, 0,                               /* do not inherit FLX4 keepalive */
           0, NULL,
      },

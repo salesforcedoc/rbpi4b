@@ -14,7 +14,9 @@ framebuffer, USB MIDI controller, USB audio — into what `rbp` expects.
 
 The target document is [13 — Raspberry Pi 4](13-raspberrypi4.md); it carries the
 image, the `cmdline.txt` recipe and the bring-up order. This chapter is the map
-of the whole thing.
+of the whole thing. FLX6 is the default; physical decks3/4 supply auxiliary
+buttons for the two RX3 players. Hardware headphone MIX combines USB master0/1
+and cue2/3; the native headphone stream stays cue-only.
 
 ## The pieces
 
@@ -22,7 +24,7 @@ of the whole thing.
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        Raspberry Pi 4B                              │
 │  BCM2711 · HDMI (vc4drmfb) · USB-A host · no touchscreen            │
-│  DDJ-FLX4 on USB: MIDI control surface + 4-channel USB audio        │
+│  DDJ-FLX6 on USB: MIDI control surface + 4-channel USB audio        │
 │                                                                     │
 │  ┌────────────── /opt/rblive4/rbx3-run (chroot) ────────────────────┐│
 │  │  soft-float glibc 2.13 + RX3 libs + DirectFB 1.4              ││
@@ -30,14 +32,14 @@ of the whole thing.
 │  │   rbp-audio  ──  the XDJ-RX3 rekordbox player                 ││
 │  │      ▲  ▲  ▲  ▲                                               ││
 │  │      │  │  │  └── netshim.so    eth0-name introspection → wlan0││
-│  │      │  │  └───── knobshim.so   DDJ-FLX4 MIDI → RX3 keycodes  ││
-│  │      │  └──────── audioshim.so  JUCE/ALSA → FLX4 USB audio    ││
+│  │      │  │  └───── knobshim.so   DDJ-FLX6 MIDI → RX3 keycodes  ││
+│  │      │  └──────── audioshim.so  JUCE/ALSA → FLX6 USB audio    ││
 │  │      └─────────── fbshim.so     fb ioctl + evdev → tsc2007    ││
 │  │                                                               ││
 │  │   libdirectfb_fbdev.so (rebuilt) ── the present path          ││
 │  └────────────────────────────────────────────────────────────────┘│
 │        ▲              ▲                ▲               ▲           │
-│     /dev/fb0    /dev/input/eventN   MIDI "DDJ-FLX4"  /tmp/udev_usb1│
+│     /dev/fb0    /dev/input/eventN   MIDI "DDJ-FLX6"  /tmp/udev_usb1│
 │   (HDMI, 16bpp)   (pointer evdev)     seq port        (hotplug)    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -49,8 +51,8 @@ of the whole thing.
 | CPU float ABI | soft-float ARM32 | hard-float kernel, armhf userland | soft-float chroot; the kernel runs soft-float ELF natively, and only needs 32-bit emulation to do it (its own bitness does not matter) |
 | Display | 1280×800 landscape, RGB565 | `vc4drmfb` over HDMI, measured 1280×800 at 16 bpp RGB565 — `rbp`'s own surface | rebuilt DirectFB fbdev driver: the present path bridges any geometry/format difference, and on the measured panel the difference is **none** — what needed fixing there was the buffer mode, decided from the fb's page count. A monitor of *any other size* is the case the `scale` rung exists for, and the driver selects it by itself when the real fb disagrees with the logical one — **run on glass at 1280×720, 960×600, 800×600 and 1920×1080 (S10.1–S10.3, 2026-09-26), whole UI, 1.1–3.4 ms of a 16.67 ms frame, with the 1280×800 panel unchanged (S10.4)**; `display-watch.sh` restarts the player when a swap changes the geometry mid-session, and **that half is still unrun** ([06](06-display.md#a-mismatch-selects-the-rung-by-itself)) |
 | Pointing | tsc2007 resistive via `/dev/tsc2007_2-0048` | **no touchscreen** — an evdev pointer | `fbshim.so` synthesises the tsc2007 protocol from a discovered evdev device |
-| Controls | Pioneer front-panel MCUs (EUP/SUB) | DDJ-FLX4 over USB MIDI | `knobshim.so` maps MIDI → `sendKey()` |
-| Audio | 3× discrete CS4344 DACs | the FLX4's 4-channel USB audio | `audioshim.so` maps rbp's streams onto the FLX4's output pairs |
+| Controls | Pioneer front-panel MCUs (EUP/SUB) | DDJ-FLX6 over USB MIDI | `knobshim.so` maps MIDI → `sendKey()` |
+| Audio | 3× discrete CS4344 DACs | the FLX6's 4-channel USB audio | `audioshim.so` maps rbp's streams onto the FLX6's output pairs |
 | USB | 2 host ports + sub-MCU | USB-A host ports | `usb-watch.sh` + native DeviceSQL import |
 | Music DB | internal EDB daemon | — | RX3 `edb_streamd` runs in the chroot |
 | Networking | `eth0` with a Pro DJ Link peer on the LAN | `eth0` **down**, WiFi up | `netshim.so` rewrites the interface *name* in rbp's whitelisted `eth0` introspection — **built and host-verified, off by default, not deployed** ([18](18-prodjlink.md)) |
@@ -82,19 +84,17 @@ the settings panel's `USB1 STOP`/`USB2 STOP` rows can eject either one on its ow
 **Loading + playing a track**
 
 ```
-LOAD  → FLX4 MIDI → knobshim → sendKey(0x4311)
+LOAD  → FLX6 MIDI → knobshim → sendKey(0x4311)
       → rbp loads track + ANLZ analysis → waveform
 PLAY  → knobshim → sendKey(0x4101)
       → DjEngineIF::play → PlayEngine clocked by the ALSA callback
-      → audioshim packs S24_LE periods into S24_3LE for hw:CARD=DDJFLX4,DEV=0
-      → master (pair 1) + headphones (pair 2) on the FLX4
+      → audioshim packs S24_LE periods into S24_3LE for hw:CARD=DDJFLX6,DEV=0
+      → master (pair 1) + headphones (pair 2) on the FLX6
 ```
 
-The note numbers above are what the FLX4 map sends. The map is written and
-fixture-tested, and the unit's own messages have been inventoried with
-`aseqdump`, but the tables themselves still come from Pioneer's published MIDI
-list: no control has yet been pressed and watched through to rbp. See
-[15 — DDJ-FLX4 MIDI](15-flx4-midi.md).
+The current map and its confirmed/local-only verification status are recorded
+in the [FLX6 inventory](flx6-mapping-audit.md). FLX4 remains a compatibility
+option, with its older measurements in [15](15-flx4-midi.md).
 
 ## Repository map
 
@@ -106,7 +106,7 @@ four machines in [02 — Hardware](02-hardware.md), and the reuse/change plan in
 ## Prerequisites
 
 * A Raspberry Pi 4B running **Pi OS Lite 32-bit**, with root and network.
-* A DDJ-FLX4 (or, for bring-up, nothing at all — display, pointing and audio can
+* A DDJ-FLX6 (or, for bring-up, nothing at all — display, pointing and audio can
   all be tested before a controller is plugged in).
 * A workstation with `arm-linux-gnueabi-gcc` (soft-float) and, for the DirectFB
   build, Docker or an equivalent ARM toolchain.

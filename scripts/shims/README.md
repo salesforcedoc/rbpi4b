@@ -1,9 +1,136 @@
 # scripts/shims/
 
-`LD_PRELOAD` libraries (and two static helpers) that adapt the Raspberry Pi 4's
-hardware to what the XDJ-RX3 `rbp` binary expects. All original code (MIT).
-None of them contain Pioneer code; they call into `rbp`'s exported/singleton
-entry points and translate hardware.
+LD_PRELOAD libraries and static helpers adapting Raspberry Pi hardware to
+the XDJ-RX3 player. Original shim code is MIT-licensed; shims call native
+player entry points and translate hardware.
+
+The current two-deck FLX6 layout is recorded in the
+[full mapping inventory](../../docs/flx6-mapping-audit.md).
+FLX6 is the default; FLX4 remains a compatibility map. Physical decks3/4 provide
+extra buttons for RX3 decks1/2, rather than two additional players.
+
+User-confirmed features include the core controls, eight pad modes/lights,
+meters, FX ON/OFF and beat lights, headphone mixing, right Merge utilities,
+startup Reverse correction and normal hot-plug. The latest audit fixes,
+shifted transport/LOAD, 14-bit mixer, disconnect cleanup, preset calibration,
+shutdown and countdown are built/checked locally; no subsequent Pi verification
+has been reported. See CODEX_HANDOFF.md at the repository root for session state.
+
+## FLX6 controls
+
+| Gesture | RX3 action |
+| --- | --- |
+| Double-click LOAD or SHIFT+LOAD1/2 | Native Instant Doubles on the destination deck |
+| SHIFT+CUE | Pause at track beginning, retaining the main cue |
+| SHIFT+PLAY | Return to main cue and play once native cue buffering completes |
+| SHIFT+PFL, physical3/1/2/4 | Dub Echo / Sweep / Noise / Filter on both RX3 channels |
+| Channel3 FILTER | Sound Color FX amount on both channels; individual1/2 knobs remain mapped |
+| MEMORY / SHIFT+MEMORY | Native memory save/delete |
+| CALL left/right / SHIFT+CALL | Previous/next memory cue or loop / halve/double an active loop |
+| SHIFT+LOOP IN/OUT | Native loop boundary adjustment |
+| SHIFT+RELOOP | Toggle the called saved memory loop's Active flag |
+| Auxiliary deck3/4 SYNC / MASTER | RX3 deck1/2 Master Tempo / Slip |
+| Auxiliary SHIFT+JOG CUTTER | Reverse; requires actual SHIFT to reject startup VINYL reports |
+| Auxiliary CALL / SHIFT+CALL | Held Search backward/forward / Track Search previous/next |
+| SHIFT+Browse/jog/non-Hot-Cue pads | Same existing selector/jog/pad action; Hot Cue SHIFT+pad remains delete |
+
+SHIFT+PLAY is refused without a loaded track/main cue and cancels on normal
+PLAY/CUE, load, disconnect, track change or a two-second timeout. For Active
+Loop, call a saved memory loop first; ordinary memory cues and hot cues are
+refused. The copied cue goes through native DbProxy save/notifications; the
+shim does not rewrite the database itself. Native API addresses/provenance
+are recorded in rbp_abi.h.
+
+The four physical pad families plus SHIFT select all eight RX3 modes.
+Mode-button output is deliberately disabled: writes can select the hardware
+bank and previously cancelled shifted selections. Pad lights follow the
+physical bank and actual native occupancy/activity. Jog rings follow native
+sample position (0.6075 revolutions/s); load animations observe loading and
+music-ID changes, mirrored to auxiliary layers. A very fast same-track reload
+can fall between LED polls.
+
+The FX selector exposes Echo, Spiral, Reverb, Trans, Flanger and Phaser.
+The target selector maps A/1/2/B/MASTER. All six ON/OFF and depth aliases are
+handled. Depth assembles each hardware slot separately and deduplicates against
+one global value. ON/OFF light output clears inactive slots and writes the
+selected slot last; native active type and enable flag both gate it.
+BEAT left/right map previous/next beat; SHIFT+BEAT left/right map AUTO/TAP.
+
+## Merge FX utilities and shutdown
+
+| Right Merge FX preset | Knob press | Ring |
+| --- | --- | --- |
+| 1 | Eject USB1 | On when ready, blinking while present/not ready, off when absent |
+| 2 | Eject USB2 | Same for USB2 |
+| 3 | Track Mark | On while recording, brief dark pulse for a request |
+| 4 | Toggle master recording | Blinking while native recorder reports recording |
+
+Right preset95/2f cycles forward; SHIFT+preset95/30 cycles backward; push is
+95/2e. Duplicate ONs and cold releases are suppressed. Eject uses native
+K_USBSTOP press/repeat/release on slot channel1/2; Track Mark0402 and USB REC0401
+use native recorder channel0. Recording requires writable USB2; Track Mark
+splits an active recording. Its feedback acknowledges a request, not file creation.
+
+**Preset alignment:** select physical right preset1, then SHIFT+press the right
+Merge knob (95/31) to set the software counter to1 without a restart or media
+action. Alternatively start the player with physical preset1 selected.
+Automatic current-preset discovery is unsupported by the supplied protocol;
+preset numbers are controlled locally by firmware. Right ring output is B5/10.
+
+**Shutdown:** hold unshifted LEFT Merge knob push (94/2e) for five seconds.
+A short press does nothing. Early/shifted release or connection change cancels;
+duplicate ONs do not restart the timer. Only one request is sent per hold.
+Left ring B4/10 lights immediately and blinks1Hz for0–2s,2Hz for2–4s,5Hz
+for4–5s. It is OFF on cancellation/release and steady after the hold completes.
+Steady light acknowledges the hold, not successful poweroff.
+
+The root-run player is inside the firmware chroot. A child enters the host root
+through /proc/1/root, then executes host shutdown -h now with a clean environment
+and no LD_PRELOAD. Systemd performs the normal stop/unmount/poweroff sequence;
+no direct kernel halt is used. Errors go to /tmp/knobshim.log. Let the Pi finish
+shutting down before removing power. Left preset controls and both rotations
+remain unassigned.
+
+## Beat display, audio and reconnect
+
+The display reads the native Beat FX/X-PAD rung, including while FX is off, and
+sends B4/B5 CC64. All MIDI values below are hexadecimal.
+
+| RX3 beat value | MIDI value | FLX6 display |
+| --- | --- | --- |
+| 1/16 | 2a | Quarter blinking regularly |
+| 1/8 | 2d | Quarter blinking slowly |
+| 1/4 | 03 | Quarter |
+| 1/2 | 04 | Half |
+| 3/4 | 21 | Three quarters |
+| 1 | 05 | 1 |
+| 2 | 06 | Native2-beat pattern (documented as1+4) |
+| 4 | 07 | 4 |
+| 8 | 08 | 8 |
+| 16 | 09 | 16 |
+| 32 | 0a | 32 |
+| 64 | 37 | 32 blinking slowly |
+
+The official standard codes and measured21/2a/2d/37 come from the user's
+hardware probes. Paired unit outputs did not combine; the blinking fallbacks
+are the user's choice. Unchanged commands refresh every3s to preserve native
+blink cadence; failed writes retry. See flx6-beat-led-probe.py under scripts/device.
+
+Standalone USB tests confirmed that hardware headphone MIX blends master0/1 and
+cue2/3, with MASTER CUE gating master. Native headphones stay stereo cue-only:
+rbp master cue OFF and MIX fully CUE. Do not mix master into the USB cue pair a
+second time. Channel PFL still selects cue sources. This also applies with VU
+disabled. flx6-headphone-probe.py reproduces the routing test.
+
+Mixer controls assemble 14-bit pairs to native10-bit positions; PFL suppresses
+duplicate ONs. Crossfader startup assigns decks A/B with sharp curve.
+The startup position request F0 00 20 7F 03 01 F7 is sent only to an identified
+FLX6 route with ready engine/KeyManager, at most three times per connection.
+After six seconds unreported faders may use unity fallback; reported positions
+are preserved. Logs distinguish a sent query from received absolute reports.
+Connection changes release held keys, stop jog motion, cancel pending mode/
+transport requests and invalidate packet/button state. The event/tick/connection
+paths share a mutex. Other maps retain their own audio/control policies.
 
 ## Build
 
@@ -38,7 +165,7 @@ rbp-facing half — see [08 — Controls](../../docs/08-controls.md).
 | File | Role | Target-specific? |
 |---|---|---|
 | `fb_shim.c` + `tscfake.c` + `pointsrc.c` + `point_xform.c` + `touch_zone.c` + `fb_cursor.c` + `cursor_paint.c` + `menu_zone.c` + `menu_paint.c` + `menu_font.h` + `menu_draw.c` → `fbshim.so` | fb ioctl shim (1280×800 RGB565 logical fb, 60 fps pacing) + the fake `/dev/tsc2007_2-0048` rbp reads. `fb_shim` owns the interposed libc symbols; `tscfake` is rbp ABI; `pointsrc` finds an evdev pointer and `point_xform` maps its coordinates; `touch_zone` is the one part of rbp's screen the pointer path acts on by itself (the deck QUANTIZE boxes) and `rbp_key` sends the keycode for it. The two compositors are pure image work plus a driver each: `cursor_paint`/`fb_cursor` draw the mouse arrow (relative pointers only), `menu_paint`/`menu_font`/`menu_draw` the swipe-down top menu and its witness thread | discovery and geometry, via `POINT_*`; the menu's strip, panel and buttons are literals in `menu_zone.c` |
-| `ctrlshim.c` + `ctrl_map.c` + `map_flx6.c` + `map_flx4.c` + `map_jp21.c` + `map_kbd.c` + `evdev_io.c` + `rbp_bridge.c` + `rbp_led.c` + `rbp_vu.c` + `midi_io.c` + `mididump.c` + `shimutil.c` → `knobshim.so` | control surface → rbp keycodes, plus panel LED and VU output. `midi_io` is the sequencer, `evdev_io` the non-MIDI source (`/dev/input/event*`), `rbp_bridge` everything that resolves into `rbp`, `ctrlshim` the front end, `map_*.c` the surfaces | `flx6` (the Pi's surface and default), `flx4` (compatibility), `jp21` (SC Live 4), and `kbd` (keyboard, no controller needed). FLX6 MIDI output remains disabled until measured on hardware. |
+| `ctrlshim.c` + `ctrl_map.c` + `map_flx6.c` + `map_flx4.c` + `map_jp21.c` + `map_kbd.c` + `evdev_io.c` + `rbp_bridge.c` + `rbp_led.c` + `rbp_vu.c` + `midi_io.c` + `mididump.c` + `shimutil.c` → `knobshim.so` | control surface → rbp keycodes, plus panel LED and VU output. `midi_io` is the sequencer, `evdev_io` the non-MIDI source (`/dev/input/event*`), `rbp_bridge` everything that resolves into `rbp`, `ctrlshim` the front end, `map_*.c` the surfaces | `flx6` (the Pi's surface and default), `flx4` (compatibility), `jp21` (SC Live 4), and `kbd` (keyboard, no controller needed). FLX6 transport, pads, FX, jog/load displays, meters and Merge rings use the official list, working Mixxx references and measured codes; see the mapping inventory for hardware verification status. |
 | `rbp_key.c` → linked into **both** shims | rbp's key path on its own — are we rbp, where is its `KeyManager`, `send_rx_key*()`. Both shims need it (`fbshim` for the pointer path's keycodes) and it is a leaf, so neither pulls in `rbp_bridge.o` and its meter hook twice — see [`rbp_key.h`](rbp_key.h) |
 | `audioshim.c` + `s24pack.c` + `mirror_policy.c` + `master_policy.c` + `pace_policy.c` → `audioshim.so` | presents rbp's three 2-channel S24_LE 44.1 kHz streams as one real ALSA stream on a configurable card, channel map and format; the three policy modules are its master device chain, its HDMI mirror's decisions, and (with no card open) the playback deadline that keeps rbp at real time rather than a third of it | card/map/format, via `AUDIO_*` |
 | `crashcatch.c` → `crashcatch.so` | SIGSEGV `pc`/`lr` → `/tmp/crash.log` | diagnostic |

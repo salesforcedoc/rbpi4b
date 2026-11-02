@@ -1,5 +1,10 @@
 # 03 — Port plan (reuse map + what changes)
 
+The active setup is now Pi4 + DDJ-FLX6; FLX4 is an unused compatibility option.
+Use the [FLX6 inventory](flx6-mapping-audit.md) for the current layout/status.
+The SC Live4→Pi/FLX4 migration details and dated measurements below are retained
+as design history; they do not change the current FLX6 map or audio defaults.
+
 Moving the port from the Denon SC Live 4 to a Raspberry Pi 4B replaces the
 *device* and nothing else. This doc is the map of what is reused verbatim, what
 had to change, and the order to build it. The plan of record, with the bring-up
@@ -191,9 +196,9 @@ target this project has run on.
 5. **Audio** — device, channels and pair map. ([09](09-audio.md))
 6. **Controls** — the keyboard fallback first (`EVDEV_MAP=kbd`, no hardware
    needed — and it is the default, so it needs no configuration either), then the
-   FLX4 map: written from Pioneer's published MIDI list, and
-   corrected from a dump off the hardware.
-   ([08](08-controls.md), [15](15-flx4-midi.md))
+   FLX6 map, using the official MIDI list, working Mixxx references and hardware
+   observations. FLX4 remains available for compatibility.
+   ([08](08-controls.md), [FLX6 inventory](flx6-mapping-audit.md))
 7. **USB** — `usb-watch.sh` + DeviceSQL import of `export.pdb`. ([10](10-usb.md))
 8. **Launcher** — `start-rb.sh`. ([11](11-runtime-launcher.md))
 

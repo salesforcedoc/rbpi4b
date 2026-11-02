@@ -1,5 +1,10 @@
 # scripts/
 
+The current controller is DDJ-FLX6; FLX4 is retained as a compatibility map.
+Controller operation, shutdown/countdown, build and deployment details are in
+[shims/README.md](shims/README.md) and the
+[FLX6 inventory](../docs/flx6-mapping-audit.md).
+
 Host-side build tooling and the on-device scripts for the Raspberry Pi 4 port.
 
 ```

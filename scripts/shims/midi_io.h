@@ -48,9 +48,10 @@ void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev));
  * Note Off (measured; see midi_io.c). */
 int midi_note(int midi_ch, int note, int val);
 int midi_cc(int midi_ch, int cc, int val);
-/* 1 if the query actually went out (only the rawmidi route carries it, and only
- * a JP21-protocol panel answers), 0 if this surface cannot be asked where its
- * absolute controls are. The 0 is load-bearing: rbp's mixer builds with its
+/* 1 while waiting for a supported query (FLX6's bounded sequencer window, or a
+ * sent JP21 rawmidi query); 0 when untouched faders may use fallback defaults.
+ * A successful write does not establish that the controller replied.
+ * The 0 is load-bearing: rbp's mixer builds with its
  * channel faders at zero, so a surface that cannot answer leaves rbp silent
  * until something seeds them -- see rbp_vu.c's vu_thread. */
 int led_query_absolute(void);

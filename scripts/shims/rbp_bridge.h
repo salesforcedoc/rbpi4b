@@ -38,6 +38,31 @@ int cc_to_10bit(int v);
  * is not distinguishable from a real answer, and does not need to be -- a map's
  * event handler only runs once rbp's KeyManager exists. */
 int rbp_beatfx_type(void);
+/* Same current-object beat rung used by rbp's beat display and X-PAD, even
+ * while FX is off. -1 before the manager/effect exists or for invalid data. */
+int rbp_beatfx_beat(void);
+/* Raw RX3 pad mode 0..7, or -1 while its status chain is unavailable. */
+int rbp_deck_pad_mode(int deck);
+/* Resize an existing loop only (deck 0/1): halve != 0 -> 1/2x, else 2x.
+ * Returns -1 before the engine exists, 0 for no loop/refusal, 1 on success. */
+int rbp_loop_resize(int deck, int halve);
+/* Loaded deck only: from_cue -> back to main cue and play; otherwise pause
+ * at track time zero. Returns 1 accepted, 0 refused, -1 unavailable. */
+int rbp_transport_shortcut(int deck, int from_cue);
+/* Complete queued cue-and-play after native cue buffering. cancel != 0 clears
+ * pending requests without starting playback (used on connection changes). */
+void rbp_transport_shortcut_tick(int cancel);
+void rbp_transport_shortcut_cancel(int deck);
+
+struct rbp_deck_feedback {
+     int loaded, loading;
+     long samples;
+     unsigned int music_hi, music_lo;
+};
+int rbp_read_deck_feedback(int deck, struct rbp_deck_feedback *state);
+/* Toggle the called memory loop's saved Active flag via native DB handling.
+ * 1 = request accepted, 0 = no memory loop/refused, -1 = unavailable. */
+int rbp_toggle_active_loop(int deck);
 
 /* djengine::MixerEngine. Everything here tolerates the engine not existing yet
  * and returns a neutral value (-1 from the getters, a no-op from the setters),
@@ -50,6 +75,14 @@ int me_get_cue(int idx);
 void me_set_stereo(int type);
 void me_set_master_cue(int on);
 int me_get_master_cue(void);
+int me_set_crossfader_assign(int idx, int assign);
+int me_get_crossfader_assign(int idx);
+int me_set_crossfader_curve(int curve);
+int me_get_crossfader_curve(void);
+/* USB slots 1/2: native media state (2 ready, 0 absent), -1 unavailable. */
+int rbp_usb_media_state(int slot);
+/* Native recorder flag: 0 stopped, 1 recording, -1 engine unavailable. */
+int rbp_recording(void);
 
 /* The per-deck ui::PlayerInnards, and the beat-loop knob's way in. The cursor
  * (which loop length is selected) is ours: rbp has no delta handler for the

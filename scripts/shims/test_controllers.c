@@ -230,8 +230,10 @@ static void test_flx6_measured_row(void)
           "the FLX6 card id must be DDJFLX6");
     CHECK(f->map_name && strcmp(f->map_name, "flx6") == 0,
           "the FLX6 map must be flx6");
-    CHECK(f->init == NULL && f->init_len == 0,
-          "the FLX6 has no verified init SysEx");
+    static const unsigned char query[] = { 0xF0, 0x00, 0x20, 0x7F, 0x03, 0x01, 0xF7 };
+    CHECK(f->init && f->init_len == sizeof query &&
+          memcmp(f->init, query, sizeof query) == 0,
+          "the FLX6 position query must match the working Mixxx script");
     CHECK(f->keepalive == NULL && f->keepalive_len == 0 && f->keepalive_ms == 0,
           "the FLX6 must not inherit the FLX4 keepalive");
     CHECK(controllers_by_hint("AlphaTheta Corporation DDJ-FLX6 MIDI 1") == f,

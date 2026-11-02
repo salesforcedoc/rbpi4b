@@ -1266,6 +1266,9 @@ static const struct led_notes flx4_leds = {
      .n_slip = -1,             /* absent: the unit has no SLIP button */
      .n_loopin = 16,           /* MEASURED: 16/0 = deck 1 LOOP IN */
      .n_loopout = 17,          /* MEASURED: 17/0 = deck 1 LOOP OUT */
+     .n_master = -1,
+     .n_quantize = -1,
+     .n_loopin_shift = -1, .n_loopout_shift = -1,
      .n_autoloop = -1,         /* ABSENT, and now settled: 4 BEAT / EXIT has NO
                                 * LED to light. Pioneer's own "List of MIDI
                                 * Messages" gives note 77 (and +SHIFT 80) an
@@ -1393,4 +1396,6 @@ const struct ctrl_map map_flx4 = {
      NULL,   /* devices(): a MIDI surface, so no evdev reader is started */
      NULL,   /* input(): ditto -- this map never sees an evdev triple */
      &flx4_leds,
+     0,      /* hardware_headphone_mix: preserve this map's software mix */
+     NULL,   /* connection */
 };

@@ -1,7 +1,8 @@
 # 09 — Audio
 
-On the Pi the audio path is the **DDJ-FLX4's USB audio**: master out to its
-RCA/XLR outputs, headphones and cue out of its jack. There is one real device
+On the Pi the default audio path is **DDJ-FLX6 USB audio**: master USB0/1 and
+headphones USB2/3. Physical headphone MIX/MASTER CUE perform the master blend;
+the native headphone stream stays cue-only. There is one real device
 and one real stream; everything the shim does is about putting rbp's three
 streams onto the right pairs of it.
 
@@ -11,6 +12,14 @@ controller is an `rb.conf` edit rather than a rebuild. The previous target's
 8-channel codec map is kept at the bottom as the worked example that shaped the
 model.
 
+Current FLX6 defaults resolve to `hw:CARD=DDJFLX6,DEV=0`, automatic channel
+count, `s24_3le`, and `master=0,1;headphones=2,3;booth=-`. Audio/USB playback
+and the hardware headphone correction are user-confirmed. The latest control
+changes have separate local/hardware verification status in the
+[FLX6 inventory](flx6-mapping-audit.md). Dated FLX4 captures below document
+earlier format/clock investigations; their device names and measured rates
+are intentionally retained rather than presented as FLX6 measurements.
+
 ## rbp's side of the contract — unchanged
 
 `rbp` opens ALSA in a fixed order and believes each device is a **2-channel
@@ -19,7 +28,7 @@ S24_LE 44.1 kHz** one. It never checks:
 | Order | Stream | rbp uses it for |
 |---|---|---|
 | 0 | master | the main output |
-| 1 | phone | the headphone bus — cue + master, mixed by rbp |
+| 1 | phone | native headphone bus; cue-only for FLX6 hardware mixing, cue+master for software-mixed maps |
 | 2 | booth | a second output |
 | 3+ | (any) | discarded |
 | capture | dummy | read and ignored, forever |
@@ -46,17 +55,17 @@ RB_AUDIO_DEV=                 # empty -> hw:CARD=<the selected controller's card
 
 The card is **not** written down in `rb.conf` any more. An empty value means the
 ALSA card of whichever controller `MIDI_MAP` selects, read from that surface's
-row in `controllers.c` (`DDJFLX4` for the FLX4), so a bench that switches surface
+row in `controllers.c` (`DDJFLX6` by default; `DDJFLX4` for explicit FLX4 compatibility), so a bench that switches surface
 switches its audio card with it — it used to be independent, and selecting `jp21`
 left audio pointed at an FLX4. Setting it here still wins, which is how a card
 the table does not name is used; `doctor.sh` reports when the two disagree.
 
-That resolved value is `hw:CARD=DDJFLX4,DEV=0`, and it is `hw:`, **not**
+The FLX6 default resolves to `hw:CARD=DDJFLX6,DEV=0`, and uses `hw:`, **not**
 `plughw:` — and this is a measurement, not a preference. The reason
 is the section after next: `AUDIO_MAP` names *hardware* channel indices, so the
 shim has to learn the card's real channel count, and a `plughw` device cannot tell
 it. The plug layer's whole job is to make the logical channel count arbitrary, and
-it reports what it can accept, not what the card has. Measured on this unit:
+it reports what it can accept, not what the card has. Historical FLX4 measurement:
 
 | device | `snd_pcm_hw_params_get_channels_max()` |
 |---|---|
@@ -195,6 +204,14 @@ looks right until someone cues a track, and it is the kind of bug that gets
 diagnosed as "the headphones are broken".
 
 ### Why the phone stream is routed straight through
+
+**FLX6 exception (hardware confirmed 2026-11-01):** its physical headphone MIX
+knob blends USB master pair 0/1 with headphone pair 2/3, and MASTER CUE gates
+the master, even while rbp is stopped. For this map, knobshim disables rbp's
+master cue and sets rbp's headphone mix fully to CUE at startup. It consumes
+the physical MIX CC without applying it again in rbp. The phone stream is
+therefore PFL only; the controller adds master. The audioshim pair mapping is
+unchanged. The description below applies to maps using software headphone mixing.
 
 rbp's **phone stream is already the headphone bus**: with rbp's master cue
 enabled it contains cue + master, mixed and time-aligned by rbp's own

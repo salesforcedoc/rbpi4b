@@ -72,6 +72,22 @@ const struct led_notes *ctrl_sel_leds(void)
      return g_midi ? g_midi->leds : NULL;
 }
 
+int ctrl_sel_hardware_headphone_mix(void)
+{
+     return g_midi ? g_midi->hardware_headphone_mix : 0;
+}
+
+const char *ctrl_sel_name(void)
+{
+     return g_midi ? g_midi->name : "";
+}
+
+void ctrl_surface_connection(int connected)
+{
+     if (g_midi && g_midi->connection)
+          g_midi->connection(connected);
+}
+
 /* Both halves of "is there a table yet" -- see the declaration in ctrl_map.h for
  * why the NULL from ctrl_sel_leds() is not enough on its own. */
 int ctrl_sel_ready(void)

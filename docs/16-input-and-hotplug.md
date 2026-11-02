@@ -1,5 +1,15 @@
 # 16 — Keyboard input, hot-plug, and the FLX4 startup thump
 
+Current FLX6 behavior (2026-11-02): normal hot-plug is user-confirmed. New
+connection cleanup releases held controls, stops jog motion, cancels queued
+pad/transport actions and resets packet/button state, including fresh
+subscriptions that reuse an ALSA address. Discovery also runs during traffic.
+This latest held-input cleanup is locally checked, with no later Pi result
+reported. Position queries have bounded retries per subscription, including
+when VU output is disabled. See the [FLX6 inventory](flx6-mapping-audit.md).
+The dated keyboard/FLX4 investigations below retain their original evidence;
+the FLX4 startup-thump observations are not FLX6 measurements.
+
 Five observations the operator made on the unit on **2026-09-26**, and what
 measuring them turned up. Each now has an answer, and for two of them the answer
 was the same defect, found while measuring the others: a key release was being

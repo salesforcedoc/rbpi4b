@@ -69,6 +69,9 @@ int led_loop_armed[2];
 enum {
      L_SYNC, L_CUE, L_PLAY, L_KEYLOCK, L_VINYL, L_SLIP,
      L_LOOPIN, L_LOOPOUT, L_ALOOP,
+     L_MASTER, L_QUANTIZE, L_LOOPIN_SHIFT, L_LOOPOUT_SHIFT,
+     L_AUX_MT, L_AUX_MT_SHIFT, L_AUX_SLIP, L_AUX_SLIP_SHIFT,
+     L_PLAY_SHIFT, L_CUE_SHIFT,
      L_MODE0, L_MODE1, L_MODE2, L_MODE3, L_SLOT_COUNT
 };
 
@@ -264,10 +267,9 @@ static const unsigned char *led_entry(unsigned int id, unsigned int ch)
  * during rbp's start-up, so an unguarded call is a dereference this thread
  * cannot survive -- and the guards are the whole difference.
  *
- * A fifth value, 4, is real and not an error: rbp produces it when a mode
- * button is pressed for the mode rbp is ALREADY in (the size bank opens). It is
- * returned as it is rather than folded into one of the four, because it names no
- * mode and the caller must not treat it as one. */
+ * getStat @0x3024bc..0x302524 exports all eight modes: primary 0..3 and
+ * secondary 4..7 (Gate Cue, Beat Loop 2, Release FX, Beat Jump 2). Each
+ * secondary shares its physical selector/pad address bank with its primary. */
 static int rbp_pad_mode(int deck)
 {
      void *holder, *sw, *pd;
@@ -281,7 +283,8 @@ static int rbp_pad_mode(int deck)
      pd = *(void **)((char *)sw + (deck ? PADMODE_DECK2_OFF : PADMODE_DECK1_OFF));
      if (!pd)
           return -1;
-     return (int)*(unsigned char *)((char *)pd + PADMODE_BYTE_OFF);
+     int mode = (int)*(unsigned char *)((char *)pd + PADMODE_BYTE_OFF);
+     return mode >= 0 && mode < 8 ? mode % 4 : -1;
 }
 
 /* Look up rbp's own state for one (id, channel) LED.
@@ -554,7 +557,7 @@ static unsigned char led_encode(int enc, int r, int g, int b)
      return v;
 }
 
-static void led_pad_apply(int sch, int note, int *last, unsigned char vel)
+static void led_pad_apply(int sch, int shift_ch, int note, int *last, unsigned char vel)
 {
      if (sch < 0 || note < 0)
           return;
@@ -562,6 +565,8 @@ static void led_pad_apply(int sch, int note, int *last, unsigned char vel)
           return;
      if (!midi_note(sch, note, vel))
           return;                        /* retry next tick */
+     if (shift_ch >= 0 && !midi_note(shift_ch, note, vel))
+          return;                        /* retry both aliases together */
      *last = (int)vel;
      if (led_verbose)
           klog("knobshim2: pad sch%d note%d vel=0x%02x\n", sch, note, vel);
@@ -584,15 +589,106 @@ static const struct { unsigned int id; const char *name; } led_g_tab[LED_FX_COUN
 };
 static signed char led_last_g[LED_FX_COUNT];
 
-static void led_apply_g(int idx, int sch, int note, int on)
+static int led_jog_send(const struct led_notes *n, int deck, int value, int position)
 {
+     int (*send)(int, int, int) = position ? midi_cc : midi_note;
+     int ch = position ? n->jog_position_ch : n->jog_load_ch;
+     if (!send(ch, deck, value)) return 0;
+     return !n->jog_aux_mirror || send(ch, deck + 2, value);
+}
+
+/* FLX6's ring follows the real sample position, including reverse, scratches
+ * and seeks. The working Mixxx mapping uses 0.6075 revolutions per second,
+ * 72 positions/revolution: samples * 243 / 245000. No free-running timer. */
+static void led_jog_update(const struct led_notes *n)
+{
+     static struct {
+          int loaded, loading, pending, phase, last_position;
+          unsigned int hi, lo;
+     } prev[2] = { { .last_position = -1 }, { .last_position = -1 } };
+     if (!n->jog_display_enabled) return;
+     for (int deck = 0; deck < 2; deck++) {
+          struct rbp_deck_feedback s;
+          if (!rbp_read_deck_feedback(deck, &s)) continue;
+          if (s.loaded && (!prev[deck].loaded ||
+                          (prev[deck].loading && !s.loading) ||
+                          s.music_hi != prev[deck].hi || s.music_lo != prev[deck].lo)) {
+               prev[deck].pending = 1;
+               prev[deck].phase = 0;
+          }
+          prev[deck].loaded = s.loaded;
+          /* Latch a loading transition until the replacement becomes loaded. */
+          if (s.loading) prev[deck].loading = 1;
+          if (s.loaded && !s.loading) prev[deck].loading = 0;
+          prev[deck].hi = s.music_hi;
+          prev[deck].lo = s.music_lo;
+          if (!s.loaded) {
+               prev[deck].pending = prev[deck].phase = 0;
+               led_jog_send(n, deck, 0, 0);
+          } else if (prev[deck].pending) {
+               /* Reset first so replacing an already-loaded track retriggers. */
+               if (led_jog_send(n, deck, prev[deck].phase ? 127 : 0, 0)) {
+                    if (prev[deck].phase) prev[deck].pending = prev[deck].phase = 0;
+                    else prev[deck].phase = 1;
+               }
+          }
+          long long position = (long long)s.samples * 243;
+          /* Floor negative values, matching Mixxx's modulo at reverse seeks. */
+          long long step = position / 245000;
+          if (position < 0 && position % 245000) step--;
+          int value = s.loaded ? (int)((step % 72 + 72) % 72) + 1 : 0;
+          if (led_force || value != prev[deck].last_position)
+               if (led_jog_send(n, deck, value, 1))
+                    prev[deck].last_position = value;
+     }
+}
+
+static void led_apply_g(int idx, const struct led_notes *n, int on)
+{
+     int sch = n->fx_channels_enabled ? n->fx_channels[idx] : n->fx_ch;
+     int note = n->n_fx[idx];
      signed char want = (signed char)(on ? 1 : 0);
      if (sch < 0 || note < 0)
           return;
+     if (idx == LED_FX_BFX_ONOFF && n->bfx_selected_slot) {
+          static int last_slot = -1;
+          int slot = n->bfx_selected_slot();
+          int count = n->bfx_extra_count + 1;
+          if (count > 6 || slot < 0 || slot >= count) return;
+          if (!led_force && led_last_g[idx] == want && last_slot == slot) return;
+          /* Invalidate BEFORE sending: any failed member retries the entire
+           * batch next tick, including a failure during a forced refresh. */
+          led_last_g[idx] = -1;
+          last_slot = -1;
+          for (int i = 0; i < count; i++) {
+               if (i == slot) continue;
+               int ch = i ? n->bfx_extra[i - 1].ch : sch;
+               int num = i ? n->bfx_extra[i - 1].note : note;
+               if (ch < 0 || num < 0 || !midi_note(ch, num, 0)) return;
+          }
+          int ch = slot ? n->bfx_extra[slot - 1].ch : sch;
+          int num = slot ? n->bfx_extra[slot - 1].note : note;
+          if (ch < 0 || num < 0 || !midi_note(ch, num, on ? 127 : 0)) return;
+          led_last_g[idx] = want;
+          last_slot = slot;
+          if (led_verbose)
+               klog("knobshim2: Beat FX slot output slot=%d status=0x%02x note=0x%02x velocity=%d\n",
+                    slot, 0x90 | ch, num, on ? 127 : 0);
+          return;
+     }
      if (!led_force && led_last_g[idx] == want)
           return;
      if (!midi_note(sch, note, on ? 0x7f : 0x00))
           return;
+     if (idx == LED_FX_BFX_ONOFF) {
+          for (int a = 0; a < n->bfx_extra_count && a < 5; a++) {
+               if (n->bfx_extra[a].ch < 0 || n->bfx_extra[a].note < 0)
+                    continue;
+               if (!midi_note(n->bfx_extra[a].ch, n->bfx_extra[a].note,
+                              on ? 0x7f : 0x00))
+                    return; /* Retry the complete group next tick. */
+          }
+     }
      led_last_g[idx] = want;
      if (led_verbose)
           klog("knobshim2: led global note%d %s (%s)\n",
@@ -621,6 +717,71 @@ static void led_send_run(int sch_first, int count, int note,
                sch_first, sch_first + count - 1, note, on ? "on" : "off");
 }
 
+/* Same conjunction as fxpad_zone.c's live_on(): the Off object's flag can
+ * remain 1, so the manager's active type must be checked as well. */
+static int led_beatfx_on(void)
+{
+     void *me = mixer_engine();
+     if (!me)
+          return -1;
+     const unsigned char *bem = *(const unsigned char *volatile *)
+                                ((const unsigned char *)me + BEM_IN_MIXER);
+     if (!bem)
+          return -1;
+     int type = *(const volatile int *)(bem + BEM_OFF_TYPE);
+     const unsigned char *be = *(const unsigned char *volatile *)(bem + BEM_OFF_EFFECT);
+     if (!be)
+          return -1;
+     int flag = *(const volatile unsigned char *)(be + BE_OFF_ON) != 0;
+     return type != BFX_TYPE_OFF && flag;
+}
+
+static void led_beatfx_time_update(const struct led_notes *n)
+{
+     static int last = -1, last_rung = -1;
+     static unsigned long long last_sent_ms;
+     if (!n->bfx_beat_value) return;
+     int rung = rbp_beatfx_beat();
+     unsigned long long now = shim_now_ms();
+     int value = n->bfx_beat_value(rung, now);
+     if (value < 0 || value > 127 || n->bfx_beat_cc < 0) return;
+     if (!led_force && last == value) return;
+     /* Re-sending native blinking commands every LED refresh can restart a
+      * device's blink cycle. Value changes and failures still retry at once;
+      * the heartbeat restores an unchanged display after reconnect. */
+     if (last == value && n->bfx_beat_resend_ms > 0 &&
+         now - last_sent_ms < (unsigned)n->bfx_beat_resend_ms) return;
+     last = -1; /* A failed forced refresh must also retry next tick. */
+     for (int unit = 0; unit < 2; unit++)
+          if (n->bfx_beat_ch[unit] < 0 ||
+              !midi_cc(n->bfx_beat_ch[unit], n->bfx_beat_cc, value)) return;
+     last = value;
+     last_sent_ms = now;
+     if (led_verbose && rung != last_rung)
+          klog("knobshim2: Beat FX time LED rung=%d cc=0x%02x value=0x%02x\n",
+               rung, n->bfx_beat_cc, value);
+     last_rung = rung;
+}
+
+static void led_ring_update(int (*read_value)(unsigned long long), int ch, int cc,
+                            int *last)
+{
+     if (!read_value || ch < 0 || cc < 0) return;
+     int value = read_value(shim_now_ms());
+     if (value < 0 || value > 127 || (!led_force && value == *last)) return;
+     *last = -1;
+     if (midi_cc(ch, cc, value)) *last = value;
+}
+
+static void led_utility_ring_update(const struct led_notes *n)
+{
+     static int utility_last = -1, power_last = -1;
+     led_ring_update(n->utility_ring_value, n->utility_ring_ch,
+                     n->utility_ring_cc, &utility_last);
+     led_ring_update(n->power_ring_value, n->power_ring_ch,
+                     n->power_ring_cc, &power_last);
+}
+
 static void led_refresh(void)
 {
      const struct led_notes *n;
@@ -647,13 +808,34 @@ static void led_refresh(void)
 
      blink = led_blink_on(shim_now_ms(), 0, LED_BLINK_FALLBACK_MS);
      led_force = ((led_tick % LED_RESEND_TICKS) == 0);   /* see above */
+     led_jog_update(n);
+     led_beatfx_time_update(n);
+     led_utility_ring_update(n);
 
      /* global LEDs, straight from rbp (id -> whatever note this panel uses) */
      for (int g = 0; g < LED_FX_COUNT; g++) {
           int st = ledstat_state(led_g_tab[g].id, 0);
           int on = (st < 0) ? 0 : (st == 2 ? led_blink_for(led_g_tab[g].id, 0)
                                            : (st != 0));
-          led_apply_g(g, n->fx_ch, n->n_fx[g], on);
+          if (g == LED_FX_BFX_ONOFF && n->bfx_extra_count > 0) {
+               /* FLX6 has one global effect and six controller slot addresses.
+                * Its light follows the engine; table 48 alone can be solid
+                * even when no effect is active. Preserve rbp's blink cadence
+                * only while the engine confirms the effect is enabled. */
+               int active = led_beatfx_on();
+               on = active > 0 && (st == 2 ? led_blink_for(led_g_tab[g].id, 0) : 1);
+               {
+                    static int last_active = -2, last_st = -2, last_slot = -2;
+                    int slot = n->bfx_selected_slot ? n->bfx_selected_slot() : -1;
+                    if (active != last_active || st != last_st || slot != last_slot)
+                         klog("knobshim2: FLX6 Beat FX LED engine=%d table48=%d slot=%d\n",
+                              active, st, slot);
+                    last_active = active;
+                    last_st = st;
+                    last_slot = slot;
+               }
+          }
+          led_apply_g(g, n, on);
      }
 
      /* the mixer strips' CUE LEDs, from rbp's own cue state. The channel base and
@@ -713,11 +895,27 @@ static void led_refresh(void)
           if (tr < 0)
                continue;
           led_send(sch, n->n_sync, &led_last[i][L_SYNC], tr & RBP_TRANSPORT_SYNC);
+          if (n->n_quantize >= 0) {
+               int quantize = ((int (*)(void *, int))PE_ISQUANTIZING)(pe, i) != 0;
+               led_send(sch, n->n_quantize, &led_last[i][L_QUANTIZE], quantize);
+          }
+          led_send(sch, n->n_master, &led_last[i][L_MASTER], tr & RBP_TRANSPORT_MASTER);
           led_send(sch, n->n_cue, &led_last[i][L_CUE], tr & RBP_TRANSPORT_CUE);
           led_send(sch, n->n_play, &led_last[i][L_PLAY], tr & RBP_TRANSPORT_PLAY);
+          if (n->transport_shift_aliases) {
+               led_send(sch, n->n_play_shift, &led_last[i][L_PLAY_SHIFT], tr & RBP_TRANSPORT_PLAY);
+               led_send(sch, n->n_cue_shift, &led_last[i][L_CUE_SHIFT], tr & RBP_TRANSPORT_CUE);
+          }
           led_send(sch, n->n_keylock, &led_last[i][L_KEYLOCK], mt);
           led_send(sch, n->n_vinyl, &led_last[i][L_VINYL], vinyl);
           led_send(sch, n->n_slip, &led_last[i][L_SLIP], slip);
+          if (n->aux_deck_leds && n->aux_deck_ch >= 0) {
+               int ach = n->aux_deck_ch + i;
+               led_send(ach, n->aux_n_keylock, &led_last[i][L_AUX_MT], mt);
+               led_send(ach, n->aux_n_keylock_shift, &led_last[i][L_AUX_MT_SHIFT], mt);
+               led_send(ach, n->aux_n_slip, &led_last[i][L_AUX_SLIP], slip);
+               led_send(ach, n->aux_n_slip_shift, &led_last[i][L_AUX_SLIP_SHIFT], slip);
+          }
           /* SC Live 4 convention (verified against Engine OS on video):
            *   idle            -> both LEDs solid ON
            *   loop-in set     -> LOOP IN blinks, LOOP OUT solid
@@ -725,6 +923,12 @@ static void led_refresh(void)
           led_send(sch, n->n_loopin, &led_last[i][L_LOOPIN],
                    (looping || armed) ? blink : 1);
           led_send(sch, n->n_loopout, &led_last[i][L_LOOPOUT],
+                   looping ? blink : 1);
+          /* FLX6 exposes separate normal and shifted addresses for the same
+           * physical loop LEDs. Each alias needs its own successful-send cache. */
+          led_send(sch, n->n_loopin_shift, &led_last[i][L_LOOPIN_SHIFT],
+                   (looping || armed) ? blink : 1);
+          led_send(sch, n->n_loopout_shift, &led_last[i][L_LOOPOUT_SHIFT],
                    looping ? blink : 1);
           led_send(sch, n->n_autoloop, &led_last[i][L_ALOOP], aloop);
 
@@ -739,13 +943,15 @@ static void led_refresh(void)
            * does -- hence the mode read and the clearing of the old base. */
           if (led_pads && n->pad_ch >= 0 && n->n_pad_base[0] >= 0) {
                int pch = i ? n->pad_ch2 : n->pad_ch;
+               int shift_ch = n->pad_shift_enabled
+                              ? (i ? n->pad_shift_ch2 : n->pad_shift_ch) : -1;
                int m = rbp_pad_mode(i);
-               /* -1 = the chain is not up, 4 = rbp's size-bank echo: neither
-                * names a mode, so the pads are left exactly as they are -- the
-                * same rule, for the same reason, as the mode LEDs below. Darking
-                * them would be a lie about a mode that has not changed. */
+               /* rbp_pad_mode folds secondary modes onto the same physical
+                * FLX6 selector and MIDI bank as their primary counterpart. */
                if (pch >= 0 && m >= 0 && m < 4) {
-                    int base = n->n_pad_base[m];
+                    int base = n->pad_note_base ? n->pad_note_base(i) : n->n_pad_base[m];
+                    if (base < 0)
+                         continue;
 
                     /* A mode change moves the note each pad answers to, so the
                      * eight notes the LAST mode used have to be cleared before
@@ -758,7 +964,7 @@ static void led_refresh(void)
                     if (base != led_pad_base[i]) {
                          if (led_pad_base[i] >= 0) {
                               for (int p = 0; p < LED_PAD_COUNT; p++)
-                                   led_pad_apply(pch, led_pad_base[i] + p,
+                                   led_pad_apply(pch, shift_ch, led_pad_base[i] + p,
                                                  &led_pad_last[i][p], 0);
                               memset(led_pad_last[i], -1, sizeof(led_pad_last[0]));
                          }
@@ -782,7 +988,7 @@ static void led_refresh(void)
                                                 (unsigned)i + 1) ||
                              !ledstat_rgb(LED_PAD_FIRST + (unsigned)p,
                                           (unsigned)i + 1, rgb)) {
-                              led_pad_apply(pch, pnote,
+                              led_pad_apply(pch, shift_ch, pnote,
                                             &led_pad_last[i][p], 0);
                          } else if (st == 2 || st == 3) {
                               /* 2 is rbp's blink request, and the cadence for
@@ -813,11 +1019,11 @@ static void led_refresh(void)
                                    ? led_blink_for(LED_PAD_FIRST + (unsigned)p,
                                                    (unsigned)i + 1)
                                    : blink;
-                              led_pad_apply(pch, pnote, &led_pad_last[i][p],
+                              led_pad_apply(pch, shift_ch, pnote, &led_pad_last[i][p],
                                    ph ? led_encode(n->pad_enc,
                                                    rgb[0], rgb[1], rgb[2]) : 0);
                          } else {
-                              led_pad_apply(pch, pnote, &led_pad_last[i][p],
+                              led_pad_apply(pch, shift_ch, pnote, &led_pad_last[i][p],
                                    led_encode(n->pad_enc, rgb[0], rgb[1], rgb[2]));
                          }
                     }
@@ -833,10 +1039,8 @@ static void led_refresh(void)
            * is skipped -- the same rule as every other LED here, for the same
            * reason (a neighbouring surface's note is never substituted).
            *
-           * Mode 4 (rbp's size-bank echo, see rbp_pad_mode) is neither < 0 nor
-           * one of the four, so the LEDs are left exactly as they were. Darking
-           * all four would be a lie about a mode that has not changed, and
-           * lighting one of them would be a guess. */
+           * Secondary RX3 modes use the same physical mode button, through
+           * rbp_pad_mode's 0..7 -> 0..3 family conversion above. */
           if (n->n_mode[0] >= 0) {
                int m = rbp_pad_mode(i);
                if (m >= 0 && m < 4) {

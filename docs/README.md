@@ -2,6 +2,9 @@
 
 Documentation for the XDJ-RX3 `rb` → **Raspberry Pi 4B** port, with the previous
 Denon SC Live 4 target retained as the reference the port started from.
+The active controller is DDJ-FLX6; FLX4 is an unused compatibility option.
+For controller operation start with the [FLX6 inventory](flx6-mapping-audit.md)
+and [shim guide](../scripts/shims/README.md).
 
 **Start with [13 — Raspberry Pi 4](13-raspberrypi4.md)** if you are bringing a
 unit up; it is the target document and links out to the rest.
@@ -22,11 +25,13 @@ unit up; it is the target document and links out to the rest.
 | 11 | [runtime-launcher](11-runtime-launcher.md) | launch sequence / systemd integration |
 | 12 | [troubleshooting](12-troubleshooting.md) | symptom → cause → fix |
 | 13 | [raspberrypi4](13-raspberrypi4.md) | **the target**: image, `cmdline.txt`, present modes, pointing, audio, controls, USB, launcher, boot time, bring-up order |
-| 15 | [flx4-midi](15-flx4-midi.md) | the DDJ-FLX4 map: the tables, their source, the dump procedure, and what is still unverified |
-| 16 | [input-and-hotplug](16-input-and-hotplug.md) | the keyboard map's open defects: the lost key release, the arrow sign, Enter, hot-swap, the FLX4 startup thump |
+| 15 | [flx4-midi](15-flx4-midi.md) | FLX4 compatibility map and dated protocol/measurement history |
+| 16 | [input-and-hotplug](16-input-and-hotplug.md) | input/hot-plug architecture and dated keyboard/FLX4 investigations; current FLX6 reconnect behavior is in its inventory |
 | 17 | [rx3-flx4-comparison](17-rx3-flx4-comparison.md) | the sibling port read against this one: `doctor`, the run-time object scan, the firmware's own LED period — and where the sibling is behind. Their read-only USB overlay was read and **discarded**, not a candidate here |
 | 18 | [prodjlink](18-prodjlink.md) | `netshim.so`: rbp's Pro DJ Link stack over `wlan0`, the twelve functions hardcoded to `eth0`, the three interposed calls, the whitelist, and the load-order contract with `fbshim` — **built and host-verified, not deployed** |
 | 19 | [vnc](19-vnc.md) | `vncserve`: rbp's whole screen over VNC, hand-rolled (only libc) because `libvncserver` cannot be handed a JPEG the hardware encoder already made — the `raw` ↔ `hwjpeg` switch, its control page, the macOS 3.3 handshake, and the measured 44× bandwidth win |
+| 20 | [configuration page](20-config-page.md) | LAN status and configuration interface |
+| FLX6 | [mapping inventory](flx6-mapping-audit.md) | current controls, outputs, shutdown/countdown, preset alignment and verification limits |
 
 There is no document 14: the port plan numbers the FLX4 runbook 15 and defines
 nothing at 14, so the gap is left rather than renumbered.

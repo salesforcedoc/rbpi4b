@@ -27,7 +27,7 @@ RX3ULIB := $(RX3)/usr/lib
 COMPAT  ?= compat
 
 CFLAGS  := -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector -fPIC \
-           -Wall -Wextra -Wno-unused-parameter
+           -U_TIME_BITS -U_FILE_OFFSET_BITS -I$(abspath ../../work/dfb-src/compat-headers) -Wall -Wextra -Wno-unused-parameter
 LDFLAGS := -L$(COMPAT) -L$(RX3LIB) -L$(RX3ULIB) -Wl,-rpath-link,$(RX3LIB):$(RX3ULIB)
 
 $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a:
@@ -241,7 +241,7 @@ rbp_key.o: rbp_key.c rbp_key.h rbp_abi.h syscalls.h
 # (annotated in the sources), and shmstate.o's globals, which the audio shim
 # reads out of the global scope. (rbp_key.o is the third object outside this
 # list; it is hidden too, and says why in its own rule above.)
-CTRL_OBJS  := ctrlshim.o ctrl_map.o map_flx4.o map_jp21.o map_kbd.o evdev_io.o \
+CTRL_OBJS  := ctrlshim.o ctrl_map.o map_flx4.o map_flx6.o map_jp21.o map_kbd.o evdev_io.o \
               mididump.o rbp_bridge.o rbp_led.o led_table.o plinn_scan.o \
               rbp_vu.o midi_io.o controllers.o shimutil.o usb_label.o rbp_load.o
 CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \

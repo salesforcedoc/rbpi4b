@@ -1,5 +1,11 @@
 # 07 — Touch / pointing
 
+Controller context (2026-11-02): DDJ-FLX6 is now the default; FLX4 passages and
+captures in this page describe earlier input/painting investigations. The RX3
+exports eight pad modes, with secondary banks4..7; older four-family UI notes
+are not a claim that only four modes work. Current pad/shift/transport mappings
+and hardware verification are in the [FLX6 inventory](flx6-mapping-audit.md).
+
 An HDMI monitor has no touchscreen, so on the Pi this subsystem is really
 **pointing**: `rbp` is driven by a mouse, a trackball, or a USB touchscreen if
 you have one. The rbp-facing contract does not change — it still expects a

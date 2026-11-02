@@ -77,15 +77,18 @@ struct controller {
                                * today; test_controllers.c pins that, so a row
                                * that renames one and not the other is caught. */
      /* The surface's OWN SysEx message, or NULL. The shim decides when it goes
-      * out, and two surfaces want opposite things from it:
+      * out:
       *
       *   - the FLX4 has none (NULL). What keeps it talking is `keepalive`,
       *     below, and that is a poll rather than a greeting.
+      *   - the FLX6 has the position query used by its working Mixxx script.
+      *     It is sent through an identified sequencer route, after the engine
+      *     is ready, with bounded retries and a no-response fallback.
       *   - the JP21's is an absolute-value QUERY: Engine OS sends it at startup
       *     and this port re-asks it whenever rbp's fader positions are unknown
       *     (rbp_vu.c's calls to led_query_absolute()). It went out only on the
-      *     rawmidi route even before this table existed, because the sequencer
-      *     route carries three-byte LED/meter messages and nothing else.
+      *     rawmidi route even before this table existed. That restriction
+      *     remains specific to JP21; the sequencer can now carry SysEx too.
       */
      const unsigned char *init;
      unsigned init_len;

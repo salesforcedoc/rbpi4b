@@ -97,4 +97,6 @@ const struct ctrl_map map_none = {
      NULL,   /* devices(): no non-MIDI source wanted */
      NULL,   /* input(): ditto */
      NULL,   /* leds: no surface, so nothing to illuminate */
+     0,      /* hardware_headphone_mix */
+     NULL,   /* connection */
 };

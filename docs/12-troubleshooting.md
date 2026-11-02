@@ -1,5 +1,21 @@
 # 12 — Troubleshooting
 
+Current controller: DDJ-FLX6; FLX4 entries with dated captures below describe
+the earlier bench. Start with the [FLX6 inventory](flx6-mapping-audit.md) for
+the current input/output layout and confirmed versus locally checked status.
+
+| FLX6 symptom | Check |
+| --- | --- |
+| Logs still select FLX4/DDJFLX4 | Clear old explicit map/audio/MIDI-match overrides in rb.local.conf. Empty values select FLX6; RB_MIDI_MAP=flx6 is also valid. |
+| A rebuilt mapping appears unchanged | Verify the deployed knobshim.so and the copy loaded by rbp; install at /opt/rblive4 and restart rblive4. A chroot-only edit can be overwritten by the launcher. doctor.sh reports loaded versus staged copies. |
+| Headphones phase or duplicate master | Keep native headphones cue-only: hardware MIX/MASTER CUE blend USB master0/1 with cue2/3. Do not re-enable a second master mix in rbp. |
+| Right Merge preset performs the wrong utility action | Select physical preset1, then SHIFT+press the right knob to align software1. The controller cannot report its current preset through the supplied protocol. |
+| Only four pad modes appear available | Use the latest map and SHIFT+mode for the secondary four banks. Do not force primary pad-mode LED writes; they can switch the hardware bank back. |
+| Deck starts reversed or first Reverse press is swallowed | Use the startup guard: auxiliary VINYL ON requires physical SHIFT. The user confirmed this correction works. |
+| FX ON/OFF lamp stays on | Use selected-slot-last feedback and native active-type/enable gating; older broadcast output is superseded. |
+| New shortcut or shutdown/countdown does nothing | Deploy the latest knobshim.so first. Shutdown needs an unshifted left-knob hold of five seconds, root access to /proc/1/root and the host shutdown command. Check /tmp/knobshim.log for helper errors; LED completion is not a poweroff confirmation. |
+| USB eject/reinsert takes time | Inspect sh /opt/rblive4/usb-watch.sh status. Mount/bind/notification/import can be delayed; do not change the watcher solely because reconnect is not immediate. |
+
 Symptom → cause → fix. Rows are grouped by subsystem; the ones marked
 **(previous target)** are kept because they explain a design decision in this
 port, even though the hardware that produced them is gone.

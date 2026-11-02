@@ -1,18 +1,21 @@
 # 15 — DDJ-FLX4 MIDI
 
-The DDJ-FLX4 is the control surface for the Pi target, and
-`scripts/shims/map_flx4.c` is its map. This document is two things: the **record
+The DDJ-FLX4 is retained as an **unused compatibility option**;
+`scripts/shims/map_flx4.c` is its map. The current default is DDJ-FLX6; use the
+[FLX6 inventory](flx6-mapping-audit.md) and [shim guide](../scripts/shims/README.md)
+for that layout. This document is two things: the **record
 of what that map says the unit sends** (with the source of every number and an
 explicit mark on the ones nobody has confirmed), and the **runbook for turning a
 dump from the hardware into a correction of it**.
 
 The distinction it is built around is between *measured* and *published*.
-Nothing in this repository has ever been run with an FLX4 attached. Every FLX4
-number in `map_flx4.c` comes from Pioneer DJ / AlphaTheta's published **DDJ-FLX4
+The initial tables in `map_flx4.c` came from Pioneer DJ / AlphaTheta's published **DDJ-FLX4
 "List of MIDI messages", Ver 1.0** (the PDF on the unit's support page), and is
-therefore an expectation about the unit rather than an observation of it:
+therefore started as expectations rather than observations. Later dated captures
+in this page record subsequent measurements; they supersede the initial
+unverified statements where applicable. They do not establish FLX6 behavior:
 
-> **State.** The tables are written, cross-compiled and fixture-tested
+> **Initial state (historical).** The tables were written, cross-compiled and fixture-tested
 > (`scripts/shims/test_flx4.c`, run by `make test`), and the tests pass — which
 > says the map dispatches what it says it dispatches, not that the unit sends
 > what the map expects. Every value below is `TODO: unverified` in this sense
@@ -25,6 +28,11 @@ launch with it, [13 — Raspberry Pi 4](13-raspberrypi4.md).
 
 ## How the shim finds it
 
+Select `RB_MIDI_MAP=flx4` explicitly to use this compatibility runbook. Leave
+`RB_AUDIO_DEV` and MIDI match overrides empty for its registered identity.
+With the default FLX6 selection those same empty values mean DDJFLX6/FLX6,
+not FLX4. Clear old explicit overrides when returning to the FLX6 setup.
+
 Nothing is hardcoded to a device node. The controls shim walks the ALSA
 sequencer's client and port lists with `SNDRV_SEQ_IOCTL_QUERY_NEXT_CLIENT` /
 `SNDRV_SEQ_IOCTL_QUERY_NEXT_PORT`, matches the port name against
@@ -36,7 +44,7 @@ controller is necessarily enumerated — plugging the FLX4 in late has to work.
 
 Output (LED notes and meter CCs) goes through a **second local port** subscribed
 to the matched port's receive side, matched independently by
-`RB_MIDI_OUT_MATCH` (also default `FLX4`) — so the surface's receive port is
+`RB_MIDI_OUT_MATCH` (empty resolves to `FLX4` under this explicit map) — so the surface's receive port is
 found by name too, and no device node is hardcoded anywhere. Rawmidi is what it
 was always meant to be: a **runtime fallback**, opened only when no matching
 sequencer destination exists (one attempt every 5 s, `MIDI_LED_DEV` tried first,
@@ -267,7 +275,17 @@ A pad's note encodes **both** its number and the unit's current pad mode:
 rbp's pad keycodes `K_PAD1`…`K_PAD8` (`0x4117`…) mean whatever **rbp's own** pad
 mode says they mean, and that mode is set by the pad-mode buttons above.
 
-**rbp has exactly four pad modes, which is why the unit's buttons are repurposed
+**Correction, 2026-10-31:** The four-mode conclusion below is superseded.
+Disassembly of `PlayerInnards::getStat` at `0x3024bc..0x302524` explicitly
+exports eight modes: 0..3 for primary families and 4..7 when their secondary
+bank flags at `+0x79..+0x7c` are enabled. The four existing key handlers toggle
+these flags when the same mode button is pressed again. In particular, value
+4 is the secondary Hot Cue mode, not an unknown size-bank echo. The LED bridge
+now resolves these eight values to their four physical button/pad address
+families. The older absence claims in this section are retained as history,
+not a statement of current findings.
+
+**Superseded: rbp has exactly four pad modes, which is why the unit's buttons are repurposed
 rather than matched one for one.** rbp's dispatch tree
 (`ui::PlayerInnards::onPhysicalKey` @ `0x306b78`) carries four mode setters and
 nothing else — each a `str` of a small immediate to `[this+0x74]`, with the

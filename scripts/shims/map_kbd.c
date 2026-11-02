@@ -411,4 +411,6 @@ const struct ctrl_map map_kbd = {
      kbd_devices,
      kbd_input,
      NULL,            /* leds: a keyboard has no panel to light */
+     0,               /* hardware_headphone_mix */
+     NULL,            /* connection */
 };

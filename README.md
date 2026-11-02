@@ -7,7 +7,7 @@ Credit to: [![Instagram: @i.erhan.es](https://img.shields.io/badge/Instagram-%40
 rbpi4b runs the ARM32 `rekordbox` player application (`rbp`, called `rb`
 internally) extracted from **XDJ-RX3 firmware v1.20** on a **Raspberry Pi 4B**
 running **Pi OS Lite 32-bit**, with an **HDMI monitor** and a **Pioneer
-DDJ-FLX4** over USB.
+DDJ-FLX6** over USB.
 
 The port started from a working Denon SC Live 4 port, which in turn derived from
 the Prime GO work; the differences between them are the whole reason this was
@@ -22,149 +22,48 @@ tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 
 ## What it does
 
-| Subsystem | Detail | Doc |
-|---|---|---|
-| Display | HDMI at 1280×800 — the mode is forced via `video=` and the measured panel takes it, so the fb matches `rbp`'s 1280×800×16 RGB565 surface exactly: no scaling, no bars, no crop | [docs/06](docs/06-display.md), [docs/13](docs/13-raspberrypi4.md) |
-| Pointing | No touchscreen on a monitor: an evdev pointer (touch panel or mouse) is discovered by capability and transformed into the tsc2007 protocol `rbp` reads — including `rbp`'s own `1279 - x` reflection of that protocol's x, undone in the shim so a tap lands under the finger | [docs/07](docs/07-touch.md) |
-| Controls | transport, decks, mixer, jog and pads mapped from the DDJ-FLX4 MIDI surface — the tables are written from Pioneer's published MIDI message list and are unverified until a dump from the hardware, see [docs/15](docs/15-flx4-midi.md) | [docs/08](docs/08-controls.md), [docs/15](docs/15-flx4-midi.md) |
-| Panel LEDs | PLAY / CUE / SYNC / FX LEDs mirror rbp's own LED state (blink included) | [docs/08](docs/08-controls.md) |
-| VU meters | The FLX4's two channel level meters, driven from rbp's own meter as a CC value ramp (not the SC Live 4's segment bitmask); `RB_LED_VU` (default `1`) is a manual OFF switch | [docs/15](docs/15-flx4-midi.md) |
-| Audio | master (RCA out) and headphones/cue on the FLX4's 4-channel USB audio, **plus the same master audio out of the Pi's HDMI**; card, channel count and pair map are all configurable | [docs/09](docs/09-audio.md) |
-| USB | rekordbox-exported stick detection and `export.pdb` import into DeviceSQL | [docs/10](docs/10-usb.md) |
-| Launcher | `start-rb.sh` stops the desktop services that would fight for the display or the stick, then brings the player up | [docs/11](docs/11-runtime-launcher.md) |
-| Boot time | `install.sh` applies a reversible boot trim — cloud-init off the critical chain, the apt timers off the boot path, the launcher's no-op `systemctl` calls behind read-only guards, and the unit ordered at `basic.target` instead of after `multi-user.target` | [docs/13](docs/13-raspberrypi4.md#boot-time) |
-| Access | plain root on Pi OS — none of the previous target's overlay/SSH workarounds are needed | [docs/13](docs/13-raspberrypi4.md) |
+| Subsystem | Current behavior | Documentation |
+| --- | --- | --- |
+| Display and pointing | Native RX3 UI through DirectFB; evdev touchscreen/mouse translation | [display](docs/06-display.md), [touch](docs/07-touch.md) |
+| Controls | DDJ-FLX6 two-deck mapping, using physical decks3/4 for auxiliary functions; keyboard remains available | [FLX6 inventory](docs/flx6-mapping-audit.md), [controls](docs/08-controls.md) |
+| Feedback | Native transport/pad/loop/FX state, channel meters, jog position/load animations and Merge rings | [shim guide](scripts/shims/README.md) |
+| Audio | FLX6 USB master0/1 and headphones2/3; hardware headphone MIX/MASTER CUE, optional HDMI mirror | [audio](docs/09-audio.md) |
+| USB and recording | Rekordbox-exported media, safe-eject requests, native Track Mark and master recording | [USB](docs/10-usb.md), [FLX6 utilities](scripts/shims/README.md#merge-fx-utilities-and-shutdown) |
+| Runtime | systemd launcher, configuration/status page, VNC and hot-plug recovery | [launcher](docs/11-runtime-launcher.md), [configuration](docs/20-config-page.md), [VNC](docs/19-vnc.md) |
 
 ## State of the port
 
-**It runs on the hardware.** `rbp` has been launched on the measured Pi 4 and
-paints its UI; the audio stream reaches the FLX4's USB card with every write
-accepted. Read this with [docs/13](docs/13-raspberrypi4.md)'s bring-up table
-(S0–S7) open, which is where each step's check and likely failure is recorded —
-each row there says whether it has been run, and what it measured.
+The user has confirmed FLX6 audio/USB playback, core controls, eight pad modes
+and lights, meters, Beat FX ON/OFF and beat indicators, right Merge utilities,
+the headphone-mixing correction, startup Reverse correction and normal hot-plug.
 
-**Verified on the unit:**
+The latest audit fixes, shifted transport/Instant Doubles, 14-bit mixer,
+held-input cleanup, utility-preset calibration, shutdown hold and countdown are
+built and locally checked. Subsequent Pi hardware verification has not been
+reported. ARM build/ABI checks, 243 controller-registry checks and focused host
+harnesses passed; mocked shutdown tests never shut down the workstation.
 
-* **Display.** The forced `video=HDMI-A-1:1280x800@60` mode was accepted by a
-  sink whose own EDID lists nothing above 720p, and the fb it produced is
-  `rbp`'s logical surface exactly — 1280×800, 16 bpp RGB565, stride 2560, **one
-  page**. The driver logs `PRESENT: mode=off angle=0 … pages=1 pan=0`, i.e. the
-  layer surface *is* the fb page and no blit happens at all. The UI was then
-  confirmed by capturing `/dev/fb0` and decoding it. This needed one real fix:
-  the stock driver forced three buffers while the fb holds one, so the buffer
-  mode now comes from the page count rather than `ypanstep`
-  ([docs/06](docs/06-display.md#the-present-path)).
-* **Audio.** `audioshim.so` opens `hw:CARD=DDJFLX4,DEV=0`, negotiates the card's
-  4 channels and `S24_3LE`, and writes 64-frame/768-byte blocks at ≈realtime with
-  **zero** negative returns over 41,001 writes. Getting there fixed three
-  defects, all documented in [docs/09](docs/09-audio.md) — the last of them a
-  hand-rolled `SND_PCM_FORMAT_S24_3LE` that had been wrong for the life of the
-  shim and whose only symptom was silence. **The same master audio also goes out
-  of the Pi's HDMI**, as a second advisory output the FLX4's stream cannot be
-  affected by: it is opened non-blocking, holds its own ring half full so the two
-  clocks (~155 ppm apart, measured) never starve it, and a sink that is
-  unplugged mid-set costs it dropped blocks and a log line, never a stall. That
-  sink needed **a fourth defect found**: the vc4 HDMI PCMs take only
-  `IEC958_SUBFRAME_LE`, a real IEC 60958 subframe rather than a 32-bit
-  container, and the first `<< 8` reading of it produced *"loud and very
-  distorted"* audio with every counter perfect — an ears-only failure the
-  bring-up table's S4.6 row exists to catch. The HDMI copy's level follows the
-  unit's own **MASTER LEVEL** knob and nothing else, so it tracks the room
-  without attenuating the FLX4's output a second time
-  ([docs/09](docs/09-audio.md#the-hdmi-mirror)).
-* **Controls.** The shim subscribes to the unit's own port
-  (`subscribed to 28:0 'DDJ-FLX4 MIDI 1'`), and an `aseqdump` capture taken from
-  it turned the FLX4 map's largest guess — the jog's counts per revolution — into
-  a measurement (720, where the inherited value was 128).
-* **Pointing.** A real mouse is discovered and opened
-  (`/tmp/pointsrc.log`: `relative device /dev/input/event7 name='Logitech G203
-  Prodigy Gaming Mouse'`).
-* **Deploy.** `install.sh` places the tree, proves the chroot can execute a
-  32-bit binary, and no longer clobbers values measured on the unit — those live
-  in `rb.local.conf`, which the deploy cannot reach
-  ([scripts/device/README.md](scripts/device/README.md)).
-
-**Not yet verified, and each needs something only hardware or a person can give:**
-
-* **Whether it is *audible*.** The write path is confirmed; nobody has yet
-  listened to the FLX4's RCA outs. Requires a track on a USB stick (S6) as well.
-* **Whether the FLX4 map's tables are right.** Nothing has pressed a control and
-  watched `rbp` react, so every note and CC number still rests on Pioneer's
-  published list — the fixture test proves the map matches its own tables and
-  nothing more. This is S5.2 and it is the largest remaining unknown
-  ([docs/15](docs/15-flx4-midi.md)).
-* **Whether the cursor follows the mouse.** The discovery and the open are
-  verified; the visible behaviour needs a hand on the mouse (S3.2/S3.3). The
-  **touch** half of that row is now settled — the operator attached a USB touch
-  monitor, found taps acting on the mirror of the finger (rbp reflects the
-  tsc2007 x, undone in the shim), and on 2026-09-27 confirmed the fix by hand:
-  the sidebar's cells, deck 2's scrubbing and the list rows all act where the
-  finger is.
-* **USB media has run, but only against a stick it cannot use.** Detection,
-  vfat mount, chroot bind and the notification into `/tmp/udev_usb1` all
-  succeeded; the watcher then reported `rbp never opened export.pdb` — correctly,
-  because the stick holds only WAVs and an empty `PIONEER/USBANLZ` and has no
-  rekordbox database. A stick from rekordbox's *Export to USB Device* is what
-  settles the rest of S6, and it is also the precondition for playing a track and
-  therefore for hearing anything.
-* **Tearing, and the console over the UI** (S2.3/S2.4).
-* **A monitor that is not 1280×800, and a monitor swapped mid-session.** Both are
-  built: the present path's `scale` rung resamples the logical 1280×800 surface
-  into whatever fb is there (aspect-fit, centred, nearest-neighbour), the driver
-  upgrades `off` to it by itself when the real geometry disagrees with the
-  shim's, and `display-watch.sh` restarts the player when a swap changes the
-  geometry. `test_point` and `test_cursor_dev` pin the arithmetic and the
-  cursor's use of it, and `tools/fit-crosscheck.sh` keeps the driver's copy of
-  the fit rule equal to the shim's. **The first half has now been on the panel**:
-  S10.1–S10.4 ran on 2026-09-26, and a 1280×720, a 960×600, an 800×600 and a
-  1920×1080 fb each came up with the whole UI correctly scaled at 1.1–3.4 ms of a
-  16.67 ms frame, while the matched 1280×800 panel was unchanged. Two things are
-  still owed there: a **downscale loses hairline rules and thin glyph strokes**
-  at 0.75× and 0.625× (S10.2, unfixed and a decision rather than a defect), and
-  **the hot-swap rows are unstarted** — S10.0, S10.5–S10.10, the ones that need a
-  `video=` edit, a cable pull and a reboot
-  ([docs/13](docs/13-raspberrypi4.md#s10--the-display-drills),
-  [docs/06](docs/06-display.md#a-mismatch-selects-the-rung-by-itself)).
-* **The LED bridge**, on at `RB_LED_DISABLE=0` and transmitting nothing yet. The
-  note numbers moved out of `rbp_led.c` into the selected map's `struct
-  led_notes`, so a row that reads `-1` means "this surface has no such LED" and
-  sends nothing — which is what lets the bridge run before the FLX4's
-  illumination notes are known. Every FLX4 row is `-1` until it is *seen* to
-  light; only the panel can confirm a number, and the probe now exists
-  ([docs/15](docs/15-flx4-midi.md#the-leds)).
-* **The keyboard fallback's reader.** It starts under `EVDEV_MAP`, which defaults
-  to `kbd` — so the keyboard and mouse are live alongside the FLX4 with no
-  configuration, and the "keyboard does nothing while the controller works"
-  defect is closed. Its map and keycodes are fixture-tested under `qemu-arm`
-  (`test_kbd`), and the reader itself now has a suite of its own (`test_evdev`,
-  the kernel faked at the `syscall()` boundary); both have also been driven on the
-  Pi through a virtual keyboard. What is still open on hardware is only the
-  selector's *direction*.
-
-Where a number in these documents is an expectation rather than a measurement,
-it says so; [docs/README](docs/README.md) explains the convention.
+The [mapping inventory](docs/flx6-mapping-audit.md) separates implementation
+from hardware evidence. Older dated FLX4 and SC Live 4 measurements remain in
+the subsystem docs as historical references; they do not describe the default
+controller or its current verification status.
 
 ## Limitations
 
-* The FLX4 tables are unverified until someone dumps them — the tables, the
-  dump procedure and the unmeasured values are all in
-  [docs/15](docs/15-flx4-midi.md), and the ones that a dump settles are marked
-  `TODO: unverified` in `scripts/shims/map_flx4.c` too.
-* The booth stream is dropped (one log line): the FLX4 has two output pairs, so
-  master and headphones are what there is.
-* No LEDs lit yet: the bridge is on (`RB_LED_DISABLE=0`) but every FLX4 LED row
-  is `-1`, because the unit's transport/pad LED notes are not published and a
-  guess is not a dark LED — it is a phantom control press. Each row becomes a
-  one-line edit once it is seen to light. Pad illumination, and the
-  velocity→colour encoding with it, land with those numbers.
-* DJ FX parameter / layer encoders, StopTime and some shift actions are not
-  mapped.
-* Autostart **is** provided: `install.sh` installs and enables `rblive4.service`
-  (`RB_AUTOSTART=1`, the shipped default), so the player comes up on boot.
-  `RB_AUTOSTART=0` installs the unit but leaves it disabled
-  ([docs/11](docs/11-runtime-launcher.md)).
+- FLX4 is an unused compatibility option; FLX6 is the compiled default.
+- Right Merge utility preset alignment is explicit: select physical preset1,
+  then SHIFT+press its knob. The supplied protocol cannot read the preset.
+- Firmware Jog Cutter cannot currently be disabled by the shim.
+- Only two playback decks are implemented; FLX6 decks3/4 are extra button layers.
+- The USB audio map carries master/headphones; the separate RX3 booth stream
+  is not assigned. Analog booth routing is outside the MIDI map.
+- Some native RX3 functions still lack controller shortcuts; see the inventory.
+- Very fast same-track load animations can fall between LED polls.
 
----
+Hold the left Merge knob five seconds for a graceful host shutdown; release
+early to cancel. Its ring blinks faster as the threshold approaches. Deploy
+the new shim before relying on this feature, and let the Pi finish shutting
+down before removing power.
 
 ## The idea
 
@@ -184,8 +83,8 @@ it says so; [docs/README](docs/README.md) explains the convention.
         ├── pointing : fbshim.so    (evdev pointer → RX3 tsc2007 protocol;
         │                            also sends rbp's QUANTIZE keycode for the
         │                            deck boxes rbp draws but does not bind)
-        ├── controls : knobshim.so  (DDJ-FLX4 MIDI → rbp keycodes + LEDs)
-        ├── audio    : audioshim.so (JUCE/ALSA → the FLX4's USB audio)
+        ├── controls : knobshim.so  (DDJ-FLX6 MIDI → rbp keycodes + LEDs)
+        ├── audio    : audioshim.so (JUCE/ALSA → the FLX6's USB audio)
         ├── usb      : usb-watch.sh + native DeviceSQL import
         └── daemons  : edb_streamd
 ```
@@ -229,10 +128,10 @@ What does have to change is everything that named a device:
   page-count buffer mode fixes.
 * **Pointing** — there is no touchscreen. The tsc2007 protocol `rbp` reads is
   kept byte-for-byte, but what feeds it is now a discovered evdev pointer.
-* **Controls** — the FLX4 sends different messages than any earlier surface,
-  and puts its toggles on CCs rather than notes, so the map grew a CC-as-button
-  concept and the shim stopped hardcoding a client id and a device node.
-* **Audio** — `hw:1,0` with 8 channels becomes `hw:CARD=DDJFLX4,DEV=0` with 4,
+* **Controls** — the FLX6 has its own note/CC map, including alternate messages
+  for shifted controls and selected FX slots. Controller discovery uses its
+  registered port-name hint rather than a hardcoded ALSA client or device node.
+* **Audio** — `hw:1,0` with 8 channels becomes `hw:CARD=DDJFLX6,DEV=0` with 4,
   negotiated rather than forced, with the pair map and the output format in
   config. `plughw:` was the plan and was wrong: the map names hardware channels,
   and a plug device reports the wrong count for that (see [09](docs/09-audio.md)).
@@ -250,7 +149,8 @@ rbpi4b/
 ├── docs/                     findings & subsystem documentation (see docs/README.md)
 │   ├── 00-overview … 12-troubleshooting
 │   ├── 13-raspberrypi4.md    the target: image, cmdline, bring-up order
-│   └── 15-flx4-midi.md       the DDJ-FLX4 map: what is verified, what is not
+│   └── flx6-mapping-audit.md the current map, verification and limits
+│       15-flx4-midi.md       FLX4 compatibility and historical measurements
 ├── scripts/
 │   ├── build-chroot.sh       host: assemble the soft-float chroot tarball
 │   ├── patch-rbp-nopc.py     the getPcController() no-op patch

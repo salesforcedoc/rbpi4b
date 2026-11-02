@@ -1,5 +1,17 @@
 # scripts/device/
 
+DDJ-FLX6 is the default controller. Empty RB_MIDI_MAP, RB_AUDIO_DEV and MIDI
+match overrides select its registered identity; remove old FLX4 overrides from
+rb.local.conf when migrating. See the [FLX6 inventory](../../docs/flx6-mapping-audit.md).
+The new left Merge five-second hold/countdown requests host shutdown; verify it
+on the Pi after deployment before relying on it without SSH.
+
+Optional hardware diagnostics:
+[flx6-beat-led-probe.py](flx6-beat-led-probe.py) identifies beat-display codes;
+[flx6-headphone-probe.py](flx6-headphone-probe.py) isolates the two USB audio pairs.
+Both are interactive, temporarily stop the player and restore its prior running
+state on exit. Run them deliberately on the Pi; they are not startup tasks.
+
 Everything that runs **on the Raspberry Pi 4**, as root.
 
 Note where these come from, because it is not the tarball: the deploy tarball

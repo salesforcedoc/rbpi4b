@@ -44,6 +44,7 @@
 #include "midi_io.h"
 #include "ctrl_map.h"    /* ctrl_abs_invalidate() */
 #include "controllers.h" /* the surface's own facts: hint, card, SysEx */
+#include "rbp_bridge.h"
 
 /* ---- ALSA sequencer, in ---- */
 #define SEQ_DEV       "/dev/snd/seq"
@@ -95,6 +96,7 @@ static const char *surface_hint(const char *env_name)
  * per-second lookup can tell "nothing changed" from "this is a new surface". */
 static int sub_in_client = -1, sub_in_port = -1;
 static int sub_out_client = -1, sub_out_port = -1;
+static volatile unsigned surface_generation;
 
 enum { ROUTE_NONE = 0, ROUTE_SEQ, ROUTE_RAW };
 static int out_route = ROUTE_NONE;
@@ -293,6 +295,7 @@ static void midi_connect_try(void)
 
      if (!find_surface(&in_c, &in_p, &out_c, &out_p, in_name, out_name)) {
           if (sub_in_client >= 0) {
+               ctrl_surface_connection(0);
                klog("knobshim2: control surface '%s' disappeared "
                     "(unplugged?); waiting for it to come back\n", in_match);
                sub_in_client = sub_in_port = -1;
@@ -308,6 +311,8 @@ static void midi_connect_try(void)
      if (r == SUB_FAILED)
           return;
      if (r == SUB_NEW) {
+          ctrl_surface_connection(1);
+          surface_generation++;
           if (sub_in_client >= 0)
                klog("knobshim2: control surface: RE-subscribed to %d:%d '%s' -- "
                     "the old subscription was gone\n", in_c, in_p, in_name);
@@ -409,6 +414,7 @@ void seq_setup(void)
 void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev))
 {
      struct snd_seq_event ev;
+     unsigned long long next_connect = 0;
      /* Rate limit for the "this fd is not usable" line below. Static rather than
       * automatic because it has to survive the round it was set in. */
      static unsigned long long seq_bad_next_ms;
@@ -417,6 +423,14 @@ void midi_poll_forever(void (*on_event)(const struct snd_seq_event *ev))
           struct pollfd pfd;
           int pr;
           ssize_t n;
+
+          /* Check during active MIDI traffic too: a quickly re-enumerated
+           * controller can reuse its address without an idle timeout. */
+          unsigned long long now = shim_now_ms();
+          if (now >= next_connect) {
+               midi_connect_try();
+               next_connect = now + 1000;
+          }
 
           pfd.fd = seq_fd;
           pfd.events = POLLIN;
@@ -618,39 +632,61 @@ int midi_cc(int midi_ch, int cc, int val)
      return out_write(m);
 }
 
-/* Ask the panel to report every absolute control (faders/knobs) -- Engine OS
- * does this at startup (`queryAbsoluteControls()` in JP21_Controller_Device.qml).
- * Without it the fader positions are unknown until first moved, which made the
- * channel meters ignore the fader.
- *
- * This is a JP21 protocol message, and the sequencer route carries only the
- * three-byte LED/meter messages, so it goes out on rawmidi or not at all. A
- * surface matched by name (the FLX4) has no absolute controls to report and no
- * meters to light, so "not at all" is the correct outcome there.
- *
- * THE BYTES ARE NO LONGER HERE. They are the JP21 row's `init` in the controller
- * table (controllers.c), which is the one place a surface's own facts are
- * written down; this function looked the row up rather than carrying a copy, so
- * the message and the table cannot drift. The lookup is by id and the id is the
- * only thing named here, because the raw route IS the answer to "which surface
- * is on the other end" -- nothing matched it by name.
- *
- * This is also the only consumer of `init`, and that is why no surface's init is
- * sent at startup as well: for the FLX4 it is NULL, and for the JP21 a second
- * sender would put this query on whatever route happened to be up, which with a
- * FLX4 attached and MIDI_MAP=jp21 would be the FLX4's own port.
- *
- * Returns whether the query went out, which is a different question from
- * whether the panel will answer: rbp_vu.c reads the 0 as "nobody is going to
- * tell rbp where the faders are", which is the case it has to seed them for. */
+/* Ask for absolute positions using the selected surface's own registry bytes.
+ * FLX6 uses an identified sequencer output with bounded retries; JP21 keeps
+ * its rawmidi protocol path. Return 1 while waiting for a supported query,
+ * 0 when rbp_vu may seed unreported faders. Sending is not proof of a reply. */
 int led_query_absolute(void)
 {
      const struct controller *jp = controllers_find(JP21_CONTROLLER_ID);
      static int told;
 
+     /* Only send FLX6's query to an identified FLX6 sequencer output, with
+      * matching selected map and live input subscription. Never use an
+      * arbitrary rawmidi node for this device-specific request. */
+     const struct controller *attached = controllers_by_hint(surface_name);
+     if (out_route == ROUTE_SEQ && attached &&
+         strcmp(attached->id, "flx6") == 0 &&
+         strcmp(ctrl_sel_name(), "flx6") == 0 &&
+         sub_in_client >= 0 && sub_out_client >= 0) {
+          static unsigned generation = ~0U;
+          static unsigned attempts;
+          static unsigned long long started, next;
+          static int fallback_told;
+          if (generation != surface_generation) {
+               generation = surface_generation;
+               attempts = 0;
+               started = next = 0;
+               fallback_told = 0;
+          }
+          if (!get_key_manager() || !mixer_engine()) return 1;
+          unsigned long long now = shim_now_ms();
+          if (!started) started = now;
+          if (attempts < 3 && now >= next && attached->init) {
+               ctrl_abs_invalidate();
+               if (midi_sysex_out(attached->init, attached->init_len)) {
+                    attempts++;
+                    klog("knobshim2: FLX6 startup position query sent (%u/3); waiting for CC reports\n", attempts);
+               }
+               next = now + 2000;
+          }
+          /* A sent request is not a reply. Give it a bounded six-second
+           * window, then allow the existing untouched-fader fallback. Faders
+           * already reported by hardware are never overwritten by that seed. */
+          if (now - started < 6000) return 1;
+          if (!fallback_told) {
+               fallback_told = 1;
+               klog("knobshim2: FLX6 startup query window finished; only unreported faders may use defaults\n");
+          }
+          return 0;
+     }
+
      /* Invalidate the CC cache even when the query cannot be sent: the cache is
       * about what the *panel* last reported, and we no longer know. */
      ctrl_abs_invalidate();
+
+     if (strcmp(ctrl_sel_name(), JP21_CONTROLLER_ID) != 0)
+          return 0; /* Never put JP21's query on another selected surface. */
 
      if (out_route != ROUTE_RAW || led_fd < 0) {
           if (out_route == ROUTE_SEQ && !told) {

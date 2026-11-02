@@ -20,6 +20,10 @@ reference the port was built from.
   Raspberry Pi 4B hardware, and how the XDJ-RX3 player is made to run on it.
 * Interoperability **patch instructions** for the `rbp` binary (addresses +
   replacement instructions), and a patch against upstream DirectFB.
+* The manufacturer-published DDJ-FLX6 MIDI message-list PDF is a third-party
+  protocol reference, not original project code or firmware. Its original
+  attribution and notices remain with the document; the project's MIT license
+  does not relicense it.
 
 ## What this repository does **not** contain
 

@@ -2,9 +2,15 @@
 
 This is the current target: `rbp` (the XDJ-RX3 standalone rekordbox player) on a
 **Raspberry Pi 4B**, rendering to an **HDMI monitor**, playing through a
-**DDJ-FLX4**, driven by a mouse or a touchscreen. The Denon SC Live 4 is gone;
+**DDJ-FLX6**, driven by a mouse or a touchscreen. The Denon SC Live 4 is gone;
 the scripts, the shim defaults and this document treat the Pi as the only
 target.
+
+Current controller state (2026-11-02): FLX6 is the default; FLX4 is an unused
+compatibility map. See the [FLX6 inventory](flx6-mapping-audit.md) for controls,
+USB/record utilities, shutdown/countdown and confirmed versus locally checked
+behavior. The dated FLX4 S0–S10 bring-up captures below remain historical
+measurements, with their original names, addresses and outcomes.
 
 If you have not built anything yet, read [05 — chroot](05-chroot.md) for the
 soft-float chroot and [03 — port plan](03-port-plan.md) for what changed and
@@ -46,8 +52,8 @@ the expensive parts:
 | OS | **Raspberry Pi OS Lite 32-bit** — `armhf` userland, no desktop. The measured unit is the Debian 13 (trixie) generation |
 | Kernel | the stock Pi kernel — **64-bit** `6.18.50+rpt-rpi-v8` on the measured unit, with `32-bit EL0 Support`; `vc4` / `vc4-kms-v3d` |
 | Display | HDMI monitor or TV |
-| Audio | DDJ-FLX4 over USB (class-compliant, 4 output channels: master 1-2, headphones 3-4; `S16_LE`/`S24_3LE` at 44100 or 48000, measured — see S1.4) |
-| Controls | DDJ-FLX4 over USB MIDI; keyboard fallback |
+| Audio | DDJ-FLX6 USB, four channels at44100: master0/1 and headphones2/3; hardware headphone mixing. Historical FLX4 format/rate capture remains in S1.4. |
+| Controls | DDJ-FLX6 over USB MIDI; independent keyboard fallback; FLX4 compatibility option |
 | Pointer | USB mouse, trackball or touchscreen (see [pointing](#pointing)) |
 
 **Use the 32-bit image, and don't be alarmed by `uname -m` saying `aarch64`.**
@@ -678,8 +684,8 @@ Being attempted with `work/drmplane.c`; the probe and the inventory are in
 
 ## Audio
 
-The DDJ-FLX4 is USB class-compliant with **4 output channels: master on 1-2,
-headphones on 3-4.** `rb.conf`'s defaults describe exactly that:
+The DDJ-FLX6 uses **four USB output channels: master0/1, headphones2/3**
+(zero-based). `rb.conf` defaults describe that layout:
 
 ```
 RB_AUDIO_DEV=                 # empty -> hw:CARD=<the selected controller's card>,DEV=0
@@ -688,8 +694,8 @@ RB_AUDIO_MAP=master=0,1;headphones=2,3;booth=-
 RB_AUDIO_FMT=s24_3le
 ```
 
-`RB_AUDIO_DEV` ships **empty**, and for the FLX4 that resolves to
-`hw:CARD=DDJFLX4,DEV=0`: the card id comes from the controller table
+`RB_AUDIO_DEV` ships **empty**, and for the default FLX6 that resolves to
+`hw:CARD=DDJFLX6,DEV=0`: the card id comes from the controller table
 (`scripts/shims/controllers.c`), so the card and the surface cannot be selected
 apart ([08](08-controls.md), [09](09-audio.md)).
 
@@ -699,7 +705,7 @@ order, plus a dummy capture. The shim presents them on the real device.
 
 **`hw:`, not `plughw:` — and that is a measurement, not a preference.** The map
 `AUDIO_MAP` names *hardware* channel indices, so the shim has to learn the card's
-real channel count, and a plug device cannot tell it:
+real channel count, and a plug device cannot tell it. Historical FLX4 probe:
 
 | device | `snd_pcm_hw_params_get_channels_max()` |
 |---|---|
@@ -726,38 +732,39 @@ same mistake instead made it downmix and put garbage on the second pair — a fa
 that sounded like a working card and a broken mix.) `AUDIO_CHANNELS=auto` reads the
 real maximum and clamps to `rbp`'s 8.
 
-The headphones stream is routed **straight through** — `rbp`'s `HeadPhone`
-already mixes cue and master time-aligned, so summing the separate ALSA devices
-would comb-filter. Booth is dropped with one log line (the FLX4 has no separate
-booth pair). Stereo-only devices degrade to master-only with cue dropped, never
+The headphones stream is routed **straight through**. On FLX6 it is cue-only:
+the physical MIX and MASTER CUE combine it with USB master on the controller.
+Software-mixed maps retain native cue+master instead. Mixing master twice
+would comb-filter. The separate RX3 USB booth stream is unassigned in this map.
+Stereo-only devices degrade to master-only with cue dropped, never
 silently mixed. See [09 — audio](09-audio.md) for the stream model.
 
 ## Controls
 
 Two independent selections, one per event source: `RB_MIDI_MAP` picks the map that
-reads the ALSA sequencer — the DDJ-FLX4 map by default, `kbd` for no controller at
+reads the ALSA sequencer — the DDJ-FLX6 map by default, `flx4` for compatibility, `kbd` for no controller at
 all, `jp21` for the previous target's — and `RB_EVDEV_MAP` picks the map that reads
 `/dev/input/event*`, which defaults to `kbd`. So a keyboard and a mouse are live
 **alongside** the controller with no configuration; `RB_EVDEV_MAP=none` is how to
 ask for a controller with no keyboard. See
 [08 — Controls](08-controls.md#the-keyboard-map-rb_evdev_mapkbd-or-rb_midi_mapkbd-alone).
 
-**The FLX4 map is written and fixture-tested, and it is this target's default**
-(`flx4` in `rb.conf`, and the fallback in source). Its tables are the one place
-this port is *unverified* rather than *unrun*: the shim subscribes to the unit's
-own port and an `aseqdump` capture has been taken from it (S5.1), but **no control
-has yet been pressed and watched through to rbp**, so every note and CC number
-still comes from Pioneer's published DDJ-FLX4 MIDI message list, and the fixture
-test can only prove the map matches its own tables. Expect the first session to
-correct some of them — the channel conversion and the pad base+pad encoding are
-the two whose failure mode is a whole section doing nothing. The dump procedure,
-the tables and the explicitly-unverified parts are in
-[15 — DDJ-FLX4 MIDI](15-flx4-midi.md). The LED bridge is a further step behind:
-it is **on** (`RB_LED_DISABLE=0`) but every FLX4 note row is `-1`, which sends
-nothing — so the bridge runs and the panel stays dark. The notes moved out of
-`rbp_led.c` into the map's `struct led_notes`, so the previous target's numbers
-can no longer be driven at this one by accident; what remains is to *see* each
-one light, which only the panel can settle (S9 below).
+**FLX6 is the default** in the controller registry; empty RB_MIDI_MAP resolves
+to flx6. Explicit flx4 selects the retained compatibility map. Clear old local
+FLX4 audio/match overrides when migrating. The user has confirmed core FLX6
+controls, all eight pad modes/lights, meters, FX indicators, headphone behavior
+and ordinary hot-plug. Recent shifted transport/Instant Doubles, 14-bit mixer,
+held-input cleanup, calibration and shutdown/countdown are built and checked
+locally, with Pi verification still outstanding.
+
+The [FLX6 inventory](flx6-mapping-audit.md) is the current controller runbook.
+The LED bridge drives native transport, pads, loop/Color/Beat FX state, meters,
+jog position/load animations and both Merge rings. A five-second left Merge
+hold requests host shutdown; select physical right preset1 then SHIFT+press
+its knob to realign the USB/record utility counter. Hardware decks3/4 are
+auxiliary layers for RX3 decks1/2, not extra players. The dated S5/S9 FLX4
+bring-up rows below retain their original evidence and do not supersede this
+current layout/status.
 
 **The keyboard fallback is written, and it now runs on this target.** A map with a
 key table, plus the evdev reader that feeds it, with the keycodes it produces

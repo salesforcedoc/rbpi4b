@@ -52,6 +52,7 @@
 #include "midi_io.h"
 #include "rbp_vu.h"
 #include "ctrl_map.h"    /* the surface's meter row -- see the header */
+#include "controllers.h"
 
 /* `g_fader` / `g_fader_seen` ARE NOT DEFINED HERE ANY MORE. They live in
  * fader_state.c with default visibility and are linked into fbshim.so, because the
@@ -239,8 +240,10 @@ static int vu_encode(int steps)
  * t is the caller's 40 Hz tick; the work happens every other second. */
 static void mixer_defaults_tick(unsigned long t)
 {
+     static int query_waited;
      if (t < 1200 && (t % 80) == 0) {
           int asked = led_query_absolute();
+          query_waited = asked;
           /* rbp's mixer inits after we load, so the one-shot unity master
            * level in init() is dropped - re-assert it for ~30 s. */
           send_rx_key_f(K_MASTERLVL, OP_VALUE, CH_GLOBAL, 1023, 1.0f);
@@ -275,8 +278,42 @@ static void mixer_defaults_tick(unsigned long t)
                          send_rx_key_f(K_FADER, OP_VALUE, m, 1023, 1.0f);
                     }
           }
-     } else if ((!g_fader_seen[1] || !g_fader_seen[2]) && (t % 80) == 0)
-          led_query_absolute();
+     } else if ((t % 80) == 0) {
+          const struct controller *c = controllers_find(ctrl_sel_name());
+          int sequencer_query = c && c->init && c->alsa_hint;
+          /* Named surfaces with a query need reconnect detection even after
+           * every fader has reported. Preserve the legacy polling rule for
+           * other surfaces. Also finish a query that started after 30 s. */
+          if (!g_fader_seen[1] || !g_fader_seen[2] || sequencer_query) {
+               int asked = led_query_absolute();
+               if (query_waited && !asked) {
+                    for (int m = 1; m <= 2; m++)
+                         if (!g_fader_seen[m])
+                              send_rx_key_f(K_FADER, OP_VALUE, m, 1023, 1.0f);
+               }
+               query_waited = asked;
+          }
+     }
+}
+
+/* Shared by the meter-enabled and disabled paths. FLX6 hardware was measured
+ * mixing the USB master/cue pairs even with rbp stopped; its cue USB pair must
+ * therefore contain PFL only. Other maps retain the existing software mix. */
+static int headphone_defaults(void)
+{
+     if (!mixer_engine() || !get_key_manager())
+          return 0;
+     int hardware = ctrl_sel_hardware_headphone_mix();
+     me_set_master_cue(!hardware);
+     me_set_stereo(1);
+     if (hardware) {
+          g_cue_mix = 0.0f;
+          send_rx_key_f(K_HPMIX, OP_VALUE, CH_GLOBAL, 0, 0.0f);
+          klog("knobshim2: headphone USB pair cue-only; hardware owns MIX and MASTER CUE\n");
+     } else {
+          klog("knobshim2: master cue enabled at startup\n");
+     }
+     return 1;
 }
 
 void *vu_thread(void *arg)
@@ -305,8 +342,8 @@ void *vu_thread(void *arg)
       * The engine defaults in the branch below are NOT meter work and must not
       * be skipped along with the meters. rbp has no PFL keycode, so the cue bus
       * is not reachable from this shim by keycode at all and asserting it is
-      * the shim's job on every target: the headphone bus should carry the
-      * master before the operator touches anything. A meterless target
+      * the shim's job on every target: software-mixed headphone buses include
+      * master; hardware-mixed ones carry cue only. A meterless target
       * therefore still gets them -- on its own wait for rbp's mixer -- and only
       * then leaves.
       *
@@ -338,10 +375,7 @@ void *vu_thread(void *arg)
            * bound. The thread exits once they are set, so this costs nothing
            * after that. */
           for (;;) {
-               if (mixer_engine()) {
-                    me_set_master_cue(1);
-                    me_set_stereo(1);     /* default: stereo (0 = mono split) */
-                    klog("knobshim2: master cue enabled at startup\n");
+               if (headphone_defaults()) {
                     break;
                }
                usleep(200000);
@@ -357,6 +391,13 @@ void *vu_thread(void *arg)
                mixer_defaults_tick(t);
                usleep(25000);   /* 40 Hz, as below */
           }
+          /* VU disabled must not disable startup/reconnect position queries. */
+          const struct controller *c = controllers_find(ctrl_sel_name());
+          if (c && c->init && c->alsa_hint)
+               for (;;) {
+                    mixer_defaults_tick(1200);
+                    usleep(2000000);
+               }
           return NULL;
      }
      vu_test = env_on("VU_TEST", 0);
@@ -388,18 +429,13 @@ void *vu_thread(void *arg)
 
      for (;;) {
           int l, r;
-          /* Enable rbp's master cue once the engine exists, so the headphone
-           * bus contains the master (no panel we target has a MASTER CUE
-           * button). The LED_VU=0 branch above does the same before it returns;
+          /* Set the selected surface's headphone policy once the engine and
+           * KeyManager exist. The LED_VU=0 branch does the same before returning;
            * this one is the meters-present path, kept here so the order of
            * startup work on that path is unchanged. */
           static int mc_init = 0;
-          if (!mc_init && mixer_engine()) {
-               mc_init = 1;
-               me_set_master_cue(1);
-               me_set_stereo(1);     /* default: stereo (0 = mono split) */
-               klog("knobshim2: master cue enabled at startup\n");
-          }
+          if (!mc_init)
+               mc_init = headphone_defaults();
           int master_here = (vu_leds->meter_master_ch >= 0);
           /* VU_TEST is the WIRING test, and it drives the channel meters as well
            * as the master pair -- which is what makes it usable on a surface

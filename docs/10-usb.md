@@ -1,5 +1,14 @@
 # 10 — USB stick + rekordbox database
 
+FLX6 shortcuts: right Merge FX preset1/2 requests safe eject of USB1/USB2;
+preset3 sends Track Mark and preset4 toggles native master recording. Recording
+requires writable USB2; Track Mark splits an active recording. The software
+preset starts at1: select physical preset1, then SHIFT+press the right knob to
+realign after a mismatch. Eject is a native player request; actual remount/import
+can take time, and host mount status is reported by usb-watch.sh status.
+See the [current mapping/verification](flx6-mapping-audit.md) and
+[operator guide](../scripts/shims/README.md#merge-fx-utilities-and-shutdown).
+
 A rekordbox-exported stick in one of the Pi's USB ports is detected natively: it
 mounts, `export.pdb` is opened and analysed by DeviceSQL, and the drive shows as
 **USB 1** in rb. A second stick appears as **USB 2** — rbp has two media devices

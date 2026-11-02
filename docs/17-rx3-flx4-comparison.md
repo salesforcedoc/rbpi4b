@@ -1,5 +1,11 @@
 # 17 — the sibling port: what `Rx3-flx4` does differently
 
+Historical comparison: this records the sibling and this tree as read in
+October2026. The current controller is DDJ-FLX6, with FLX4 retained only as
+compatibility; current metadata, defaults, LEDs and reconnect handling are in
+the [FLX6 inventory](flx6-mapping-audit.md). Names and counts in the comparison
+below are historical, not the current controller registry.
+
 A comparison against the other public attempt at running XDJ-RX3 firmware on a
 Raspberry Pi, read on **2026-10-02**.
 

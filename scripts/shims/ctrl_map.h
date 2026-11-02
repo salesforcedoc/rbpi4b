@@ -50,8 +50,9 @@
  * is the one that finds this ceiling: it reaches 99 rows (test_flx4.c pins the
  * count), and the previous 96 silently swallowed its last three -- a mixer note
  * and both Beat FX notes. The next obvious change to that map is binding the
- * pads' +SHIFT layer, which is another 64 rows; 192 covers it. */
-#define CTRL_NKEYS 192
+ * pads' +SHIFT layer, which is another 64 rows. FLX6's eight banks plus
+ * auxiliary deck-3/4 controls need additional headroom. */
+#define CTRL_NKEYS 256
 #define CTRL_NABS  40
 
 /* Button: a note on a receive channel that means an rbp keycode. `key` 0 marks
@@ -70,9 +71,9 @@ struct note_ctrl {
 extern struct note_ctrl note_map[];
 extern int note_map_n;
 
-/* Absolute control: a CC whose 7-bit value is a position. `last` is the 10-bit
- * value last sent, so a CC that repeats is dropped; -1 means "unknown", which
- * is what makes the panel's reply to led_query_absolute() re-apply. */
+/* Absolute control: a position CC (or the base/MSB of a pair assembled by the
+ * selected map). `last` is the 10-bit value last sent; -1 means "unknown", so
+ * the panel's reply to led_query_absolute() is re-applied. */
 struct abs_ctrl {
      int rch, cc, key, sch, last;
 };
@@ -125,7 +126,7 @@ enum led_enc {
 enum meter_enc {
      METER_ENC_NONE = 0,
      METER_ENC_PRIME_SEGMENTS,  /* (1 << n) - 1; the Prime's meter is 6 segments */
-     METER_ENC_FLX4_LEVEL,      /* 0x26 bottom .. 0x7F top; below 0x26 is dark */
+     METER_ENC_FLX4_LEVEL,      /* FLX4/FLX6: 0x26 bottom .. 0x7F top; below 0x26 dark */
 };
 
 /* ---- the panel LEDs ------------------------------------------------------
@@ -155,6 +156,15 @@ struct led_notes {
      /* one note per deck LED, in the order rbp_led.c reads them */
      int n_sync, n_cue, n_play, n_keylock, n_vinyl, n_slip;
      int n_loopin, n_loopout, n_autoloop;
+     int n_master;         /* tempo MASTER designation, distinct from key lock */
+     int n_quantize;       /* shifted SYNC lamp, following deck quantize */
+     int n_loopin_shift, n_loopout_shift; /* alternate LEDs while SHIFT held; -1 = none */
+     int transport_shift_aliases; /* gate for maps with shifted PLAY/CUE lamps */
+     int n_play_shift, n_cue_shift;
+     /* Optional extra deck layers used as controls for the two RX3 decks.
+      * The flag keeps zero-initialized compatibility maps silent. */
+     int aux_deck_leds, aux_deck_ch;
+     int aux_n_keylock, aux_n_keylock_shift, aux_n_slip, aux_n_slip_shift;
 
      /* The four pad-mode buttons' LEDs, indexed by RBP'S OWN MODE VALUE --
       * 0 HOT CUE / 1 AUTO BEAT LOOP / 2 SLIP BEAT LOOP / 3 BEAT JUMP -- on the
@@ -188,6 +198,11 @@ struct led_notes {
       * the second is a surface whose deck 2 has no pads. */
      int pad_ch;           /* pads: send channel, deck 1; -1 = no pad LEDs */
      int pad_ch2;          /* pads: send channel, deck 2 */
+     int pad_shift_enabled; /* also mirror pad illumination to SHIFT channels */
+     int pad_shift_ch, pad_shift_ch2; /* used only when pad_shift_enabled != 0 */
+     /* Optional physical pad bank reader: controller bank may differ from
+      * rbp's logical mode. Returns the MIDI note base, or -1 if unknown. */
+     int (*pad_note_base)(int deck);
 
      /* The pads' LED NOTE BASE, indexed by RBP'S OWN MODE VALUE -- the same
       * four and the same index as n_mode above: 0 HOT CUE / 1 AUTO BEAT LOOP /
@@ -224,6 +239,32 @@ struct led_notes {
 
      int fx_ch;            /* the global FX group's send channel */
      int n_fx[LED_FX_COUNT];   /* indexed by enum led_fx; -1 = no such LED */
+     int fx_channels_enabled; /* optional per-effect channels instead of fx_ch */
+     int fx_channels[LED_FX_COUNT];
+     int jog_display_enabled;
+     int jog_position_ch;     /* CC deck index 0/1, values 0..72 */
+     int jog_load_ch;         /* Note deck index 0/1, 0/127 animation trigger */
+     int jog_aux_mirror;      /* also drive hardware decks 3/4 from RX3 1/2 */
+     /* Extra addresses for the same global Beat FX lamp on surfaces whose
+      * physical button changes MIDI address with the selected effect slot.
+      * A zero count disables the aliases for existing maps. */
+     int bfx_extra_count;
+     struct { int ch, note; } bfx_extra[5];
+     /* Optional selected hardware FX slot: 0 is n_fx[BFX], 1..5 are extras.
+      * With this callback, clear other slots and write this slot LAST instead
+      * of broadcasting ON to every address. */
+     int (*bfx_selected_slot)(void);
+     /* Optional beat-time display: translate rbp's beat rung to a surface CC
+      * value, or -1 when unavailable. Two unit channels share the RX3 state. */
+     int (*bfx_beat_value)(int rung, unsigned long long now_ms);
+     int bfx_beat_cc;
+     int bfx_beat_ch[2];
+     int bfx_beat_resend_ms; /* allow native blink patterns to run between refreshes */
+     int (*utility_ring_value)(unsigned long long now_ms); /* -1 unavailable, else 0..127 */
+     int utility_ring_ch, utility_ring_cc;
+     /* Optional separate ring for a held shutdown gesture. */
+     int (*power_ring_value)(unsigned long long now_ms);
+     int power_ring_ch, power_ring_cc;
 
      /* ---- the meter --------------------------------------------------------
       *
@@ -329,6 +370,12 @@ struct ctrl_map {
       * is what keeps a selection with no LED table from being driven by one it
       * never published. */
      const struct led_notes *leds;
+
+     /* Hardware mixes USB master and cue pairs itself. Keep rbp's headphone
+      * stream cue-only rather than adding a second copy of master. */
+     int hardware_headphone_mix;
+     /* MIDI reader thread: 0 on loss, 1 on a fresh subscription. Optional. */
+     void (*connection)(int connected);
 };
 
 /* "Nothing on this side." The absence of a surface is a real selection and not a
@@ -348,8 +395,8 @@ extern const struct ctrl_map map_kbd;
  * unit confirms them -- see the provenance block in map_flx4.c and docs/15. */
 extern const struct ctrl_map map_flx4;
 
-/* The DDJ-FLX6 two-deck map. Input assignments come from the user's verified
- * MIDI XML; output/LED assignments remain disabled until measured. */
+/* The DDJ-FLX6 two-deck map. Input/output assignments follow the official MIDI
+ * list, working Mixxx references and the operator's hardware probes. */
 extern const struct ctrl_map map_flx6;
 
 /* The selected MIDI surface's LED table, or NULL if it has none to drive. Defined
@@ -358,6 +405,9 @@ extern const struct ctrl_map map_flx6;
  * nothing under MIDI_MAP=kbd is a selection rather than an omission. A caller
  * that gets NULL sends nothing -- it must not fall back to another map's notes. */
 const struct led_notes *ctrl_sel_leds(void);
+int ctrl_sel_hardware_headphone_mix(void);
+const char *ctrl_sel_name(void);
+void ctrl_surface_connection(int connected);
 
 /* Has the MIDI surface been selected yet? The front end picks it on midi_thread,
  * and every thread is started together from the constructor, so a thread that

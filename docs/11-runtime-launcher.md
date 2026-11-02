@@ -1,5 +1,17 @@
 # 11 — Runtime launcher
 
+Current FLX6 deployment: leave controller/audio identity overrides empty to use
+the registered FLX6 defaults (or explicitly select RB_MIDI_MAP=flx6). Clear old
+local FLX4/DDJFLX4 overrides when migrating. Install rebuilt knobshim.so at the
+deploy root; the launcher copies it into the chroot on start, so chroot-only
+edits can be overwritten. See the [FLX6 inventory](flx6-mapping-audit.md).
+
+The left Merge knob's five-second hold requests the host's shutdown -h now.
+The root-run shim's child enters the host root and clears inherited preload;
+systemd then performs the normal service stop/unmount/poweroff sequence.
+Early release cancels the hold. This new shortcut/countdown is locally checked
+and still needs Pi verification before relying on it without SSH.
+
 [`scripts/device/start-rb.sh`](../scripts/device/start-rb.sh) runs on the Pi, as
 root, over SSH, and is the normal way to bring up the player. It deploys to
 `$RB_DEPLOY_ROOT/start-rb.sh` (`/opt/rblive4/start-rb.sh`) with `lib.sh`,

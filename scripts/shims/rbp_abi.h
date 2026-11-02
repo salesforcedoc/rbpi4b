@@ -276,6 +276,18 @@
  * NOTE the contrast with K_TRACKFILTER, which needs the repeat *instead of* a
  * usable press. Here the press is load-bearing. */
 #define K_USBSTOP    0x8002
+/* KeyInput::keyCodeAsText @0x37d13c..37d15c: 0402=TrackMark,0401=USB REC.
+ * Mixer::asEventCode @0x2cfb38 / 0x2cfe48 accepts PRESS only; MixerSkeleton
+ * @0x2ca2f0 dispatches REC as SW_ON_OFF=2 (toggle), and +0x3fc TrackMark.
+ * EupRxDataCheck @0x380a8c / 0x380aec sends these same press/release keys.
+ * Keep native UI handling: it checks media, prepares filenames and reports
+ * failures rather than writing recorder state directly. */
+#define K_USB_REC     0x0401
+#define K_TRACK_MARK  0x0402
+#define CH_RECORDER   0       /* native panel channel for USB REC / TRACK MARK */
+/* MixerEngine::getRecordingStatus @0x57854 checks its WavWriter then reads
+ * its recording flag. Nonzero is the native MasterInnards recording test. */
+#define ADDR_RECORDING_STATUS 0x57854
 
 /* THE TWO UsbStorageManager OBJECTS, and how to reach them -- what the settings
  * panel's USB1 STOP/USB2 STOP rows are lit from (settings_zone.h, pointsrc.c; they
@@ -324,6 +336,13 @@
 #define K_LOAD       0x4311
 #define K_PLAY       0x4101
 #define K_CUE        0x4102
+/* Native PlayEngine transport, verified from symbols/disassembly. */
+#define PE_PLAY_SHORTCUT       0x0005d5f8UL /* play(deck,bool,bool,bool) */
+#define PE_PAUSE_SHORTCUT      0x0005d694UL /* pause(deck,bool,bool,bool) */
+#define PE_SETPLAYINGTIME      0x0005d8acUL /* setPlayingTime(deck,long) */
+#define PE_BACKCUETOSTANDBY     0x0005e668UL /* backCueToStandby(deck,bool) */
+#define PE_CANBACKCUE          0x0005e8b8UL /* isPossibleToBackCue(deck) */
+#define PE_CUESTANDBY          0x0005e910UL /* isInCueStandby(deck) */
 #define K_SYNC       0x4112
 #define K_VINYL      0x4104
 #define K_JOG_TOUCH  0x4306    /* jog plate touch  (push/release) */
@@ -353,8 +372,15 @@
 #define K_BEATJUMP   0x4116
 #define K_TRFWD      0x4214    /* XDJ TRACK SEARCH > (track skip next) */
 #define K_TRREV      0x4215    /* XDJ TRACK SEARCH < (track skip prev) */
-#define K_SRFWD      0x411f    /* XDJ SEARCH > (beat jump next) */
-#define K_SRREV      0x4120    /* XDJ SEARCH < (beat jump prev) */
+#define K_SRFWD      0x411f    /* XDJ SEARCH >; preserve press/hold/release */
+#define K_SRREV      0x4120    /* XDJ SEARCH <; preserve press/hold/release */
+/* Verified in KeyInput::keyCodeAsText @0x37ddc0 and Player::asEventCode
+ * @0x2f16d4; EupRxDataCheck @0x37f178..0x37f2d0 sends press/release with
+ * zero payload for these same four physical panel keys. */
+#define K_CALLNEXT   0x4322
+#define K_CALLPREV   0x4323
+#define K_MEMORY    0x4125
+#define K_MEMDELETE 0x4124
 #define K_PAD1       0x4117
 #define K_LOOPIN     0x410c
 #define K_LOOPOUT    0x410d
@@ -417,6 +443,18 @@
 /* master cue (RX3 MASTER CUE button; SC Live 4 has none - strips 3/4 use it) */
 #define ME_SET_MASTER_CUE 0x0005766cUL
 #define ME_GET_MASTER_CUE 0x0005767cUL
+
+/* Crossfader assignment is separate from its position. CrossFader::setAssign
+ * proves 0 = THRU, 1 = A and 2 = B; without these assignments a valid 0x6017
+ * position reaches rbp but audibly changes nothing. */
+#define ME_SET_XFADER_ASSIGN 0x00057008UL
+#define ME_GET_XFADER_ASSIGN 0x0005704cUL
+#define ME_SET_XFADER_CURVE  0x00056fe8UL
+#define ME_GET_XFADER_CURVE  0x00056ff8UL
+#define XFADER_ASSIGN_THRU   0
+#define XFADER_ASSIGN_A      1
+#define XFADER_ASSIGN_B      2
+#define XFADER_CURVE_SHARP   0
 
 
 /* ---- DJ FX: channel assign, effect select, time/parameter -----------------
@@ -582,6 +620,10 @@ static const signed char bfx_type_to_pos[15] = {
 #define BE_OFF_BEAT         0x44   /* BeatEffect* -> long  beat button (rung)    */
 #define BE_OFF_BEAT_MAX     0x48
 #define BE_OFF_BEAT_MIN     0x4c
+/* calDisplayEffectTime @0xb5d94 indexes floats at 0x4252e0:
+ * 1/16, 1/8, 1/4, 1/2, 3/4, 1, 2, 4, 8, 16, 32, 64.
+ * Thus rung 4 (3/4) must NOT be sent directly to another surface's enum. */
+#define BFX_BEAT_RUNG_COUNT 12
 
 /* djengine::EnBeatEffectType's first member, and the one the SW_BFX_TYPE switch
  * cannot reach (the 14 positions map onto types 1..14 -- see the table above).
@@ -729,8 +771,11 @@ static const signed char bfx_type_to_pos[15] = {
  *   statwatcher = *(holder + PADMODE_STATWATCHER_OFF);
  *   perdeck     = *(statwatcher + (deck ? PADMODE_DECK2_OFF : PADMODE_DECK1_OFF));
  *   return *(unsigned char *)(perdeck + PADMODE_BYTE_OFF);
- * returning 0 HOT CUE / 1 AUTO BEAT LOOP / 2 SLIP BEAT LOOP / 3 BEAT JUMP --
- * the same four modes, in the same order, as the onKey_* dispatch table.
+ * returning 0 HOT CUE / 1 AUTO BEAT LOOP / 2 SLIP BEAT LOOP / 3 BEAT JUMP,
+ * plus secondary modes 4..7. getStat @0x3024bc..0x302524 exports those by
+ * adding 4 when the per-family bank byte (+0x79..+0x7c) is set. Four keycodes
+ * therefore do NOT imply four total modes. Repeating the family's key toggles
+ * its bank (HOT CUE toggles on release; the other three toggle on press).
  *
  * Measured 2026-09-30 against the live process: injecting ch0 notes 27/30/32/34
  * through the shim's own sequencer port moved deck 1's value 3 -> 0, 1, 3, 2
@@ -752,8 +797,33 @@ static const signed char bfx_type_to_pos[15] = {
 #define PLAYENGINE_GLOBAL  0x011497d0UL   /* djengine PlayEngine singleton */
 #define PE_ISPLAYING       0x5d880
 #define PE_ISLOADED        0x5d3b0
+#define PE_ISLOADING       0x5d408
+/* getPlayingPosition returns signed 44.1 kHz sample frames. Verified against
+ * getPlayingTime @0x5d9cc, which multiplies the same value by 1000/44100. */
+#define PE_GETPLAYINGPOSITION 0x5d950
+/* CmnFunc_CmnInfo_GetLocalNowPlayMusicID(deck, music_id *out), two uint32s. */
+#define ADDR_CURRENT_MUSIC_ID 0x1842f4
+/* C ABI hidden-return form: UiGetCurrentCueInfo(CueInfo_t *out, int deck).
+ * CueInfo_t is 52 bytes; word 0 packs uint16 index and uint16 type.
+ * Type 1 = memory loop, 0x8001 = Active Loop. DbProxy::saveCue is STATIC:
+ * (UiObject::Channel, music_id by value [two words], CueInfo_t const *).
+ * It calls the native DbIF request, whose flags preserve the Active bit;
+ * notifyCueUpdate then drives onEv_ActiveLoop/onEv_ActiveLoopDeleted. */
+#define ADDR_CURRENT_CUE_INFO 0x0fd6ac
+#define ADDR_EXIST_MEMORY_CUE 0x1e15c4
+#define ADDR_DB_SAVE_CUE      0x33cf00
+/* PlayEngine's player vector and Player::setActiveLoop @0x670e0 establish
+ * this pointer chain. ActiveLoop's registered flag and in/out sample frames
+ * are set by setActiveLoopParam @0xa7e68 and cleared @0xa7fd0. */
+#define PE_PLAYERS_BEGIN_OFF 0x0c
+#define PE_PLAYERS_END_OFF   0x10
+#define PE_PLAYER_ACTIVE_LOOP_OFF 0x0f00
+#define ACTIVE_LOOP_IN_OFF  8
+#define ACTIVE_LOOP_OUT_OFF 12
+#define ACTIVE_LOOP_REGISTERED_OFF 20
 #define PE_ISSYNCON        0x5ff28
 #define PE_ISMASTERTEMPO   0x5dfa8
+#define PE_ISQUANTIZING    0x5f6ec /* isDeckQuantizing @0x4aa88 tail-calls this */
 #define PE_ISVINYLMODE     0x5e260
 #define PE_ISSLIPMODEON    0x5fc60
 #define PE_ISLOOPING       0x5eadc
@@ -761,6 +831,8 @@ static const signed char bfx_type_to_pos[15] = {
 #define PE_ISAUTOBEATLOOP  0x5ef74
 #define PE_ISLOOPINADJ     0x5f000
 #define PE_ISLOOPOUTADJ    0x5f02c
+#define PE_SETLOOPCUTTERDOUBLE 0x5eba8 /* bool true = halve, false = double;
+                                      * calcCutterDoubleOutPoint @0xac3c8 */
 
 /* rbp LedStat ids we have identified (channels 1/2 = deck 1/2):
  *   49 = deck PLAY  (state 2 while paused  -> panel must blink)

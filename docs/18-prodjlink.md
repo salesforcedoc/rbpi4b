@@ -1,5 +1,10 @@
 # 18 — Pro DJ Link
 
+Controller context: the current default is DDJ-FLX6. Any FLX4 references in the
+dated network investigations below describe the older bench; network behavior
+and verification must be assessed separately from the
+[FLX6 controller mapping](flx6-mapping-audit.md).
+
 `rbp` carries Pioneer's whole Pro DJ Link stack, and on this unit it has never
 run, because its network introspection is hardcoded to an interface that is down.
 `netshim.so` points that introspection at the interface that is actually up.
