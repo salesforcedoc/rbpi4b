@@ -171,7 +171,7 @@ fi
 # from the deploy root on every start, and its guard is a plain file test, so
 # without the file here the noVNC edits are skipped in silence -- a missing
 # patcher and an already-patched page look the same from webvnc-run.sh's side.
-for s in lib.sh fix-dev.sh start-rb.sh usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh webvnc-run.sh novnc_patch.py bootscreen.py confscreen.py confedit.py install.sh uninstall.sh rb.conf; do
+for s in lib.sh fix-dev.sh start-rb.sh rx3-toolkit.py usb-watch.sh display-watch.sh doctor.sh healthwatch.sh boot-trim.sh vnc-run.sh webvnc-run.sh novnc_patch.py bootscreen.py confscreen.py confedit.py install.sh uninstall.sh rb.conf; do
   if [ -f "$HERE/$s" ]; then
     cp "$HERE/$s" "$DEPLOY/$s"
     [ "$s" = "rb.conf" ] || chmod 755 "$DEPLOY/$s"

@@ -146,6 +146,23 @@
  * exactly the number of rows it draws -- so a cursor here is always a row on the
  * glass. */
 #define UIBROWSE_GLOBAL      0x0326f8b8UL   /* nm: uiBrowse (B) */
+/* Full-touch navigation: firmware 1.20 DS primary and DirectFB 1.4 interface
+ * byte offsets, also documented by full-touch-ui-xdj-rx3/uishim-rx3.c. */
+#define UI_DS_LAYER0_CTX     0x0245b810UL
+#define UI_DS_PRIMARY_OFF   128
+#define UI_DS_IFACE_OFF     28
+#define UI_SURF_SIZE_OFF    24
+#define UI_SURF_FORMAT_OFF  32
+#define UI_SURF_LOCK_OFF    52
+#define UI_SURF_UNLOCK_OFF  60
+#define UI_SURF_FLIP_OFF    64
+#define UI_MENU_LAYOUT_REC  0x00526198UL
+#define UI_FILTER_TITLE_REC 0x0052f11cUL
+#define UI_FILTER_COUNT_REC 0x0052f0f0UL
+#define UI_REFRESH_WS       0x0018e214UL
+#define UI_REFRESH_OBJECT   0x0018e1a0UL
+#define UI_TITLE_GROUP1     0x0999
+#define UI_TITLE_GROUP2     0x09f2
 #define UIBROWSE_OFF_MODE    0x00     /* int, getBrowseMode()       @0x1126d0 */
 #define UIBROWSE_OFF_DEVICE  0x04     /* int, getBrowseDevice()     @0x1126e0 */
 #define UIBROWSE_OFF_ACTIVE_LIST 0x14 /* int, getActiveList()       @0x112748 -- 0
@@ -399,6 +416,9 @@
 #define K_HPLEVEL    0x4406
 #define K_MASTERLVL  0x4403    /* mixer MASTER LEVEL knob (CC20) */
 #define K_COLOR      0x509d    /* Sound Color FX knob (per channel) */
+/* MixerEngine::setSoundColorFxParameter(EnMixerInput,float), verified against
+ * MixerChInnards::onEv_ColorFxParameter @0x2d33d8. Separate from color amount. */
+#define ME_SET_COLOR_PARAMETER 0x574b4UL
 #define K_FILTER     0x50a6    /* Sound Color FX: Filter button */
 #define K_DUBECHO    0x50a2    /* Sound Color FX: Dub Echo button */
 #define K_SWEEP      0x50a3    /* Sound Color FX: Sweep button */
@@ -818,6 +838,10 @@ static const signed char bfx_type_to_pos[15] = {
 #define PE_PLAYERS_BEGIN_OFF 0x0c
 #define PE_PLAYERS_END_OFF   0x10
 #define PE_PLAYER_ACTIVE_LOOP_OFF 0x0f00
+/* Player flag bytes, as read by isVinylMode/isSlipModeOn/isMasterTempo. */
+#define PE_PLAYER_VINYL_OFF  0x0ead
+#define PE_PLAYER_SLIP_OFF   0x0f59
+#define PE_PLAYER_MT_OFF     0x0e9a
 #define ACTIVE_LOOP_IN_OFF  8
 #define ACTIVE_LOOP_OUT_OFF 12
 #define ACTIVE_LOOP_REGISTERED_OFF 20

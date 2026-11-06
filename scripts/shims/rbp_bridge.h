@@ -78,6 +78,7 @@ int me_get_master_cue(void);
 int me_set_crossfader_assign(int idx, int assign);
 int me_get_crossfader_assign(int idx);
 int me_set_crossfader_curve(int curve);
+void me_set_color_parameter(float value);
 int me_get_crossfader_curve(void);
 /* USB slots 1/2: native media state (2 ready, 0 absent), -1 unavailable. */
 int rbp_usb_media_state(int slot);

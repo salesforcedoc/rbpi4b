@@ -250,11 +250,11 @@ CTRL_HDRS  := rbp_abi.h rbp_bridge.h rbp_key.h rbp_led.h led_table.h rbp_vu.h \
               rbp_load.h
 knobshim.so: $(CTRL_OBJS) rbp_key.o shmstate.o fader_state.o rbp_transport.o \
              pitch_state.o keylog.o keylog_state.o $(CTRL_HDRS) rbp_transport.h \
-             pitch_state.h keylog.h keylog_state.h \
+             pitch_state.h keylog.h keylog_state.h $(RX3LIB)/libdl.so.2 \
              $(COMPAT)/libc_nonshared.a $(COMPAT)/libpthread_nonshared.a
 	$(CC) $(CFLAGS) -shared -o $@ $(CTRL_OBJS) rbp_key.o shmstate.o \
 	    fader_state.o rbp_transport.o pitch_state.o keylog.o keylog_state.o \
-	    -lpthread -lm -lc $(LDFLAGS)
+	    $(RX3LIB)/libdl.so.2 -lpthread -lm -lc $(LDFLAGS)
 
 $(CTRL_OBJS): %.o: %.c $(CTRL_HDRS)
 	$(CC) $(CFLAGS) -fvisibility=hidden -c -o $@ $<
@@ -376,7 +376,7 @@ FBSHIM_OBJS := fb_shim.o tscfake.o pointsrc.o point_xform.o touch_zone.o \
                wave_zone.o fx_zone.o fx_paint.o \
                hc_zone.o usb_label.o fxpad_zone.o fxpad_paint.o padmode_zone.o \
                deckbadge_zone.o deckbadge_paint.o deckbadge_plane.o bpmbox_zone.o \
-               settings_zone.o settings_paint.o \
+               settings_zone.o settings_paint.o full_ui.o full_ui_runtime.o \
                controllers.o usb_devices.o \
                vidmask.o
 # controllers.o and usb_devices.o are here for ONE question the settings panel asks:
@@ -397,7 +397,7 @@ FBSHIM_HDRS := tscfake.h pointsrc.h point_xform.h touch_zone.h syscalls.h \
                side_paint.h rbp_vu.h util_zone.h wave_zone.h \
                fx_zone.h fx_paint.h hc_zone.h usb_label.h \
                fxpad_zone.h fxpad_paint.h pitch_state.h \
-               settings_zone.h settings_paint.h controllers.h usb_devices.h
+               settings_zone.h settings_paint.h controllers.h usb_devices.h full_ui.h
 
 fbshim.so: $(FBSHIM_OBJS) rbp_key.o fader_state.o rbp_transport.o pitch_state.o \
            keylog.o keylog_state.o $(FBSHIM_HDRS) rbp_transport.h pitch_state.h \
@@ -429,6 +429,9 @@ cursor_paint.o: cursor_paint.c cursor_paint.h
 # there has to rebuild it. A dependency that is not written down is a rebuild that
 # silently does not happen.
 menu_zone.o: menu_zone.c menu_zone.h
+full_ui.o: full_ui.c full_ui.h rbp_abi.h menu_font.h gear_icon.h
+full_ui_runtime.o: full_ui_runtime.c full_ui.h rbp_abi.h rbp_key.h pointsrc.h \
+                   menu_zone.h side_zone.h fx_zone.h settings_zone.h envutil.h
 # is GENERATED -- scripts/shims/bake_gear.py writes it from
 # scripts/shims/gear_white100.png (see that script for why the mark is a baked table and not
 # a shape drawn per pixel). A re-bake has to rebuild this object, so the header is a
@@ -651,7 +654,17 @@ TESTS := test_point test_audio test_midi test_flx4 test_kbd test_cursor \
          test_menu_dev test_util test_wave test_fx test_hc test_fxpad \
          test_led_table test_plinn_scan test_controllers test_usblabel test_netalias \
          test_pitch test_keylog test_padmode test_deckbadge test_bpmbox \
-         test_settings
+         test_settings test_full_ui test_full_ui_runtime
+
+test_full_ui: test_full_ui.c full_ui.c full_ui.h rbp_abi.h menu_font.h gear_icon.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -Wall -Wextra -static \
+	    -o $@ test_full_ui.c full_ui.c
+
+test_full_ui_runtime: test_full_ui_runtime.c full_ui.c full_ui_runtime.c full_ui.h \
+                      rbp_abi.h menu_font.h gear_icon.h rbp_key.h pointsrc.h \
+                      menu_zone.h side_zone.h fx_zone.h settings_zone.h envutil.h
+	$(CC) -O2 -march=armv5t -mfloat-abi=soft -Wall -Wextra -static \
+	    -o $@ test_full_ui_runtime.c full_ui.c full_ui_runtime.c -lpthread
 
 test_point: test_point.c tscfake.c point_xform.c touch_zone.c $(FBSHIM_HDRS)
 	$(CC) -O2 -march=armv5t -mfloat-abi=soft -fno-stack-protector \

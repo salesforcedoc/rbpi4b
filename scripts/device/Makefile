@@ -33,6 +33,7 @@ vncserve:
 # which, unusually for this tree, run each daemon as a real subprocess against a
 # stand-in for the thing it reads (every path either one touches is env-overridable).
 test:
+	python3 test_rx3_toolkit.py
 	python3 test_bootscreen.py
 	python3 test_confscreen.py
 	python3 test_confedit.py

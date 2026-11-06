@@ -6,8 +6,10 @@ The active controller is DDJ-FLX6; FLX4 is an unused compatibility option.
 For controller operation start with the [FLX6 inventory](flx6-mapping-audit.md)
 and [shim guide](../scripts/shims/README.md).
 
-**Start with [13 — Raspberry Pi 4](13-raspberrypi4.md)** if you are bringing a
-unit up; it is the target document and links out to the rest.
+**Start with the repository [tutorial](../TUTORIAL.md)** for a complete build
+and deployment, including the optional Toolkit and full touch UI. Use
+[13 — Raspberry Pi 4](13-raspberrypi4.md) as the detailed hardware bring-up and
+acceptance runbook.
 
 | # | Document | What it covers |
 |---|---|---|
@@ -31,6 +33,9 @@ unit up; it is the target document and links out to the rest.
 | 18 | [prodjlink](18-prodjlink.md) | `netshim.so`: rbp's Pro DJ Link stack over `wlan0`, the twelve functions hardcoded to `eth0`, the three interposed calls, the whitelist, and the load-order contract with `fbshim` — **built and host-verified, not deployed** |
 | 19 | [vnc](19-vnc.md) | `vncserve`: rbp's whole screen over VNC, hand-rolled (only libc) because `libvncserver` cannot be handed a JPEG the hardware encoder already made — the `raw` ↔ `hwjpeg` switch, its control page, the macOS 3.3 handshake, and the measured 44× bandwidth win |
 | 20 | [configuration page](20-config-page.md) | LAN status and configuration interface |
+| 21 | [RX3 toolkit](21-rx3-toolkit.md) | optional toolkit: Samples, Key Sync, Beat Jump, Browse/search, theme/logo and Now Playing |
+| 22 | [Stems](22-stems.md) | prepare packages, per-USB lookup, touchscreen/Slip Loop controls and deployment |
+| 23 | [full touch UI](23-full-touch-ui.md) | optional persistent navigation, MENU/SHORTCUT and per-deck VINYL/SLIP/MT |
 | FLX6 | [mapping inventory](flx6-mapping-audit.md) | current controls, outputs, shutdown/countdown, preset alignment and verification limits |
 
 There is no document 14: the port plan numbers the FLX4 runbook 15 and defines
@@ -43,7 +48,7 @@ are in [03-port-plan.md](03-port-plan.md).
 
 ## How to read a claim in these documents
 
-The tree is mid-port. Where something has been run on hardware, the document
+Where something has been run on hardware, the document
 says so ("Facts (live)", a recorded `fbdump` block, a log line). Where it has
 not, it says that too, and names what would settle it. A number in a table with
 no measurement behind it is marked as expected, not recorded — treat the two

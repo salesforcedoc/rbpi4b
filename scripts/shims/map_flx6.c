@@ -11,6 +11,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
+#include <dlfcn.h>
 #include <sys/wait.h>
 #include <sound/asequencer.h>
 
@@ -45,7 +46,7 @@ enum {
      N_FX_AUTO = 0x66, N_FX_TAP = 0x6b,
      N_CALLPREV = 0x51, N_CALLNEXT = 0x53,
      N_CALLPREV_SHIFT = 0x61, N_CALLNEXT_SHIFT = 0x62,
-     N_VINYL = 0x17,
+     N_VINYL = 0x17, N_JOG_CUTTER = 0x1c,
      N_CH_CUE_SHIFT = 0x68,
      N_LOOPIN_SHIFT = 0x4c, N_LOOPOUT_SHIFT = 0x77, N_RELOOP_SHIFT = 0x50,
      N_MERGE_PUSH = 0x2e, N_MERGE_SELECT = 0x2f, N_MERGE_SELECT_SHIFT = 0x30,
@@ -58,13 +59,17 @@ enum {
      CC_EQL = 0x0f, CC_FADER = 0x13,
      CC_JOG_SIDE = 0x21, CC_JOG_VINYL = 0x22,
      CC_JOG_NOVINYL = 0x23, CC_JOG_SHIFT = 0x29, CC_JOG_SIDE_SHIFT = 0x26,
-     CC_HP_MIX = 0x0c, CC_CFX1 = 0x17, CC_CFX2 = 0x18, CC_CFX_BOTH = 0x19,
+     CC_HP_MIX = 0x0c, CC_CFX1 = 0x17, CC_CFX2 = 0x18, CC_CFX_PARAM = 0x19,
      CC_XFADER = 0x1f, CC_XFADER_LSB = 0x3f, CC_BROWSE = 0x40,
      CC_BROWSE_SHIFT = 0x64,
 };
 
 static int knob_scale = 1;
 static int jog_scale = 1;
+/* Operator measured three ring turns per hand turn. Scale BOTH native pulse
+ * position and speed, retaining fractional pulses rather than dropping small
+ * MIDI deltas. The ring itself continues to follow actual track position. */
+static int jog_divisor = 3;
 /* The inherited FLX4 value was 720 for a 111.6 mm wheel. Scale it for the
  * FLX6's 206 mm wheel: 720 * 206 / 111.6 = 1329.03. */
 static int jog_ppr = 1329;
@@ -76,6 +81,10 @@ static int tempo_rev;
 static int xfader_assigned;
 static unsigned int xfader_assign_wait_ticks;
 static volatile int fx_led_slot;
+/* Optional toolkit bridge. Null preserves the standalone map. */
+static int (*toolkit_control)(unsigned int, unsigned int, unsigned int);
+static int (*toolkit_pad)(unsigned int, unsigned int, unsigned int, unsigned int);
+static unsigned char toolkit_pad_down[2][8], toolkit_pad_mode[2][8];
 /* SHIFT belongs to a physical side, including when its deck layer changes. */
 static int shift_down[2];
 static int cue_down[2], reloop_down[2], color_down[4], resize_down[2][2];
@@ -289,10 +298,11 @@ struct jog_ctrl {
      unsigned long long last_ms;
      unsigned int vpos;
      int moving;
+     int remainder;
 };
 static struct jog_ctrl jog_state[2] = {
-     { CH_DECK1, 1, 0, 0, 0, 0 },
-     { CH_DECK2, 2, 0, 0, 0, 0 },
+     { .rch = CH_DECK1, .sch = 1 },
+     { .rch = CH_DECK2, .sch = 2 },
 };
 
 struct pitch_ctrl { int sch, have_hi, pos; };
@@ -384,6 +394,8 @@ static void flx6_note(int ch, int note, int on)
      }
      if (ch >= CH_DECK1 && ch <= CH_AUX2 && note == N_SHIFT) {
           shift_down[ch & 1] = on;
+          if (toolkit_control)
+               toolkit_control(0x4103u, on ? OP_PRESS : OP_RELEASE, (ch & 1) + 1);
           return;
      }
      if (ch == CH_FXB && note == N_MERGE_PUSH_SHIFT) {
@@ -431,16 +443,23 @@ static void flx6_note(int ch, int note, int on)
           flx6_note(ch - 1, note, on);
           return;
      }
-     /* VINYL is also reported as controller state at startup. K_REV toggles
-      * on PRESS, so an unsolicited ON would reverse playback and leave the
-      * binding pressed until the first real button release. Only the actual
-      * SHIFT+JOG CUTTER gesture may start a reverse press. Still pass releases
-      * after SHIFT is released, including Slip's momentary reverse release. */
-     if ((ch == CH_AUX1 || ch == CH_AUX2) && note == N_VINYL &&
-         on && !shift_down[ch & 1]) {
-          klog("knobshim2: FLX6 deck%d ignored unsolicited VINYL ON (SHIFT not held)\n",
-               ch - CH_AUX1 + 1);
-          return;
+     /* 0x17 is SHIFT+JOG CUTTER / VINYL state, including unsolicited startup
+      * reports. Neither edge has a binding now. The real unshifted button is
+      * 0x1c; never drive its LED, which enables hardware Jog Cutter. */
+     if (ch >= CH_DECK1 && ch <= CH_AUX2 &&
+         (note == N_JOG_CUTTER || note == N_VINYL)) {
+          if (on && note == N_VINYL) return;
+          for (int i = note_first; i < note_end; i++) {
+               struct note_ctrl *n = &note_map[i];
+               if (n->note != N_JOG_CUTTER || (n->rch & 1) != (ch & 1) || !n->pressed)
+                    continue;
+               /* Capture the physical side, not the layer/SHIFT state at
+                * release. Changing either while held must release the old key. */
+               if (on) return;
+               n->pressed = 0;
+               send_rx_key(n->key, OP_RELEASE, n->sch, 0);
+          }
+          if (!on) return;
      }
      if (ch == CH_FXB && (note == N_MERGE_PUSH || note == N_MERGE_SELECT ||
                          note == N_MERGE_SELECT_SHIFT)) {
@@ -486,6 +505,8 @@ static void flx6_note(int ch, int note, int on)
           for (int mode = 0; mode < 8; mode++) {
                if (note != pad_mode_notes[mode]) continue;
                if (on && !pad_mode_down[deck][mode]) {
+                    if (toolkit_control)
+                         toolkit_control(pad_mode_keys[mode & 3], OP_PRESS, deck + 1);
                     pad_base[deck] = mode * 0x10;
                     pad_want[deck] = mode;
                     pad_wait[deck] = pad_tries[deck] = 0;
@@ -502,6 +523,22 @@ static void flx6_note(int ch, int note, int on)
           /* The controller's actual pad message settles its bank, including
            * firmware variants whose shifted bank numbering differs. */
           pad_base[deck] = note & 0x70;
+          if (toolkit_control) {
+               int pad = note & 0x0f;
+               int mode = note >> 4;
+               /* Releases retain the press's mode across bank changes. */
+               if (!on && toolkit_pad_down[deck][pad])
+                    mode = toolkit_pad_mode[deck][pad];
+               int consumed = toolkit_pad
+                    ? toolkit_pad(K_PAD1 + pad, on ? OP_PRESS : OP_RELEASE, deck + 1, mode)
+                    : toolkit_control(K_PAD1 + pad, on ? OP_PRESS : OP_RELEASE, deck + 1);
+               if (consumed || !on) {
+                    toolkit_pad_down[deck][pad] = on;
+                    toolkit_pad_mode[deck][pad] = mode;
+               }
+               if (consumed)
+                    return;
+          }
      }
      /* The operator's FLX6 reports these menu buttons as 0x96 <note> 0x00:
       * zero-velocity Note Ons with no preceding nonzero edge. Accept normal
@@ -640,9 +677,8 @@ static void flx6_cc_abs(int ch, int cc, int val)
                g_fader[a->sch] = v;
                g_fader_seen[a->sch] = 1;
           }
-          if (a->key == K_COLOR && a->sch == 0) {
-               for (int deck = 1; deck <= 2; deck++)
-                    send_rx_key_f(K_COLOR, OP_VALUE, deck, v, f);
+          if (ch == CH_MIX && a->cc == CC_CFX_PARAM) {
+               me_set_color_parameter(f);
           } else
                send_rx_key_f(a->key, OP_VALUE, a->sch, v, f);
           return;
@@ -675,13 +711,15 @@ static void flx6_jog(int ch, int val)
      }
      if (jog_rev)
           d = -d;
-     int dp = d * jog_scale;
+     int numerator = d * jog_scale + s->remainder;
+     int dp = numerator / jog_divisor;
+     s->remainder = numerator % jog_divisor;
      float dt = (float)(long long)(now - s->last_ms) / 1000.0f;
      s->last_ms = now;
      if (dt < 0.0005f)
           dt = 0.0005f;
      s->vpos = (s->vpos + (unsigned int)dp) & 0xffffu;
-     float speed = (float)dp / (float)(jog_ppr * jog_scale) / dt;
+     float speed = (float)d / ((float)jog_ppr * (float)jog_divisor) / dt;
      if (speed > 8.0f) speed = 8.0f;
      if (speed < -8.0f) speed = -8.0f;
      s->moving = 1;
@@ -773,12 +811,19 @@ static void flx6_fx_depth(int ch, int cc, int val)
 
 static void flx6_build(void)
 {
+     toolkit_control = (int (*)(unsigned int, unsigned int, unsigned int))
+          dlsym(RTLD_DEFAULT, "rx3_pi_control");
+     toolkit_pad = (int (*)(unsigned int, unsigned int, unsigned int, unsigned int))
+          dlsym(RTLD_DEFAULT, "rx3_pi_pad");
+     memset(toolkit_pad_mode, 0, sizeof toolkit_pad_mode);
+     memset(toolkit_pad_down, 0, sizeof toolkit_pad_down);
      note_first = note_map_n;
      shift_down[0] = shift_down[1] = 0;
      merge_usb_mode = 0;
      fx_depth_last = -1;
      knob_scale = env_num("KNOB_SCALE", 1); if (knob_scale < 1) knob_scale = 1;
      jog_scale = env_num("JOG_SCALE", 1); if (jog_scale < 1) jog_scale = 1;
+     jog_divisor = env_num("JOG_DIVISOR", 3); if (jog_divisor < 1) jog_divisor = 1;
      jog_ppr = env_num("JOG_PPR", 1329); if (jog_ppr < 1) jog_ppr = 1;
      jog_rev = env_on("JOG_REV", 0);
      jog_idle_ms = env_num("JOG_IDLE_MS", 120); if (jog_idle_ms < 10) jog_idle_ms = 10;
@@ -798,6 +843,7 @@ static void flx6_build(void)
           add_note(rch, N_JOG_TOUCH, K_JOG_TOUCH, sch);
           add_note(rch, N_SYNC, K_SYNC, sch);
           add_note(rch, N_MASTER, K_MASTER, sch);
+          add_note(rch, N_JOG_CUTTER, K_SLIP, sch);
           add_note(rch, N_MEMORY, K_MEMORY, sch);
           add_note(rch, N_MEMDELETE, K_MEMDELETE, sch);
           add_note(rch, N_CALLPREV, K_CALLPREV, sch);
@@ -813,9 +859,8 @@ static void flx6_build(void)
 
           /* Hardware decks 3/4 are extra button layers for RX3 decks 1/2. */
           int aux = CH_AUX1 + d;
-          add_note(aux, N_SYNC, K_MT, sch);
-          add_note(aux, N_MASTER, K_SLIP, sch);
-          add_note(aux, N_VINYL, K_REV, sch);
+          add_note(aux, N_MASTER, K_MT, sch);
+          add_note(aux, N_JOG_CUTTER, K_REV, sch);
           add_note(aux, N_CALLPREV, K_SRREV, sch);
           add_note(aux, N_CALLNEXT, K_SRFWD, sch);
           add_note(aux, N_CALLPREV_SHIFT, K_TRREV, sch);
@@ -830,8 +875,9 @@ static void flx6_build(void)
      }
      add_abs(CH_MIX, CC_CFX1, K_COLOR, 1);
      add_abs(CH_MIX, CC_CFX2, K_COLOR, 2);
-     /* Physical channel 3 FILTER adjusts both RX3 Color FX amounts. */
-     add_abs(CH_MIX, CC_CFX_BOTH, K_COLOR, 0);
+     /* Physical channel 3 FILTER is the shared CFX parameter (e.g. filter
+      * resonance), using MixerEngine's native per-input setter, not K_COLOR. */
+     add_abs(CH_MIX, CC_CFX_PARAM, 0, 0);
      add_abs(CH_MIX, CC_XFADER, K_XFADER, CH_GLOBAL);
      /* Measured with rbp stopped: the hardware MIX knob and MASTER CUE
       * already mix USB pairs 0/1 and 2/3. Do not also mix them in rbp. */
@@ -981,10 +1027,25 @@ static void flx6_connection(int connected)
           if (s->moving)
                send_rx_key_fl(K_JOG_ROT, OP_ROTATE, s->sch, 0, 0.0f, s->vpos);
           s->started = s->moving = 0;
+          s->remainder = 0;
           tempo[deck].have_hi = 0;
           pad_want[deck] = -1;
           pad_wait[deck] = pad_tries[deck] = 0;
      }
+     if (toolkit_control) {
+          for (int deck = 1; deck <= 2; deck++) {
+               for (int pad = 0; pad < 8; pad++)
+                    if (toolkit_pad_down[deck - 1][pad]) {
+                         if (toolkit_pad)
+                              toolkit_pad(K_PAD1 + pad, OP_RELEASE, deck,
+                                          toolkit_pad_mode[deck - 1][pad]);
+                         else
+                              toolkit_control(K_PAD1 + pad, OP_RELEASE, deck);
+                    }
+               toolkit_control(0x4103u, OP_RELEASE, deck);
+          }
+     }
+     memset(toolkit_pad_down, 0, sizeof toolkit_pad_down);
      memset(shift_down, 0, sizeof shift_down);
      memset(cue_down, 0, sizeof cue_down);
      memset(reloop_down, 0, sizeof reloop_down);
@@ -1027,8 +1088,9 @@ static const struct led_notes flx6_leds = {
      .transport_shift_aliases = 1, .n_play_shift = N_PLAY_SHIFT, .n_cue_shift = N_CUE_SHIFT,
      .n_loopin_shift = 0x4c, .n_loopout_shift = 0x77,
      .aux_deck_leds = 1, .aux_deck_ch = CH_AUX1,
-     .aux_n_keylock = 0x58, .aux_n_keylock_shift = 0x5d,
-     .aux_n_slip = 0x5c, .aux_n_slip_shift = 0x60,
+     .aux_n_keylock = 0x5c, .aux_n_keylock_shift = 0x60,
+     /* Jog Cutter is an input only: lighting it changes hardware behavior. */
+     .aux_n_slip = -1, .aux_n_slip_shift = -1,
      /* Primary mode LED writes change the physical bank and used to cancel
       * SHIFT mode selections. Let the controller retain its selected mode. */
      .n_autoloop = -1, .n_mode = { -1, -1, -1, -1 },

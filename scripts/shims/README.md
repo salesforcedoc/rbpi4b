@@ -9,12 +9,22 @@ The current two-deck FLX6 layout is recorded in the
 FLX6 is the default; FLX4 remains a compatibility map. Physical decks3/4 provide
 extra buttons for RX3 decks1/2, rather than two additional players.
 
+Optional [persistent touch controls](../../docs/23-full-touch-ui.md) add native
+navigation, MENU/UTILITY, SHORTCUT and per-deck VINYL/SLIP/MT through `fbshim.so`.
+Set `RB_POINT_FULL_UI=1` after deploying the updated shim and launcher. The
+feature defaults off and still needs Pi acceptance.
+
+Optional [RX3 toolkit features](../../docs/21-rx3-toolkit.md) use a separate
+pinned toolkit bundle. All default off. The FLX6 map offers an optional
+pad/mode/SHIFT callback so Samples can receive shim events; existing MIDI
+assignments stay intact. See that guide for the build, enable/rollback and Pi-verification limits.
+
 User-confirmed features include the core controls, eight pad modes/lights,
 meters, FX ON/OFF and beat lights, headphone mixing, right Merge utilities,
 startup Reverse correction and normal hot-plug. The latest audit fixes,
 shifted transport/LOAD, 14-bit mixer, disconnect cleanup, preset calibration,
 shutdown and countdown are built/checked locally; no subsequent Pi verification
-has been reported. See CODEX_HANDOFF.md at the repository root for session state.
+has been reported. The mapping inventory records the current verification state.
 
 ## FLX6 controls
 
@@ -24,13 +34,14 @@ has been reported. See CODEX_HANDOFF.md at the repository root for session state
 | SHIFT+CUE | Pause at track beginning, retaining the main cue |
 | SHIFT+PLAY | Return to main cue and play once native cue buffering completes |
 | SHIFT+PFL, physical3/1/2/4 | Dub Echo / Sweep / Noise / Filter on both RX3 channels |
-| Channel3 FILTER | Sound Color FX amount on both channels; individual1/2 knobs remain mapped |
+| Channel3 FILTER | Shared Sound Color FX parameter (e.g. resonance); individual1/2 amount knobs remain mapped |
 | MEMORY / SHIFT+MEMORY | Native memory save/delete |
 | CALL left/right / SHIFT+CALL | Previous/next memory cue or loop / halve/double an active loop |
 | SHIFT+LOOP IN/OUT | Native loop boundary adjustment |
 | SHIFT+RELOOP | Toggle the called saved memory loop's Active flag |
-| Auxiliary deck3/4 SYNC / MASTER | RX3 deck1/2 Master Tempo / Slip |
-| Auxiliary SHIFT+JOG CUTTER | Reverse; requires actual SHIFT to reject startup VINYL reports |
+| JOG CUTTER, primary decks1/2 | RX3 deck1/2 Slip; Jog Cutter LED outputs disabled |
+| Auxiliary deck3/4 MASTER (SHIFT+SYNC) | RX3 deck1/2 Master Tempo; auxiliary SYNC is unassigned |
+| Auxiliary deck3/4 JOG CUTTER | Reverse without SHIFT; Jog Cutter LED outputs disabled |
 | Auxiliary CALL / SHIFT+CALL | Held Search backward/forward / Track Search previous/next |
 | SHIFT+Browse/jog/non-Hot-Cue pads | Same existing selector/jog/pad action; Hot Cue SHIFT+pad remains delete |
 
@@ -40,6 +51,11 @@ Loop, call a saved memory loop first; ordinary memory cues and hot cues are
 refused. The copied cue goes through native DbProxy save/notifications; the
 shim does not rewrite the database itself. Native API addresses/provenance
 are recorded in rbp_abi.h.
+
+FLX6 jog pulse position and speed are divided by3 by default, following the
+operator's report of three ring rotations per hand rotation. Fractional pulses
+are accumulated. `RB_JOG_DIVISOR=1` restores the old response; the ring continues
+to follow actual sample position. These latest changes need Pi retesting.
 
 The four physical pad families plus SHIFT select all eight RX3 modes.
 Mode-button output is deliberately disabled: writes can select the hardware

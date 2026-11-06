@@ -1,5 +1,11 @@
 # scripts/device/
 
+[rx3-toolkit.py](rx3-toolkit.py) validates/stages the optional toolkit
+for start-rb.sh, including Samples, Key Sync, Browse/search, display and UDP
+metadata features. All features default off. The
+[toolkit guide](../../docs/21-rx3-toolkit.md) covers the separate bundle and
+rollback; the helper never edits the baseline player.
+
 DDJ-FLX6 is the default controller. Empty RB_MIDI_MAP, RB_AUDIO_DEV and MIDI
 match overrides select its registered identity; remove old FLX4 overrides from
 rb.local.conf when migrating. See the [FLX6 inventory](../../docs/flx6-mapping-audit.md).

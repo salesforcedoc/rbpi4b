@@ -1,5 +1,9 @@
 # 07 — Touch / pointing
 
+Optional persistent navigation and deck VINYL/SLIP/MT switches are documented in
+[23 — Full touch UI](23-full-touch-ui.md). Enable with `RB_POINT_FULL_UI=1` after
+deploying the current `fbshim.so` and launcher. Pi acceptance is pending.
+
 Controller context (2026-11-02): DDJ-FLX6 is now the default; FLX4 passages and
 captures in this page describe earlier input/painting investigations. The RX3
 exports eight pad modes, with secondary banks4..7; older four-family UI notes

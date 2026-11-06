@@ -369,6 +369,20 @@ int me_set_crossfader_curve(int curve)
      return ((int (*)(void *))ME_GET_XFADER_CURVE)(engine) == curve;
 }
 
+void me_set_color_parameter(float value)
+{
+     if (!is_rbp_process()) return;
+     void *engine = mixer_engine();
+     if (!engine) return;
+     if (value < 0.0f) value = 0.0f;
+     if (value > 1.0f) value = 1.0f;
+     for (int deck = 0; deck < 2; deck++) {
+          int input = me_channel_input(engine, deck);
+          if (input >= 0)
+               ((void (*)(void *, int, float))ME_SET_COLOR_PARAMETER)(engine, input, value);
+     }
+}
+
 int me_get_crossfader_curve(void)
 {
      void *engine = mixer_engine();

@@ -1,5 +1,12 @@
 # scripts/
 
+[build-rx3-toolkit.py](build-rx3-toolkit.py) builds the optional pinned
+toolkit bundle in ignored work/.
+[prepare-rx3-toolkit-assets.py](prepare-rx3-toolkit-assets.py) prepares user
+sample banks and logos there too. [prepare-rx3-stems.py](prepare-rx3-stems.py)
+imports already separated audio through the pinned upstream packager. See the
+[integration guide](../docs/21-rx3-toolkit.md); no stock-RX3 installer is run.
+
 The current controller is DDJ-FLX6; FLX4 is retained as a compatibility map.
 Controller operation, shutdown/countdown, build and deployment details are in
 [shims/README.md](shims/README.md) and the
@@ -10,8 +17,12 @@ Host-side build tooling and the on-device scripts for the Raspberry Pi 4 port.
 ```
 scripts/
 ├── build-chroot.sh        assemble the soft-float deploy root -> work/rbpi4b-pi4.tgz
+├── build-rx3-toolkit.py   build the pinned optional Toolkit -> work/rx3-toolkit-pi/
 ├── patch-rbp-nopc.py      second-stage rbp patch (getPcController NULL deref)
 ├── patch-rbp-depth.py     third-stage rbp patch (layer pixel format / depth pair)
+├── prepare-rx3-stems.py   package externally separated audio as .rx3stem
+├── prepare-rx3-toolkit-assets.py  prepare optional Samples/logo assets
+├── toolkit/               Pi-specific Toolkit adapter headers
 ├── device/                scripts that run on the Pi
 └── shims/                 LD_PRELOAD shim sources (soft-float ARM32) + Makefile
 ```

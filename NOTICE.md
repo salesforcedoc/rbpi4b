@@ -41,6 +41,19 @@ The scripts here operate on files **you** supply.
 
 ## Related work this project builds on
 
+* [salesforcedoc/full-touch-ui-xdj-rx3](https://github.com/salesforcedoc/full-touch-ui-xdj-rx3)
+  (MIT), a fork of wilfredilagan/full-touch-ui-xdj-rx3, supplies the reference
+  layout and firmware ABI findings for the optional persistent navigation and
+  VINYL/SLIP/MT controls. The Pi implementation uses this repository's painter,
+  pointer pipeline and native key path.
+
+* Optional toolkit integration builds
+  [Tratosca/rx3-toolkit](https://github.com/Tratosca/rx3-toolkit) at a pinned
+  revision outside this repository. Its MPL-2.0 runtime library/assets are
+  packaged with upstream license/third-party notices and source revision;
+  they are not relicensed by this project's MIT license. No upstream runtime
+  source tree or compiled library is committed here.
+
 * The **PrimeBox** XDJ-RX3 → Prime GO (RK3288) port — the source of the `rbp`
   patcher (`patch-rbp`), the patched DirectFB fbdev driver and the shared shim
   sources. The SC Live 4 is the same SoC family as that target, and the Pi 4 is

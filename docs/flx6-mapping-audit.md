@@ -1,7 +1,15 @@
-# DDJ-FLX6 mapping inventory — 2026-11-02
+# DDJ-FLX6 mapping inventory — 2026-11-04
 
 This is the final two-deck layout and audit result. Hardware decks 3/4 provide
 auxiliary controls for RX3 decks 1/2. FLX4 remains an unused compatibility map.
+
+The optional [toolkit integration](21-rx3-toolkit.md) adds native32-beat jumps,
+Key Shift/Sync/Match, Samples and Browse/search/display functions. All default
+off. The expanded toolkit deployment is user-confirmed. Newly added
+[Stems](22-stems.md) uses primary Slip Loop pads5/6/7 for INST/VOCAL/DRUMS
+on prepared tracks and still needs Pi acceptance. The FLX6 map bridges pad/mode/SHIFT to the optional toolkit so
+Samples can consume pads while its panel is selected, including shifted pads
+and held releases. Existing permanent MIDI assignments are unchanged.
 
 Sources: Pioneer's [official MIDI list](https://downloads.support.alphatheta.com/software_info/dj-controllers/DDJ-FLX6/DDJ-FLX6_MIDI_message_List_E1.pdf),
 [Mixxx Mapping](https://github.com/dolchebeats/DDJ-FLX6-Mixxx-mapping)
@@ -21,7 +29,7 @@ specialized handlers. No duplicate addresses were found in the binding tables.
 | SYNC / MASTER | 90/91 58/5c | Sync / master |
 | SHIFT+SYNC / SHIFT+MASTER | 90/91 5d/60 | Quantize / tempo range |
 | Jog touch and shifted touch | 90/91 36/67 | Same native touch binding, including cross-SHIFT release |
-| Jog rim/platter and shifted movement | B0/B1 21/22/23/26/29 | Native jog; confirmed FLX6 sensitivity, no extra shifted speed multiplier |
+| Jog rim/platter and shifted movement | B0/B1 21/22/23/26/29 | Native jog; pulse position and speed divided by3 following the reported3:1 excess; fractions retained; no extra shifted multiplier |
 | Tempo | B0/B1 00/20 | 14-bit pitch |
 | LOOP IN/OUT and shifted aliases | 90/91 10/11 and 4c/77 | Native loop setting/boundary adjustment |
 | Hold LOOP IN | 90/91 10, additional14 ignored | Native held-IN four-beat shortcut; avoids duplicate firmware action |
@@ -29,13 +37,14 @@ specialized handlers. No duplicate addresses were found in the binding tables.
 | CALL left/right | 90/91 51/53 | Previous/next memory cue or loop |
 | SHIFT+CALL | 90/91 61/62 | Halve/double an active loop |
 | MEMORY / SHIFT+MEMORY | 90/91 3d/3e | Save/delete memory cue |
-| Auxiliary SYNC / MASTER | 92/93 58/5c | RX3 deck1/2 Master Tempo / Slip |
-| Auxiliary SHIFT+JOG CUTTER | 92/93 17, SHIFT held | Reverse; unsolicited startup ON ignored |
+| JOG CUTTER | 90/91 1c | RX3 deck1/2 Slip; no Jog Cutter LED output |
+| Auxiliary MASTER (SHIFT+SYNC) | 92/93 5c | RX3 deck1/2 Master Tempo; auxiliary SYNC58 is unassigned |
+| Auxiliary JOG CUTTER | 92/93 1c | Reverse without SHIFT; no Jog Cutter LED output |
 | Auxiliary CALL / SHIFT+CALL | 92/93 51/53 and 61/62 | Held Search backward/forward / previous/next Track Search |
 | SHIFT | 90..93 3f | Tracks physical-side SHIFT across deck-layer switches |
 | Trim / EQ / fader1/2 | B0/B1 04/07/0b/0f/13 plus corresponding CC+20 LSB | 14-bit assembly to native 10-bit mixer positions |
 | Color amount1/2 | B6 17/37 and18/38 | Individual channel Color FX amount |
-| Channel3 FILTER | B6 19/39 | Color FX amount on both RX3 channels |
+| Channel3 FILTER | B6 19/39 | Color FX parameter on both RX3 channels (e.g. Filter resonance); individual1/2 amounts remain independent |
 | Channel CUE1/2 | 90/91 54 | PFL toggle, duplicate ON suppressed |
 | SHIFT+PFL physical3/1/2/4 | 92/90/91/93 68 | Dub Echo / Sweep / Noise / Filter on both RX3 channels |
 | Crossfader | B6 1f/3f | 14-bit position; decks assigned A/B, sharp curve at startup |
@@ -88,6 +97,15 @@ command with a clean environment, allowing systemd to stop services/unmount.
 
 ## Audit corrections and remaining limits
 
+The 2026-11-04 changes above are built and locally checked; Pi retesting is
+pending. `RB_JOG_DIVISOR` defaults to3 for the FLX6;1 restores the previous
+response. It scales both pulse position and speed, unlike `RB_JOG_SCALE`.
+The ring's sample-position formula is unchanged. This correction follows the
+operator's hand/ring observation, not an independent encoder-count measurement.
+Jog Cutter/shifted VINYL ON reports are separate addresses (1c/17). Only1c
+starts the new Slip/Reverse bindings; releases follow the held physical side
+even if deck layer or SHIFT changes. No positive Jog Cutter LED writes are made.
+
 The audit's FX-depth A→B→A defect is fixed by one global dedupe cache with
 separate per-slot packet assembly. Channel CUE now deduplicates ON reports.
 Mixer controls use 14-bit pairs. Shifted jog/pad coverage and held-input cleanup
@@ -102,8 +120,9 @@ or timeout cancels pending playback. SHIFT+CUE retains the stored main cue.
 Normal hot-plug is user-confirmed, but automatic current Merge preset discovery
 is unsupported by the supplied protocol. Explicit calibration avoids a restart:
 select physical preset1, then SHIFT+right Merge push. Very fast same-track load
-animations can still fall between LED polls. Firmware Jog Cutter remains active;
-the shim does not implement it and has no documented disable command.
+animations can still fall between LED polls. Firmware Jog Cutter processing is
+not patched; the shim leaves its enabling LED outputs disabled. A firmware-level
+disable would require separate protocol/firmware investigation.
 
 Intentionally unassigned: left Merge preset controls and both rotations,
 SHIFT+tempo, long VIEW, SHIFT+FX ON/OFF, fader-start messages, LOAD3/4 and

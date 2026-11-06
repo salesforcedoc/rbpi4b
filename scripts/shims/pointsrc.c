@@ -41,6 +41,7 @@
                              * so the panel and the routing cannot disagree. */
 #include "syscalls.h"
 #include "envutil.h"
+#include "full_ui.h"
 #include "usb_label.h"   /* what a media device's name may contain -- the same rules
                           * knobshim writes into rbp's own device record with */
 
@@ -2283,6 +2284,12 @@ static void pointer_report(int down, int x, int y, int allow_menu, int held_ms)
      * gave it. */
     keylog_from("touch");
 
+    /* The persistent controls see every primary report, so a press captured by
+     * them is also released/cancelled if a modal opens before the finger lifts.
+     * They defer to open shim panels and only claim their own painted buttons. */
+    if (full_ui_touch(down, x, y))
+        return;
+
     /* THE SETTINGS PANEL, before the chooser and everything else, and unconditionally --
      * the same rule the chooser's own block below states: while a box is up it owns every
      * report, and a report it did not take would reach rbp as a press or a release of
@@ -3222,6 +3229,7 @@ static void *reader_thread(void *arg)
          * dismiss -- the gesture that closes it needs a press, and every press is
          * swallowed while it is open. */
         menu_reset();
+        full_ui_reset();
         /* The same for the drawers, and for the same reason one level down: a
          * drawer left open by a finger that went away with the device is a drawer
          * nothing can dismiss and, worse, one that holds the overlay plane the band
@@ -3277,6 +3285,7 @@ static void *reader_thread(void *arg)
 
 int pointsrc_start(void)
 {
+    full_ui_start();
     log_debug = env_flag("POINT_DEBUG", 0);
     quantize_enabled = env_flag("POINT_QUANTIZE_TAP", 1);
     menu_enabled = env_flag("POINT_MENU", 1);

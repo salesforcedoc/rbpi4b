@@ -24,14 +24,28 @@ tractable, and they are set out in [docs/13](docs/13-raspberrypi4.md).
 
 | Subsystem | Current behavior | Documentation |
 | --- | --- | --- |
-| Display and pointing | Native RX3 UI through DirectFB; evdev touchscreen/mouse translation | [display](docs/06-display.md), [touch](docs/07-touch.md) |
+| Display and pointing | Native RX3 UI through DirectFB; evdev touchscreen/mouse translation; optional persistent touch navigation and deck switches | [display](docs/06-display.md), [touch](docs/07-touch.md), [full touch UI](docs/23-full-touch-ui.md) |
 | Controls | DDJ-FLX6 two-deck mapping, using physical decks3/4 for auxiliary functions; keyboard remains available | [FLX6 inventory](docs/flx6-mapping-audit.md), [controls](docs/08-controls.md) |
 | Feedback | Native transport/pad/loop/FX state, channel meters, jog position/load animations and Merge rings | [shim guide](scripts/shims/README.md) |
 | Audio | FLX6 USB master0/1 and headphones2/3; hardware headphone MIX/MASTER CUE, optional HDMI mirror | [audio](docs/09-audio.md) |
 | USB and recording | Rekordbox-exported media, safe-eject requests, native Track Mark and master recording | [USB](docs/10-usb.md), [FLX6 utilities](scripts/shims/README.md#merge-fx-utilities-and-shutdown) |
 | Runtime | systemd launcher, configuration/status page, VNC and hot-plug recovery | [launcher](docs/11-runtime-launcher.md), [configuration](docs/20-config-page.md), [VNC](docs/19-vnc.md) |
+| RX3 Toolkit | Pinned optional bundle for Samples, Stems, Key tools, Beat Jump, Browse/search, themes, logo and Now Playing | [Toolkit](docs/21-rx3-toolkit.md), [Stems](docs/22-stems.md) |
 
 ## State of the port
+
+The main build includes the custom swipe-down menus and the optional
+[persistent full touch UI](docs/23-full-touch-ui.md) in `fbshim.so`. The full UI
+defaults off and is enabled with `RB_POINT_FULL_UI=1`; it has local integration
+checks and still needs Pi acceptance.
+
+Optional [RX3 Toolkit features](docs/21-rx3-toolkit.md), including Samples,
+Key Sync, Browse/search and display additions, use a separately built pinned
+bundle under ignored `work/`. All Toolkit features default off. The expanded
+Toolkit deployment is user-confirmed. Newly added [Stems](docs/22-stems.md) has
+build/host checks and still needs Pi acceptance. The end-to-end order is in the
+[tutorial](TUTORIAL.md): deploy the main tarball, deploy the Toolkit bundle,
+then enable the desired switches in `rb.local.conf`.
 
 The user has confirmed FLX6 audio/USB playback, core controls, eight pad modes
 and lights, meters, Beat FX ON/OFF and beat indicators, right Merge utilities,
@@ -81,11 +95,11 @@ down before removing power.
         │
         ├── display  : rebuilt DirectFB fbdev module (the present path)
         ├── pointing : fbshim.so    (evdev pointer → RX3 tsc2007 protocol;
-        │                            also sends rbp's QUANTIZE keycode for the
-        │                            deck boxes rbp draws but does not bind)
+        │                            swipe panels + optional persistent full UI)
         ├── controls : knobshim.so  (DDJ-FLX6 MIDI → rbp keycodes + LEDs)
         ├── audio    : audioshim.so (JUCE/ALSA → the FLX6's USB audio)
         ├── usb      : usb-watch.sh + native DeviceSQL import
+        ├── toolkit  : optional pinned librx3_core.so bundle + Pi adapters
         └── daemons  : edb_streamd
 ```
 
@@ -149,10 +163,16 @@ rbpi4b/
 ├── docs/                     findings & subsystem documentation (see docs/README.md)
 │   ├── 00-overview … 12-troubleshooting
 │   ├── 13-raspberrypi4.md    the target: image, cmdline, bring-up order
-│   └── flx6-mapping-audit.md the current map, verification and limits
-│       15-flx4-midi.md       FLX4 compatibility and historical measurements
+│   ├── 21-rx3-toolkit.md     optional Toolkit build, deployment and features
+│   ├── 22-stems.md           prepared Stems packages and controls
+│   ├── 23-full-touch-ui.md   persistent touch navigation and deck switches
+│   ├── flx6-mapping-audit.md the current map, verification and limits
+│   └── 15-flx4-midi.md       FLX4 compatibility and historical measurements
 ├── scripts/
 │   ├── build-chroot.sh       host: assemble the soft-float chroot tarball
+│   ├── build-rx3-toolkit.py  host: build the pinned optional Toolkit bundle
+│   ├── prepare-rx3-stems.py  host: package externally separated stems
+│   ├── prepare-rx3-toolkit-assets.py  host: prepare Samples/logo assets
 │   ├── patch-rbp-nopc.py     the getPcController() no-op patch
 │   ├── patch-rbp-depth.py    the layer pixel format (the depth pair)
 │   ├── device/               scripts that run on the Pi
@@ -185,18 +205,38 @@ Full instructions live in **[TUTORIAL.md](TUTORIAL.md)**. The short version:
 # 1. build the patched DirectFB stack (tools/build-directfb/README.md)
 #    -> work/dfb/lib/...   (build-chroot.sh looks there by default; DFB= overrides)
 
-# 2. build the soft-float chroot (rootfs + rbp-audio + shims + DirectFB
-#    + directfbrc + touch calibration)
+# 2. build the soft-float chroot. This includes the custom touch menus and the
+#    optional full-touch implementation in fbshim.so.
 RX3=/path/to/extracted scripts/build-chroot.sh   # -> work/rbpi4b-pi4.tgz
 
-# 3. deploy (the tarball carries rb.conf; install.sh puts it in place)
+# 3. build the optional pinned RX3 Toolkit bundle (Samples, Stems, Key tools,
+#    Beat Jump, Browse/search, themes, logo and Now Playing)
+python3 scripts/build-rx3-toolkit.py             # -> work/rx3-toolkit-pi/
+
+# 4. deploy the main system first
 scp work/rbpi4b-pi4.tgz pi@<host>:/tmp/
 scp -r scripts/device    pi@<host>:/tmp/
 ssh pi@<host> 'sudo sh /tmp/device/install.sh /tmp/rbpi4b-pi4.tgz'
 
-# 4. launch -- usually already up: install.sh enables rblive4.service
-#    (RB_AUTOSTART=1), so this is a RESTART, or the manual path at RB_AUTOSTART=0
-ssh pi@<host> 'sudo sh /opt/rblive4/start-rb.sh'
+# 5. deploy the optional Toolkit bundle and the matching launcher/helper/shim
+scp -r work/rx3-toolkit-pi pi@<host>:/tmp/
+scp scripts/device/start-rb.sh scripts/device/rx3-toolkit.py \
+    scripts/shims/knobshim.so pi@<host>:/tmp/
+ssh pi@<host> 'sudo systemctl stop rblive4 && \
+  sudo install -m 755 /tmp/start-rb.sh /tmp/rx3-toolkit.py /tmp/knobshim.so /opt/rblive4/ && \
+  sudo mkdir -p /opt/rblive4/rx3-toolkit && \
+  sudo cp -a /tmp/rx3-toolkit-pi/. /opt/rblive4/rx3-toolkit/'
+
+# 6. enable only what you want in /opt/rblive4/rb.local.conf, for example:
+# RB_POINT_FULL_UI=1
+# RB_TOOLKIT_SAMPLES=1
+# RB_TOOLKIT_STEMS=1
+# RB_TOOLKIT_STEMS_DIR=auto
+
+# 7. start and inspect
+ssh pi@<host> 'sudo systemctl start rblive4 && \
+  sudo tail -n 80 /tmp/rx3-toolkit.log && \
+  sudo journalctl -u rblive4 -n 40 --no-pager'
 ```
 
 ## What is *not* in this repo
@@ -225,5 +265,9 @@ from, and none of it is needed on a Pi. Obtain those projects separately.
 * Denon DJ / inMusic — the SC Live 4, this port's starting point.
 * Raspberry Pi Ltd — the Pi 4 and Raspberry Pi OS.
 * DirectFB, JUCE, ALSA and glibc maintainers.
+* Tratosca and contributors — the pinned `rx3-toolkit` runtime integrated by
+  this port (MPL-2.0; its bundle retains its license and notices).
+* salesforcedoc — the full-touch RX3 UI design adapted to this port's existing
+  framebuffer and pointer shim.
 
 See [NOTICE.md](NOTICE.md) for licensing details.

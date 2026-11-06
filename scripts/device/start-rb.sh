@@ -225,6 +225,57 @@ if [ -n "${RB_FB_LIE_BPP:-}" ] && [ -f "$DEPTH_PLAYER" ] && command -v od >/dev/
     fi
 fi
 
+# --- optional toolkit: derive a separate player, never edit the baseline -----
+# Export only this integration's known settings; rb.local.conf variables need
+# not otherwise be exported. The helper validates values and resolves dependencies.
+RB_TOOLKIT_ACTIVE=0
+RB_TOOLKIT_CORE=0
+for suffix in BEATJUMP32 KEYSHIFT IMMEDIATE DECODER_SLEEP KEY_SYNC KEY_MATCH \
+              SAMPLES BROWSE_COLUMNS SEARCH_LATIN HIDE_TITLES LOGO NOW_PLAYING RENDER_PROBE STEMS; do
+    name=RB_TOOLKIT_$suffix
+    eval "value=\${$name:-0}"
+    case "$value" in
+        0) ;;
+        1) RB_TOOLKIT_ACTIVE=1 ;;
+        *) echo "start-rb: $name must be 0 or 1" >&2; exit 1 ;;
+    esac
+    export "$name=$value"
+done
+RB_TOOLKIT_THEME=${RB_TOOLKIT_THEME:-off}
+case "$RB_TOOLKIT_THEME" in
+    off) ;;
+    dark|light|wait|switch) RB_TOOLKIT_ACTIVE=1 ;;
+    *) echo "start-rb: invalid RB_TOOLKIT_THEME" >&2; exit 1 ;;
+esac
+export RB_TOOLKIT_THEME
+RB_TOOLKIT_BUNDLE=${RB_TOOLKIT_BUNDLE:-$RB_DEPLOY_ROOT/rx3-toolkit}
+if [ "$RB_TOOLKIT_ACTIVE" = 1 ]; then
+    command -v python3 >/dev/null 2>&1 || {
+        echo "start-rb: toolkit requires host python3" >&2; exit 1;
+    }
+    for suffix in KEY_SYNC_RANGE KEY_SYNC_MODE KEY_MATCH_RULES BROWSE_FIELD \
+                  SAMPLES_DIR NOW_PLAYING_HOST DECODER_SLEEP_NS STEMS_DIR; do
+        name=RB_TOOLKIT_$suffix
+        eval "export $name=\"\${$name-}\""
+    done
+    python3 "$HERE/rx3-toolkit.py" --bundle "$RB_TOOLKIT_BUNDLE" \
+        --chroot "$RB_CHROOT" --player "$RB_PLAYER" --extended \
+        --env-file "$RB_CHROOT/tmp/rx3-toolkit.env" || exit 1
+    . "$RB_CHROOT/tmp/rx3-toolkit.env"
+    # Keep the original path as a prefix for stale-process discovery. The
+    # explicit loader leaves comm as ld-linux.so.3; core checks exact argv.
+    RB_PLAYER="$RB_PLAYER.toolkit/rbp"
+    if [ "$RB_TOOLKIT_CORE" = 1 ]; then
+        rm -f "$RB_CHROOT/tmp/rx3-performance.ready"
+        RB_LD_PRELOAD="$RB_LD_PRELOAD:/usr/lib/librx3_core.so"
+        export RX3_PI_LOADER="$RB_LOADER"
+        # A bounded prior-session log should not hide this launch's result.
+        if [ -f "$RB_CHROOT/tmp/rx3-toolkit.log" ]; then
+            mv -f "$RB_CHROOT/tmp/rx3-toolkit.log" "$RB_CHROOT/tmp/rx3-toolkit.log.prev"
+        fi
+    fi
+fi
+
 # --- 5. clear stale IPC and logs --------------------------------------------
 #
 # These are host paths: the chroot's /tmp is a bind mount of this one (fix-dev.sh
@@ -305,7 +356,7 @@ DFB_PRESENT_AUTO DFB_PRESENT_FIT DFB_PRESENT_SKIP DFB_PRESENT_PX_BUDGET
 POINT_KIND POINT_DEV POINT_DEBUG POINT_MIN_DWELL_MS POINT_MOUSE_SPEED
 POINT_SWAP_XY POINT_INVERT_X POINT_INVERT_Y POINT_CURSOR POINT_CURSOR_MS
 POINT_QUANTIZE_TAP POINT_MENU POINT_MENU_MOUSE POINT_FX_TOUCH POINT_HOTCUE_TOUCH
-POINT_PADMODE_TAP POINT_DECK_PLAY POINT_BPM_SYNC
+POINT_PADMODE_TAP POINT_DECK_PLAY POINT_BPM_SYNC POINT_FULL_UI
 AUDIO_DEV AUDIO_CHANNELS AUDIO_MAP AUDIO_MAP_FILE AUDIO_FMT AUDIO_MONITOR_PAIR MIXER_MODE
 MIXER_MODE_FILE
 AUDIO_PAIRS_MEMORY
@@ -316,7 +367,7 @@ MIDI_MAP EVDEV_MAP MIDI_IN_MATCH MIDI_OUT_MATCH MIDI_DUMP MIDI_REPLAY
 MIDI_REPLAY_SPEED KEY_DUMP KEY_REPLAY KEY_REPLAY_SPEED
 KBD_DEV CTRL_KEEPALIVE
 LED_VU LED_VU_SEGMENTS LED_PADS LED_DISABLE PAD_BRIGHT JOG_PPR
-JOG_SCALE JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV MIRROR_GAIN_MID
+JOG_SCALE JOG_DIVISOR JOG_REV JOG_IDLE_MS KNOB_SCALE TEMPO_REV MIRROR_GAIN_MID
 SIDE_NUDGE_PCT
 KNOB_VERBOSE JOG_VERBOSE TEMPO_VERBOSE LED_VERBOSE
 SHMSTATE_STRICT
@@ -451,6 +502,21 @@ if [ -z "$RBP" ]; then
     tail -20 "$RBP_LOG" >&2 2>/dev/null
     rb_bootmsg "rbp is not running -- see $RBP_LOG"
     exit 1
+fi
+
+if [ "${RB_TOOLKIT_CORE:-0}" = 1 ] &&
+   [ "$(cat "$RB_CHROOT/tmp/rx3-performance.ready" 2>/dev/null || true)" != "$RBP" ]; then
+    echo "start-rb: toolkit core did not confirm hook readiness for pid $RBP" >&2
+    tail -20 "$RB_CHROOT/tmp/rx3-toolkit.log" >&2 2>/dev/null || true
+    rb_bootmsg "toolkit core not ready -- see /tmp/rx3-toolkit.log"
+    exit 1
+fi
+
+# Optional decoder recovery tuning uses rbp's existing local UDP console.
+# Failure is reported; it does not undo an otherwise working player.
+if [ "${RB_TOOLKIT_DECODER_SLEEP:-0}" = 1 ]; then
+    python3 "$HERE/rx3-toolkit.py" --decoder-sleep "${RB_TOOLKIT_DECODER_SLEEP_NS:-100000}" ||
+        echo "start-rb: toolkit decoder tuning could not confirm both decks" >&2
 fi
 
 # --- 10. the two watchers, then wait ----------------------------------------
