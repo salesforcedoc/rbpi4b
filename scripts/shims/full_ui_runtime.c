@@ -30,6 +30,7 @@ static pthread_mutex_t ui_lock = PTHREAD_MUTEX_INITIALIZER;
 static flip_fn saved_flip;
 static void *surface;
 static int started, ready;
+static int announced_bpp;
 static struct fu_state gesture;
 static struct fu_view displayed;
 
@@ -83,7 +84,7 @@ static int compose_flip(void *self, const void *region, int flags)
     struct fu_view v;
     void *pixels=NULL;
     unsigned int format=0;
-    int w=0,h=0,pitch=0,bpp=0,painted=0,result;
+    int w=0,h=0,pitch=0,bpp=0,painted=0,compatible=0,result;
     flip_fn next;
     full_ui_read_view(&v);
     pthread_mutex_lock(&ui_lock);
@@ -94,29 +95,38 @@ static int compose_flip(void *self, const void *region, int flags)
          * layout from screen colours or confuse RGB555 with RGB565. */
         if (format==0x00200801u) bpp=16;
         if (format==0x00400c03u || format==0x00418c04u) bpp=32;
+        compatible=bpp && w==1280 && h==800;
         if (modal()) v.mode=0;
         if (gesture.owned && gesture.mode!=v.mode) gesture.cancelled=1;
         if (gesture.mode!=v.mode) gesture.dropdown=0;
         v.dropdown=gesture.dropdown;
         v.pressed=gesture.owned && !gesture.cancelled ? gesture.anchor : 0;
-        if (bpp && w==1280 && h==800 &&
+        if (compatible &&
             !((lock_fn)SLOT(self,UI_SURF_LOCK_OFF))(self,2,&pixels,&pitch)) {
             painted=fu_paint(pixels,w,h,pitch,bpp,&v);
             ((unlock_fn)SLOT(self,UI_SURF_UNLOCK_OFF))(self);
         }
     }
-    if (painted && !ready) pointsrc_log("full ui: presenting navigation and deck controls (%d bpp)",bpp);
-    ready=painted;
-    displayed=v;
-    if (!painted) displayed.mode=0; /* invisible controls never consume touch */
-    pthread_mutex_unlock(&ui_lock);
-    result=next(self,region,flags);
-    if (result) {
-        pthread_mutex_lock(&ui_lock);
+    /* A transient Lock/Flip error does not erase the already painted primary.
+     * Dropping ready on every such error made visible controls untappable and
+     * flooded the log with a new "presenting" line on every recovered frame.
+     * Keep the last painted hit map only while geometry and native screen agree. */
+    if (painted && v.mode>0) {
+        if (announced_bpp!=bpp) {
+            pointsrc_log("full ui: presenting navigation and deck controls (%d bpp)",bpp);
+            announced_bpp=bpp;
+        }
+        ready=1;
+        displayed=v;
+    } else if (!compatible || !v.mode || displayed.mode!=v.mode ||
+               displayed.deck_visible!=v.deck_visible) {
         ready=0;
         displayed.mode=0;
-        pthread_mutex_unlock(&ui_lock);
     }
+    pthread_mutex_unlock(&ui_lock);
+    result=next(self,region,flags);
+    /* Preserve the native return code, but don't treat it as an instruction
+     * to discard controls already drawn into the persistent primary surface. */
     return result;
 }
 
@@ -139,15 +149,17 @@ int full_ui_attach(void *primary)
 
 int full_ui_touch(int down, int x, int y)
 {
-    struct fu_view v;
+    struct fu_view v,live;
     struct fu_action a;
     struct timespec ts;
     int take,dropdown_changed;
     if (!started) return 0;
+    full_ui_read_view(&live);
     clock_gettime(CLOCK_MONOTONIC,&ts);
     pthread_mutex_lock(&ui_lock);
     v=displayed;
-    if (!ready || modal()) v.mode=0;
+    if (!ready || modal() || live.mode!=v.mode ||
+        live.deck_visible!=v.deck_visible) v.mode=0;
     dropdown_changed=gesture.dropdown;
     take=fu_feed(&gesture,&v,down,x,y,(unsigned long long)ts.tv_sec*1000+ts.tv_nsec/1000000,&a);
     dropdown_changed=dropdown_changed!=gesture.dropdown;

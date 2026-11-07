@@ -17,7 +17,7 @@ Sources: Pioneer's [official MIDI list](https://downloads.support.alphatheta.com
 provenance are in [rbp_abi.h](../scripts/shims/rbp_abi.h).
 
 All MIDI bytes below are hexadecimal. Binding counts are decimal: 190 unique
-note-table addresses and 14 unique absolute-control addresses, with additional
+note-table addresses and 15 unique absolute-control addresses, with additional
 specialized handlers. No duplicate addresses were found in the binding tables.
 
 ## Inputs
@@ -43,6 +43,7 @@ specialized handlers. No duplicate addresses were found in the binding tables.
 | Auxiliary CALL / SHIFT+CALL | 92/93 51/53 and 61/62 | Held Search backward/forward / previous/next Track Search |
 | SHIFT | 90..93 3f | Tracks physical-side SHIFT across deck-layer switches |
 | Trim / EQ / fader1/2 | B0/B1 04/07/0b/0f/13 plus corresponding CC+20 LSB | 14-bit assembly to native 10-bit mixer positions |
+| Channel4 fader | B3 13/33 | Toolkit shared sampler VOL0–100, synchronized with its touchscreen slider; active even with SAMPLES closed; requires updated shim and bundle; Pi verification pending |
 | Color amount1/2 | B6 17/37 and18/38 | Individual channel Color FX amount |
 | Channel3 FILTER | B6 19/39 | Color FX parameter on both RX3 channels (e.g. Filter resonance); individual1/2 amounts remain independent |
 | Channel CUE1/2 | 90/91 54 | PFL toggle, duplicate ON suppressed |

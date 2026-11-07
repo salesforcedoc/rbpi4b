@@ -57,6 +57,16 @@ without sending synthetic native SHIFT events. Held sample pads receive releases
 on controller disconnect. No bank is reassigned permanently. Their LEDs are written
 through native LED state, which the existing FLX6 LED bridge reads.
 
+The FLX6 channel4 volume fader controls the shared sampler VOL from0 to100,
+using the same level as the SAMPLES touchscreen slider. It works with the
+panel closed too, including for playing loops/latches. Both input paths update
+the same value: moving the physical fader takes over immediately, without
+pickup. Startup/reconnect position reports can also apply its physical level.
+Deploy the matching `knobshim.so` and Toolkit bundle for this mapping; an older
+bundle without the callback leaves the fader inactive. Channel4 trim, EQ,
+Color FX and PFL are not sampler controls. The fader mapping has host tests and
+ARM build checks; its physical response still needs Pi verification.
+
 The stock RX3's Telnet and USB gadget network setup is not installed on the Pi:
 use its existing SSH access. Its player stdout/stderr already goes to the host
 rbp log; runtime hook diagnostics and a snapshot command are available below.
@@ -210,6 +220,25 @@ the chroot sample directory. This port loads the chosen bank at player startup;
 changing banks or replacing a USB-backed bank requires a player restart. Keeping
 the bank on the Pi avoids depending on USB mount timing. No automatic mid-set
 bank switching or USB-content execution is introduced.
+
+### Samples load and light the pads but are silent
+
+The pinned upstream Samples configuration publisher omits per-pad gain, mode
+and SHIFT-silence settings. Without this port's build adaptation, voices load
+and advance normally but inherit zero gain. Raising the panel volume cannot
+make those voices audible. `build-rx3-toolkit.py` now publishes all parsed bank
+settings, including the default gain of100 when no `padN.gain` is specified.
+Explicitly saved zero gains remain valid mutes.
+
+For a bundle built before this correction, rebuild with
+`python3 scripts/build-rx3-toolkit.py`, redeploy the complete
+`work/rx3-toolkit-pi/` directory while `rblive4` is stopped, then start the
+service. No sample conversion or main-chroot rebuild is needed. The build
+keeps the pinned upstream tracked source unchanged and includes the adapted
+Samples source in the bundle's `source/` directory. Host regression tests cover
+publication of gains, all four modes and SHIFT-silence while preserving a live
+touchscreen volume adjustment. The user confirmed audible sample playback on
+the Pi after deploying this correction.
 
 ## Now Playing and diagnostics
 

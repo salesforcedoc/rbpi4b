@@ -35,6 +35,7 @@ has been reported. The mapping inventory records the current verification state.
 | SHIFT+PLAY | Return to main cue and play once native cue buffering completes |
 | SHIFT+PFL, physical3/1/2/4 | Dub Echo / Sweep / Noise / Filter on both RX3 channels |
 | Channel3 FILTER | Shared Sound Color FX parameter (e.g. resonance); individual1/2 amount knobs remain mapped |
+| Channel4 volume fader | Shared Toolkit sampler VOL0–100; updates the SAMPLES slider and works with the panel closed; needs matching shim/bundle, physical verification pending |
 | MEMORY / SHIFT+MEMORY | Native memory save/delete |
 | CALL left/right / SHIFT+CALL | Previous/next memory cue or loop / halve/double an active loop |
 | SHIFT+LOOP IN/OUT | Native loop boundary adjustment |

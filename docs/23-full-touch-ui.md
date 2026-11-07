@@ -25,10 +25,10 @@ appear on the performance screen and its INFO/countdown views. Their blue state
 comes from the native player, including changes made with the controller.
 
 Use the same button for both edges of a tap. The deck switches now have larger
-touch targets (logical y568–637 with a3px side margin), separate from their
+touch targets (logical y568–637 with a 3px side margin), separate from their
 painted rectangles. Small excursions during a deck tap are tolerated; lifting
 on another control or outside the target cancels it. Native deck key edges are
-separated by80ms, matching the reference UI. Navigation still cancels a slide-off;
+separated by 80ms, matching the reference UI. Navigation still cancels a slide-off;
 a screen change or touch-device disconnect also cancels pending taps. Existing
 shim panels take priority. The native touch-calibration screen is left alone.
 The toolkit's KEY, STEMS and SAMPLES panels keep their own touch handling.
@@ -37,6 +37,8 @@ The old swipe menu remains available: begin a downward swipe in the top centre
 **just below the persistent buttons** (logical rows 42–55 on the deck screen,
 45–55 on other screens). Its gear still opens the Pi-specific mixer/USB/VNC
 settings panel. The persistent gear opens the native RX3 menu instead.
+Back and the lightning-bolt SHORTCUT button belong to the persistent bar; they
+are not entries in the old swipe menu.
 
 ## Build, deploy and enable
 
@@ -84,6 +86,15 @@ Actions log the key and channel. The launcher must be updated alongside the
 shim so the new flag reaches the player; older `rb.conf` files are supported.
 No toolkit rebuild or new preload entry is needed.
 
+If the persistent bar and deck switches are visible but do not respond, while
+the old swipe menu works, update `fbshim.so`. Earlier builds discarded their
+touch readiness after transient DirectFB Flip or surface-lock failures and
+could repeatedly log `presenting navigation and deck controls`. The runtime
+now retains the last painted controls across those failures, while cancelling
+taps when the native screen changes or a panel opens. The presentation message
+is logged once per pixel-format change; tapping a control should log its key
+and channel without requiring a swipe first.
+
 For the accompanying FLX6 jog/Color parameter/button corrections, also build
 and deploy `knobshim.so` alongside `fbshim.so` and the launcher. The FLX6 now
 defaults to `RB_JOG_DIVISOR=3`; set it explicitly in `rb.local.conf` if desired.
@@ -107,7 +118,8 @@ is moved clear, only after checking all original firmware 1.20 layout words.
 `test_full_ui` covers geometry, key/channel mappings, holds, cancellation,
 dropdown dismissal, layout guards and bounded painting at both pixel depths.
 `test_full_ui_runtime` uses a mock DirectFB primary to exercise the production
-Flip hook, input dispatch, modal priority, failed locks and unsupported formats.
+Flip hook, input dispatch, modal priority, failed locks and Flips, screen changes
+before repaint, recovery logging and unsupported formats.
 The flag offsets and primary Flip call were checked against the extracted
 firmware disassembly. These checks do not execute the player.
 

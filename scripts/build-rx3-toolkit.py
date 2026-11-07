@@ -99,6 +99,21 @@ static int is_player_process(void)
     return text.replace(expected, replacement, 1)
 
 
+def pi_samples_feature(text):
+    """Publish all parsed bank settings; the pinned upstream omits gain/mode."""
+    original = '''    for (unsigned int pad = 0; pad < SAMPLES_PAD_COUNT; pad++)
+        __atomic_store_n(&samples_config.colour[pad], wanted->colour[pad], __ATOMIC_SEQ_CST);'''
+    replacement = '''    for (unsigned int pad = 0; pad < SAMPLES_PAD_COUNT; pad++) {
+        __atomic_store_n(&samples_config.colour[pad], wanted->colour[pad], __ATOMIC_SEQ_CST);
+        __atomic_store_n(&samples_config.mode[pad], wanted->mode[pad], __ATOMIC_SEQ_CST);
+        __atomic_store_n(&samples_config.gain[pad], wanted->gain[pad], __ATOMIC_SEQ_CST);
+    }
+    __atomic_store_n(&samples_config.shift_silence, wanted->shift_silence, __ATOMIC_SEQ_CST);'''
+    if text.count(original) != 1:
+        raise ValueError('upstream Samples config publication changed; adapter not applied')
+    return text.replace(original, replacement, 1)
+
+
 def build(source, output, stock, compiler, rootfs):
     source, output = source.resolve(), output.resolve()
     if run('git', '-C', str(source), 'rev-parse', 'HEAD') != runtime.REVISION:
@@ -150,6 +165,22 @@ def build(source, output, stock, compiler, rootfs):
         '    int consumed = rx3_pi_pad_control(key, operation, channel);', 1)
     adapted_input = source / 'build/rx3_input.pi.c'
     runtime.atomic_write(adapted_input, input_text.encode())
+    # The pinned Samples loader parses gains/modes but does not publish them:
+    # every triggered voice therefore receives a zero gain and plays silently.
+    samples_feature = modules / 'samples/rx3_samples_feature.h'
+    adapted_samples_feature = source / 'build/rx3_samples_feature.pi.h'
+    runtime.atomic_write(adapted_samples_feature,
+                         pi_samples_feature(samples_feature.read_text()).encode())
+    samples_module = modules / 'samples/rx3_samples_module.c'
+    samples_text = samples_module.read_text()
+    if samples_text.count('"rx3_samples_feature.h"') != 1:
+        raise ValueError('upstream Samples module changed; adapter not applied')
+    adapted_samples = source / 'build/rx3_samples_module.pi.c'
+    runtime.atomic_write(adapted_samples, samples_text.replace(
+        '"rx3_samples_feature.h"',
+        '"rx3_samples_feature.pi.h"\n#include "pi_samples_volume.inc"').encode())
+    units.remove('mod/modules/samples/rx3_samples_module.c')
+    units.append(str(adapted_samples))
     # The stock toolkit points all tracks at one directory. On the Pi, derive
     # each track's own USB mount path, with an explicit local-directory override.
     stems_source = modules / 'stems/rx3_stems_module.c'
@@ -177,6 +208,7 @@ static int stem_path_for_track(const void *track_info, char *output, size_t capa
     run(compiler, *flags.split(), '-shared', '-nostdlib', '-Wl,--hash-style=sysv',
         '-Wl,--build-id=none', '-I' + str(modules / 'core'), '-I' + str(modules / 'core/services'),
         '-I' + str(modules / 'now-playing'), '-I' + str(modules / 'stems'),
+        '-I' + str(modules / 'samples'),
         '-I' + str(ROOT / 'scripts/toolkit'), '-o', str(library), str(adapted),
         *units, cwd=source)
     # GCC introduces signed division helpers in addition to Clang's imports.
@@ -243,7 +275,8 @@ static int stem_path_for_track(const void *track_info, char *output, size_t capa
     runtime.atomic_write(output / 'source/rx3_core_hook.pi.c', adapted.read_bytes())
     runtime.atomic_write(output / 'source/pi_process.h',
                          (ROOT / 'scripts/toolkit/pi_process.h').read_bytes())
-    for path in (adapted_module, adapted_feature, composition, adapted_input, adapted_stems):
+    for path in (adapted_module, adapted_feature, composition, adapted_input, adapted_stems,
+                 adapted_samples, adapted_samples_feature):
         runtime.atomic_write(output / 'source' / path.name, path.read_bytes())
     runtime.atomic_write(output / 'source/pi_network.h',
                          (ROOT / 'scripts/toolkit/pi_network.h').read_bytes())
@@ -252,6 +285,8 @@ static int stem_path_for_track(const void *track_info, char *output, size_t capa
                          (ROOT / 'scripts/toolkit/pi_input.inc').read_bytes())
     runtime.atomic_write(output / 'source/pi_stems.h',
                          (ROOT / 'scripts/toolkit/pi_stems.h').read_bytes())
+    runtime.atomic_write(output / 'source/pi_samples_volume.inc',
+                         (ROOT / 'scripts/toolkit/pi_samples_volume.inc').read_bytes())
     manifest = dict(schema=2, modules=list(names), revision=runtime.REVISION, base_sha256=hashes,
                     patches=patchsets, hook_sites=hook_sites, files=files)
     runtime.atomic_write(output / 'manifest.json', (json.dumps(manifest, indent=2) + '\n').encode())

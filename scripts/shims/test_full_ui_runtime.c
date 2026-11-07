@@ -10,7 +10,7 @@ static void *iface[17];
 static unsigned char pixels[1280*800*4];
 static struct fu_view firmware={.mode=1,.deck_visible=1};
 static unsigned int format=0x00200801;
-static int locked,lock_fail,flip_result,popup,flips,sends;
+static int locked,lock_fail,flip_result,popup,flips,sends,presentations;
 static int last_key,last_op,last_ch;
 static const void *region_arg;
 static int flags_arg;
@@ -21,7 +21,8 @@ int side_any_open(void) { return 0; }
 int settings_is_open(void) { return 0; }
 int fxlist_is_open(void) { return 0; }
 int is_rbp_process(void) { return 0; }
-void pointsrc_log(const char *fmt,...) { (void)fmt; }
+void pointsrc_log(const char *fmt,...)
+{ if (strstr(fmt,"presenting navigation")) presentations++; }
 void keylog_from(const char *s) { (void)s; }
 void send_rx_key(int key,int op,int ch,long param)
 { last_key=key;last_op=op;last_ch=ch;sends++;(void)param; }
@@ -89,10 +90,39 @@ int main(void)
     assert(full_ui_touch(1,200,20));full_ui_reset();
     assert(!full_ui_touch(0,200,20));assert(sends==4); /* disconnect releases no key */
     flip_result=-17;frame();
-    assert(!full_ui_touch(1,200,20));assert(!full_ui_touch(0,200,20));
+    tap(FU_SOURCE);assert(sends==6); /* painted controls survive native Flip errors */
     flip_result=0;frame();
-    tap(FU_SOURCE);assert(sends==6);
+    tap(FU_SOURCE);assert(sends==8);
     assert(flips==11);
+    {
+        int logged=presentations, sent=sends;
+        struct fu_rect r;
+        fu_rect(1,0,FU_SLIP1,&r);
+        assert(full_ui_touch(1,r.x+10,r.y+10));
+        lock_fail=1;frame(); /* skipped repaint during an owned deck tap */
+        assert(full_ui_touch(0,r.x+10,r.y+10));
+        assert(sends==sent+2 && last_key==K_SLIP && last_ch==1);
+        tap(FU_MT2);assert(sends==sent+4 && last_key==K_MT && last_ch==2);
+        lock_fail=0;flip_result=-17;
+        for(int i=0;i<20;i++) frame();
+        tap(FU_SHORTCUT);assert(sends==sent+6 && last_key==K_SHORTCUT);
+        assert(presentations==logged); /* no per-frame recovery log flood */
+        flip_result=0;
+        /* Native screen changes invalidate a touch even BEFORE the next Flip. */
+        assert(full_ui_touch(1,r.x+10,r.y+10));
+        firmware.mode=3;firmware.deck_visible=0;
+        assert(full_ui_touch(0,r.x+10,r.y+10));
+        assert(sends==sent+6);
+        lock_fail=1;frame();
+        assert(!full_ui_touch(1,350,20));assert(!full_ui_touch(0,350,20));
+        lock_fail=0;frame();
+        tap(FU_SOURCE);assert(sends==sent+8);
+        /* Opening a modal without a Flip also cancels captured navigation. */
+        assert(full_ui_touch(1,350,20));
+        popup=1;
+        assert(full_ui_touch(0,350,20));assert(sends==sent+8);
+        popup=0;
+    }
     puts("full ui runtime: frame hook, formats, modal gating, input and recovery passed");
     return 0;
 }

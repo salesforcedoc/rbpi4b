@@ -84,6 +84,7 @@ static volatile int fx_led_slot;
 /* Optional toolkit bridge. Null preserves the standalone map. */
 static int (*toolkit_control)(unsigned int, unsigned int, unsigned int);
 static int (*toolkit_pad)(unsigned int, unsigned int, unsigned int, unsigned int);
+static int (*toolkit_samples_volume)(unsigned int);
 static unsigned char toolkit_pad_down[2][8], toolkit_pad_mode[2][8];
 /* SHIFT belongs to a physical side, including when its deck layer changes. */
 static int shift_down[2];
@@ -677,7 +678,12 @@ static void flx6_cc_abs(int ch, int cc, int val)
                g_fader[a->sch] = v;
                g_fader_seen[a->sch] = 1;
           }
-          if (ch == CH_MIX && a->cc == CC_CFX_PARAM) {
+          if (ch == CH_AUX2 && a->cc == CC_FADER) {
+               /* One shared sampler bank; keep its touchscreen VOL in sync.
+                * No native RX3 channel-4 mixer event is sent. */
+               if (toolkit_samples_volume)
+                    toolkit_samples_volume((unsigned int)(v * 100 + 511) / 1023u);
+          } else if (ch == CH_MIX && a->cc == CC_CFX_PARAM) {
                me_set_color_parameter(f);
           } else
                send_rx_key_f(a->key, OP_VALUE, a->sch, v, f);
@@ -815,6 +821,8 @@ static void flx6_build(void)
           dlsym(RTLD_DEFAULT, "rx3_pi_control");
      toolkit_pad = (int (*)(unsigned int, unsigned int, unsigned int, unsigned int))
           dlsym(RTLD_DEFAULT, "rx3_pi_pad");
+     toolkit_samples_volume = (int (*)(unsigned int))
+          dlsym(RTLD_DEFAULT, "rx3_pi_samples_volume");
      memset(toolkit_pad_mode, 0, sizeof toolkit_pad_mode);
      memset(toolkit_pad_down, 0, sizeof toolkit_pad_down);
      note_first = note_map_n;
@@ -878,6 +886,7 @@ static void flx6_build(void)
      /* Physical channel 3 FILTER is the shared CFX parameter (e.g. filter
       * resonance), using MixerEngine's native per-input setter, not K_COLOR. */
      add_abs(CH_MIX, CC_CFX_PARAM, 0, 0);
+     add_abs(CH_AUX2, CC_FADER, 0, 0); /* FLX6 channel 4 -> Toolkit sampler VOL. */
      add_abs(CH_MIX, CC_XFADER, K_XFADER, CH_GLOBAL);
      /* Measured with rbp stopped: the hardware MIX knob and MASTER CUE
       * already mix USB pairs 0/1 and 2/3. Do not also mix them in rbp. */

@@ -19,6 +19,128 @@ spec.loader.exec_module(toolkit)
 
 
 class ToolkitTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('cc'), 'requires host compiler')
+    def test_flx6_sampler_fader_decoding_and_shared_panel_volume(self):
+        mapper = (HERE.parent / 'shims/map_flx6.c').read_text()
+        decoder = mapper[mapper.index('static void flx6_cc_abs('):
+                         mapper.index('static void flx6_browse(')]
+        source = self.root / 'sampler-fader.c'
+        source.write_text(r'''#include <assert.h>
+#define SAMPLES_VOLUME_MAX 100u
+static unsigned int samples_callbacks_enabled, samples_volume_touched, samples_volume = 50;
+#include "pi_samples_volume.inc"
+enum { CH_AUX2 = 3, CH_MIX = 6, CC_FADER = 0x13, CC_CFX_PARAM = 0x19,
+       K_FADER = 10, OP_VALUE = 1 };
+struct abs_ctrl { int rch, cc, key, sch, last; };
+static struct abs_ctrl abs_map[] = {{3,0x13,0,0,-1}, {0,0x13,K_FADER,1,-1}, {1,0x13,K_FADER,2,-1}};
+static int abs_map_n = 3, verbose, g_fader[3], g_fader_seen[3], native_calls, sampler_calls;
+struct value14 { int have_hi, pos; };
+static struct value14 mixer_values[3];
+static int capture(unsigned int value) { sampler_calls++; return rx3_pi_samples_volume(value); }
+static int (*toolkit_samples_volume)(unsigned int) = capture;
+#define klog(...) ((void)0)
+static void me_set_color_parameter(float value) { (void)value; assert(0); }
+static void send_rx_key_f(int key, int op, int ch, int value, float norm) {
+    (void)key; (void)op; (void)ch; (void)value; (void)norm; native_calls++;
+}
+''' + decoder + r'''
+int main(void) {
+    /* Disabled Samples ignores MIDI without changing the panel/bank level. */
+    assert(!rx3_pi_samples_volume(0));
+    assert(samples_volume == 50 && !samples_volume_touched);
+    samples_callbacks_enabled = 1;
+    flx6_cc_abs(3, 0x33, 127); /* LSB alone must not move volume. */
+    assert(!sampler_calls && samples_volume == 50);
+    flx6_cc_abs(3, 0x13, 0);
+    flx6_cc_abs(3, 0x33, 0);
+    assert(samples_volume == 0 && samples_volume_touched && sampler_calls == 1);
+    flx6_cc_abs(3, 0x33, 0);
+    assert(sampler_calls == 1);
+    flx6_cc_abs(3, 0x13, 64);
+    flx6_cc_abs(3, 0x33, 0);
+    assert(samples_volume == 50);
+    flx6_cc_abs(3, 0x13, 127);
+    flx6_cc_abs(3, 0x33, 127);
+    assert(samples_volume == 100 && !native_calls);
+    /* Deck 1/2 continue to reach the native mixer, never sampler volume. */
+    for (int ch = 0; ch < 2; ch++) {
+        flx6_cc_abs(ch, 0x13, 64);
+        flx6_cc_abs(ch, 0x33, 0);
+        assert(g_fader_seen[ch + 1] && g_fader[ch + 1] == 512);
+    }
+    assert(native_calls == 2 && samples_volume == 100);
+    flx6_cc_abs(2, 0x13, 0);
+    flx6_cc_abs(2, 0x33, 0);
+    assert(samples_volume == 100);
+    toolkit_samples_volume = 0; /* Older/absent Toolkit is safe. */
+    flx6_cc_abs(3, 0x13, 0);
+    flx6_cc_abs(3, 0x33, 0);
+    assert(native_calls == 2 && samples_volume == 100);
+    assert(rx3_pi_samples_volume(999) && samples_volume == 100);
+    return 0;
+}
+''')
+        executable = self.root / 'sampler-fader'
+        subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', '-I' + str(HERE.parent / 'toolkit'),
+                        str(source), '-o', str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+
+    @unittest.skipUnless(shutil.which('cc'), 'requires host compiler')
+    def test_samples_publish_gain_mode_shift_and_preserve_live_volume(self):
+        builder_spec = importlib.util.spec_from_file_location('toolkit_builder', HERE.parent / 'build-rx3-toolkit.py')
+        builder = importlib.util.module_from_spec(builder_spec)
+        builder_spec.loader.exec_module(builder)
+        upstream = HERE.parents[1] / 'work/rx3-toolkit/mod/modules/samples'
+        if not upstream.is_dir():
+            self.skipTest('requires pinned Toolkit checkout')
+        adapted = builder.pi_samples_feature((upstream / 'rx3_samples_feature.h').read_text())
+        publication = adapted[adapted.index('static void samples_publish_config('):
+                              adapted.index('static void samples_read_config(')]
+        source = self.root / 'samples-publication.c'
+        source.write_text('''#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include "rx3_samples_decl.h"
+#include "rx3_samples_config.h"
+static struct samples_config samples_config;
+static unsigned int samples_volume, samples_volume_touched;
+''' + publication + r'''
+int main(void) {
+    struct samples_config wanted;
+    const char bank[] = "version=1\nvolume_default=50\npad1.mode=0\npad2.mode=0\n";
+    assert(samples_parse_config(bank, sizeof bank - 1, &wanted));
+    samples_publish_config(&wanted);
+    assert(samples_volume == 50);
+    for (unsigned int pad = 0; pad < SAMPLES_PAD_COUNT; pad++) {
+        assert(samples_config.gain[pad] == 100);
+        assert(samples_config.mode[pad] == SAMPLE_MODE_ONCE);
+        wanted.gain[pad] = pad ? 75 + pad : 0; /* Explicit mute stays valid. */
+        wanted.mode[pad] = pad % 4;
+        wanted.colour[pad] = 0x123400 + pad;
+    }
+    wanted.shift_silence = 1;
+    samples_volume_touched = 1;
+    samples_volume = 86;
+    samples_publish_config(&wanted);
+    assert(samples_volume == 86);
+    assert(samples_config.volume == 50);
+    assert(samples_config.shift_silence == 1);
+    for (unsigned int pad = 0; pad < SAMPLES_PAD_COUNT; pad++) {
+        assert(samples_config.gain[pad] == wanted.gain[pad]);
+        assert(samples_config.mode[pad] == wanted.mode[pad]);
+        assert(samples_config.colour[pad] == wanted.colour[pad]);
+    }
+    return 0;
+}
+''')
+        executable = self.root / 'samples-publication'
+        subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', '-I' + str(upstream),
+                        str(source), '-o', str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+        with self.assertRaisesRegex(ValueError, 'publication changed'):
+            builder.pi_samples_feature('unexpected upstream source')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
